@@ -4,7 +4,7 @@ import {
   Loader2,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { HelixMarkdown } from "@/components/Helix/helix-markdown";
 import { isElectron } from "@/lib/electron-bridge";
 import { resolveBackendSids } from "@/lib/session-map";
@@ -14,8 +14,8 @@ import {
   extractCommandSnippet,
 } from "@/lib/tool-display-utils";
 import { classifyTool } from "@/lib/tool-merge";
-import { cn } from "@/lib/utils";
 import { useElapsedSeconds } from "@/lib/use-elapsed";
+import { cn } from "@/lib/utils";
 import { useHelixStore } from "@/stores/helix-store";
 
 interface Delegation {
@@ -122,6 +122,21 @@ export function AgentWorkPanel() {
     : undefined;
   const isRunning = live?.status === "running";
 
+  // 把 agent?.id 抠成原始值：useCallback 依赖数组只 key 到这个 id，避免
+  // agent 对象引用随 sub-agent 状态事件频繁更换 → 回调重建 → 定时器抖动。
+  const agentId = agent?.id;
+
+  // 最新 agent / subAgents 对象的 ref 镜像。下面的 load / pollTimeline 依赖
+  // 数组故意只 key 到原始值 id（见各自注释），回调体里又需要读到最新的对象
+  // 字段；走 ref 就两者兼得——回调不因对象引用换新而重建，但执行时拿到的
+  // 永远是最新值。useEffect 在每次 render 后同步，先渲染后跑轮询，时序安全。
+  const agentRef = useRef(agent);
+  const subAgentsRef = useRef(subAgents);
+  useEffect(() => {
+    agentRef.current = agent;
+    subAgentsRef.current = subAgents;
+  });
+
   // 派生数据提前到 early return 之前：这些是纯计算（无 hook），提前不影响语义，
   // 且让 useElapsedSeconds 能在两个 early return 之前无条件调用（hooks 数量
   // 必须每条渲染路径一致，否则 "Rendered fewer hooks than expected"）。
@@ -172,9 +187,13 @@ export function AgentWorkPanel() {
 
   const load = useCallback(
     async (_silent = false) => {
-      if (!isElectron() || !agent) return;
+      // 读 ref 里的最新 agent 对象（依赖数组 key 到 id，避免对象引用换新导致
+      // 定时器 effect 反复重建）。判空 + id 一致性校验：极端时序下 ref 可能
+      // 还停在上一帧的 agent，此时直接跳过本轮，等下一次轮询自然纠正。
+      const currentAgent = agentRef.current;
+      if (!isElectron() || !currentAgent || currentAgent.id !== agentId) return;
       try {
-        const api = (window as any).electron as any;
+        const api = window.electron;
         const sids = await resolveBackendSids(
           useHelixStore.getState().currentSessionId,
         );
@@ -186,7 +205,7 @@ export function AgentWorkPanel() {
         if (res?.ok) {
           const found =
             ((res.delegations || []) as Delegation[]).find(
-              (d) => d.id === agent.id,
+              (d) => d.id === currentAgent.id,
             ) || null;
           setDelegation(found);
         }
@@ -194,9 +213,10 @@ export function AgentWorkPanel() {
         /* silent */
       }
     },
-    // key 用 agent.id（原始值）而非 agent 对象引用，避免 sub-agent 状态刷新
-    // 导致 agent 对象换新引用 → load/pollTimeline 重建 → effect 反复重建定时器
-    [agent?.id],
+    // key 用 agentId（原始值）而非 agent 对象引用，避免 sub-agent 状态刷新
+    // 导致 agent 对象换新引用 → load/pollTimeline 重建 → effect 反复重建定时器。
+    // 回调体内通过 agentRef 读最新对象，陈旧闭包问题不存在。
+    [agentId],
   );
 
   useEffect(() => {
@@ -207,13 +227,16 @@ export function AgentWorkPanel() {
 
   const pollTimeline = useCallback(
     async (_silent = true) => {
-      if (!isElectron() || !agent) return;
+      // 同上：agent / subAgents 都读 ref 里的最新对象；用 agentId 做一致性校验，
+      // 防御 ref 同步的极端时序。
+      const currentAgent = agentRef.current;
+      if (!isElectron() || !currentAgent || currentAgent.id !== agentId) return;
       try {
-        const api = (window as any).electron as any;
+        const api = window.electron;
         const store = useHelixStore.getState();
         const cardAgentId =
           live?.agentId ||
-          subAgents.find((a) => a.id === agent.id)?.agentId;
+          subAgentsRef.current.find((a) => a.id === currentAgent.id)?.agentId;
         if (cardAgentId) {
           const res = await api?.delegations?.timeline?.(
             cardAgentId,
@@ -246,7 +269,7 @@ export function AgentWorkPanel() {
           const mapRes = await api?.subagentMap?.list?.(sid);
           const mapped: { agent_id: string } | undefined =
             ((mapRes?.agents || []) as { tool_call_id: string; agent_id: string }[]).find(
-              (m) => m.tool_call_id === agent.id,
+              (m) => m.tool_call_id === currentAgent.id,
             );
           if (!mapped?.agent_id) continue;
           const workDir = store.activeSessionWorkDir || store.selectedWorkDir || undefined;
@@ -266,12 +289,15 @@ export function AgentWorkPanel() {
         /* silent */
       }
     },
-    // 同上：subAgents 数组随 sub-agent 事件频繁换引用，key 到原始值避免定时器反复重建
-    [agent?.id, live?.agentId, delegation?.agent_id],
+    // 同上：subAgents 数组随 sub-agent 事件频繁换引用，key 到原始值避免定时器
+    // 反复重建；回调体内经 subAgentsRef 拿最新数组，不会读到陈旧数据。
+    [agentId, live?.agentId, delegation?.agent_id],
   );
 
   useEffect(() => {
-    if (!isElectron() || !agent) return;
+    // 读 ref 判空（effect 本身只随 pollTimeline/isRunning 重跑，但判空需要
+    // 最新 agent 对象）。与原 `!agent` 判空等价。
+    if (!isElectron() || !agentRef.current) return;
     setTimeline([]);
     setTimelineFound(false);
     pollTimeline(false);

@@ -28,6 +28,7 @@
 //! cwd + session-file mapping) so the respawn lands in the same project.
 
 use base64::Engine;
+use sha2::{Digest, Sha256};
 use crate::gateway::emit_helix_event;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
@@ -416,15 +417,15 @@ pub struct PiInstance {
     /// 前端才好把工具计时起点从「卡片出现」挪到「真正开跑」。
     /// 嵌套调用（codemode `ctx.executeTool`，带 parentToolCallId）不更新这里。
     preparing_tool: Mutex<Option<String>>,
-    /// `write` 工具**覆盖前**的文件内容：toolCallId → 旧内容（`Some(None)` = 当时
-    /// 文件不存在）。在 tool_execution_start（文件还没被写）抓取。
+    /// `write` 工具**覆盖前**的文件状态：toolCallId → 旧状态。在
+    /// tool_execution_start（文件还没被写）抓取。
     ///
     /// 为什么需要：pi 的 write 结果不带 details（源码实测 `details:void 0`），
     /// 网关只能拿 args 合成 patch —— 而"覆盖已有文件"用 `@@ -0,0 +1,N @@` 是假的，
     /// 前端按它反推撤销会按行号切坏文件。有了旧内容就能算出**真 diff**，撤销
-    /// 也随之安全；老内容读不到（非文本/权限/相对路径无法解析）时不写这个 key，
-    /// 前端按"撤销不安全"处理。
-    exec_file_prior: Mutex<HashMap<String, Option<String>>>,
+    /// 也随之安全；只有 `Text` 能逐行 diff，`Bytes` 有字节指纹能判断"原样重写"
+    /// （不登记），`Unreadable` 什么都判断不了 → 前端按"撤销不安全"处理。
+    exec_file_prior: Mutex<HashMap<String, PriorFile>>,
     /// Model context window (get_state's model.contextWindow) for usage ring.
     context_window: Mutex<Option<i64>>,
     /// 这个实例**当前实际在用的**模型 id / 供应商（get_state 的 model.id /
@@ -1079,7 +1080,10 @@ impl PiInstance {
 /// `restore FAILED … no session file` log line and the wrapped
 /// `session restore task failed: no session file for …` message both contain
 /// "no session file" and must classify as `session_not_found`, not as a
-/// generic restore failure.
+/// generic restore failure. The `switch_session` form is the one that actually
+/// occurs (`pi request switch_session failed: …` — an RPC method name with an
+/// underscore); matching only "switch session" silently downgraded every
+/// killed-by-restart restore failure to `internal`.
 fn classify_session_error(msg: &str) -> &'static str {
     let m = msg.to_lowercase();
     if m.contains("no session file")
@@ -1095,6 +1099,7 @@ fn classify_session_error(msg: &str) -> &'static str {
         || m.contains("parse")
         || m.contains("decode")
         || m.contains("restore")
+        || m.contains("switch_session")
         || m.contains("switch session")
         || m.contains("get_state")
         || m.contains("timeout")
@@ -3817,12 +3822,106 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
             }
             Ok(json!({ "ok": true }))
         }
-        // pi's RPC surface has no MCP introspection or hot-reload. Return the
-        // empty/quiet shape the frontend's fetchMcpStatus understands, so the
-        // settings page stops its bounded retry loop and shows "unknown"
-        // (amber) instead of erroring on every poll.
+        // pi's RPC surface has no MCP introspection, but the CLI does:
+        // `pi mcp list --json` connects every enabled server and prints its
+        // state, tools and errors. Run it here so the settings page can show
+        // "this server won't connect, and here's why" instead of a dead stub.
+        // The RPC surface also has no hot-reload: servers load at pi process
+        // start, so the gateway respawn that mcp_config_save already triggers
+        // is the reload. Overall cap 45s — a single server may take up to its
+        // own 60s timeout, so a hung entry must not hang the settings page.
         "mcp.servers.status" | "mcp/servers/status" => {
-            Ok(json!({ "servers": [], "available": false }))
+            let (program, base) = pi_cli_strings();
+            let mut args: Vec<String> = base;
+            args.push("mcp".into());
+            args.push("list".into());
+            args.push("--json".into());
+            let mut cmd = tokio::process::Command::new(&program);
+            cmd.args(&args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            for (k, v) in crate::proxy::proxy_env_pairs() {
+                cmd.env(k, v);
+            }
+            let started = tokio::time::Instant::now();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(45),
+                cmd.output(),
+            )
+            .await
+            {
+                Ok(Ok(output)) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let parsed: Value =
+                        serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
+                    let raw_servers = parsed
+                        .get("servers")
+                        .cloned()
+                        .unwrap_or_else(|| json!([]));
+                    let errors = parsed
+                        .get("errors")
+                        .cloned()
+                        .unwrap_or_else(|| json!([]));
+                    // `tools` is an array of names; surface the count so the
+                    // UI doesn't have to know the wire shape.
+                    let servers = raw_servers
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|s| {
+                                    let mut entry = s.clone();
+                                    let count = entry
+                                        .get("tools")
+                                        .and_then(Value::as_array)
+                                        .map(|t| t.len())
+                                        .unwrap_or(0);
+                                    if let Some(obj) = entry.as_object_mut() {
+                                        obj.insert("toolCount".into(), json!(count));
+                                    }
+                                    entry
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let mut extra = serde_json::Map::new();
+                    extra.insert("elapsedMs".into(), json!(started.elapsed().as_millis()));
+                    if !output.status.success() {
+                        extra.insert(
+                            "exitCode".into(),
+                            json!(output.status.code().unwrap_or(-1)),
+                        );
+                    }
+                    let mut out = serde_json::Map::new();
+                    out.insert("servers".into(), Value::Array(servers));
+                    out.insert("errors".into(), errors);
+                    out.insert("available".into(), json!(true));
+                    for (k, v) in extra {
+                        out.insert(k, v);
+                    }
+                    if !output.status.success() && !stderr.trim().is_empty() {
+                        out.insert("stderr".into(), json!(stderr.trim()));
+                    }
+                    Ok(Value::Object(out))
+                }
+                Ok(Err(e)) => Ok(json!({
+                    "servers": [],
+                    "errors": [],
+                    "available": false,
+                    "error": format!("spawn `pi mcp list` failed: {e}")
+                })),
+                Err(_) => Ok(json!({
+                    "servers": [],
+                    "errors": [],
+                    "available": false,
+                    "timeout": true,
+                    "error": "pi mcp list timed out (45s)"
+                })),
+            }
         }
         "reload.mcp" | "reload/mcp" => {
             // MCP servers load from config.yaml at pi process start; a real
@@ -3869,7 +3968,23 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
         | "get_entries"
         | "get_tree"
         | "get_fork_messages"
-        | "get_last_assistant_text" => {
+        | "get_last_assistant_text"
+        | "set_session_name"
+        | "clear_queue"
+        | "set_auto_retry"
+        | "abort_retry"
+        | "export_html"
+        | "bash"
+        // 忙时注入当前轮：pi 在**正在跑的那一轮**里消费 _steeringMessages /
+        // _followUpMessages（agent-session.js 的 _runAgentPrompt while 循环），
+        // 所以注入不新起一轮、回答仍从当前轮的事件流出来，网关也不用注册
+        // turn_waiter。必须显式列进白名单：走 session/prompt 的话，网关会在
+        // 发 prompt **之前**就注册 waiter 并置 streaming=true，那条 waiter
+        // 属于一个永远不会来的 agent_settled（pi 不为注入单独 settle），
+        // 于是实例被永久判忙、reaper 都不能杀它。
+        | "steer"
+        | "follow_up"
+        | "abort_bash" => {
             let instance = routed_instance(&params, &state).await?;
             // 每轮重放的 per-session 模型切换：先记下本实例现在跑的是哪个
             // 模型，上下文环的分母（context_max）才会跟着切（否则一直按
@@ -5221,12 +5336,25 @@ fn split_lines_for_diff(text: &str) -> Vec<&str> {
     }
 }
 
-/// 读取 `write` 即将覆盖的文件的旧内容（在 tool_execution_start、文件还没被写时调用）。
+/// `write` 覆盖前抓到的文件状态。
 ///
-/// - `Some(Some(text))`：读到了旧内容（必须是 UTF-8 文本、≤2MB）
-/// - `Some(None)`：文件当时确实不存在 → 这是一次新建
-/// - `None`：**无法判定**（相对路径且实例没有 cwd、二进制、权限、太大）——
-///   调用方必须按"旧内容未知"处理，绝不能猜成空文件（猜错会让撤销删/切文件）。
+/// 为什么分四种：只有 `Text` 能算出**真 diff**（可撤销）；`Bytes` 没法逐行 diff，
+/// 但有字节指纹——写完比一比就知道是不是原样重写，能消掉假"整文件新增"；
+/// `Unreadable` 连字节都拿不到，什么都判断不了，只能按"改过了但撤销不安全"处理。
+/// `NewFile` 单独留着是因为它**该**按空文件算 diff（头用 `--- /dev/null`），
+/// 与"读不到"是两回事，不能混。
+enum PriorFile {
+    /// 文件当时不存在 → 这是一次新建。
+    NewFile,
+    /// 读到了 UTF-8 文本、≤2MB → 可以逐行 diff。
+    Text(String),
+    /// 读到了字节但没法逐行 diff（>2MB 或非 UTF-8）。带上字节数与 SHA-256，
+    /// 写完把新内容的指纹比一比就能判断"其实一行没改"。
+    Bytes { len: usize, sha: String },
+    /// 字节都读不到（相对路径且实例无 cwd / 权限 / I/O 错误）。
+    Unreadable,
+}
+
 /// 工具 args 里的文件路径字段：pi 默认 write/edit 用 `path`，个别封装变体
 /// 用 `file_path` / `filePath`。三种都认——字段名对不上时合成 patch 会被
 /// **静默**跳过，前端就再也看不到 +N −n。
@@ -5237,26 +5365,40 @@ fn arg_path(args: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-fn read_prior_file_content(instance: &PiInstance, path: &str) -> Option<Option<String>> {
+/// 读取 `write` 即将覆盖的文件的旧状态（在 tool_execution_start、文件还没被写时调用）。
+///
+/// 任何情况都返回一个值（不再有"没抓到"的 `None`）：`Bytes` / `Unreadable` 也
+/// 得进缓存，否则 tool_execution_end 无从区分"新建"与"读不到"。
+///
+/// 字节指纹在 >2MB / 非 UTF-8 时也照算——那两条路走不到文本 diff，全靠它判断
+/// 模型是不是原样重写了一遍。
+fn read_prior_file_content(instance: &PiInstance, path: &str) -> PriorFile {
     let p = std::path::Path::new(path);
     let abs = if p.is_absolute() {
         p.to_path_buf()
     } else {
         let dir = instance.spawn_dir();
         if dir.is_empty() {
-            return None;
+            return PriorFile::Unreadable;
         }
         std::path::Path::new(&dir).join(p)
     };
     match std::fs::read(&abs) {
         Ok(bytes) => {
-            if bytes.len() > 2 * 1024 * 1024 {
-                return None;
+            let len = bytes.len();
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let sha = hex::encode(hasher.finalize());
+            if len > 2 * 1024 * 1024 {
+                return PriorFile::Bytes { len, sha };
             }
-            String::from_utf8(bytes).ok().map(Some)
+            match String::from_utf8(bytes) {
+                Ok(text) => PriorFile::Text(text),
+                Err(_) => PriorFile::Bytes { len, sha },
+            }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
-        Err(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => PriorFile::NewFile,
+        Err(_) => PriorFile::Unreadable,
     }
 }
 
@@ -5276,9 +5418,13 @@ fn truncate_diff(s: String) -> String {
 /// 只出一段 hunk：公共前缀/后缀各留 ≤3 行上下文，中间整段替换。行号与计数都
 /// 精确，所以前端 `reverseUnifiedDiff` 能逐行还原（撤销 = 写回旧内容）。
 ///
-/// `new_file = true` 时用 `--- /dev/null` 头（前端据此把撤销实现为删除文件）。
-/// `prior = None` 且 `new_file = false` 表示"旧内容未知"：此时只能按空文件假想，
-/// 调用方**必须**同时标 `undoUnsafe`。
+/// `new_file = true` 时用 `--- /dev/null` 头（前端据此把撤销实现为删除文件）；
+/// 此时 `prior` 恒为 `None`。
+///
+/// 「旧内容未知」与「旧文件为空」不是一回事：调用方在 `prior = None` 且
+/// `new_file = false` 时**不再**调本函数——按空文件假想会把整份新内容标成
+/// 「新增」（模型只是原样重写一遍时卡片凭空显示 +N，撤销也只能靠快照），
+/// 那种情况调用方直接不给 patch、只标 `undoUnsafe`。
 ///
 /// 返回 `None` = 新旧内容一致（这次 write 没改任何东西，不该进「已修改」）。
 fn write_unified_diff(
@@ -5918,14 +6064,12 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             if call_name == "write" {
                                 if let Some(path) = arg_path(&raw_input) {
                                     let prior = read_prior_file_content(instance, path);
-                                    if let Some(prior) = prior {
-                                        instance
-                                            .exec_file_prior
-                                            .lock()
-                                            .unwrap()
-                                            .entry(tool_call_id.clone())
-                                            .or_insert(prior);
-                                    }
+                                    instance
+                                        .exec_file_prior
+                                        .lock()
+                                        .unwrap()
+                                        .entry(tool_call_id.clone())
+                                        .or_insert(prior);
                                 }
                             }
                         }
@@ -6001,17 +6145,16 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         .insert(tool_call_id.clone(), args.clone());
                 }
                 // write 会整体覆盖文件，而它的 result 不带 diff → 趁现在（工具还
-                // 没跑）把旧内容读下来，tool_execution_end 才能算出真 diff、撤销
+                // 没跑）把旧状态读下来，tool_execution_end 才能算出真 diff、撤销
                 // 才有安全的反推依据。edit 自带 details.diff/patch，不需要。
                 if tool_name == "write" {
                     if let Some(path) = arg_path(&args) {
-                        if let Some(prior) = read_prior_file_content(instance, path) {
-                            instance
-                                .exec_file_prior
-                                .lock()
-                                .unwrap()
-                                .insert(tool_call_id.clone(), prior);
-                        }
+                        let prior = read_prior_file_content(instance, path);
+                        instance
+                            .exec_file_prior
+                            .lock()
+                            .unwrap()
+                            .insert(tool_call_id.clone(), prior);
                     }
                 }
                 instance
@@ -6348,11 +6491,13 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     });
                 }
             }
-            // write 覆盖前的旧内容（execution_start 抓的）——同样只取一次，防泄漏。
-            //   Some(None)  = 当时文件不存在（新建）
-            //   Some(Some)  = 读到了旧内容
-            //   None        = 读不到/无法判定 → 旧内容未知
-            let prior_entry: Option<Option<String>> =
+            // write 覆盖前的旧状态（execution_start 抓的）——同样只取一次，防泄漏。
+            //   NewFile    = 当时文件不存在（新建）
+            //   Text(_)    = 读到了可逐行 diff 的旧文本
+            //   Bytes{..}  = 读到字节但不可 diff（>2MB / 非 UTF-8），带 SHA-256
+            //   Unreadable = 字节都读不到
+            //   None       = 没抓到（不是 write，或 execution_start 没走到）
+            let prior_entry: Option<PriorFile> =
                 instance.exec_file_prior.lock().unwrap().remove(&tool_call_id);
             // 只有真出 diff 的工具才转发 diff 类 details：edit 工具 result
             // 自带 details.diff / details.patch；write 工具（全新文件无
@@ -6392,60 +6537,106 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 }
                 // pi 的 write 工具 result 完全没有 details（源码实测 `details:void 0`），
                 // 前端 write 卡片出不了 +N −n。用 execution_start 缓存的 args（path +
-                // content）**加上那一刻读到的旧内容**在网关侧合成真 diff。
+                // content）**加上那一刻抓到的旧状态**在网关侧合成真 diff。
                 if picked.is_empty() && tool_name == "write" && !is_error {
                     // 诊断（每次 write 一行）：写入 diff 的合成链有四环——有没有
                     // args（来自 execution_start / toolcall_end）、有没有 content、
-                    // 有没有读到覆盖前的旧内容、最终生成了多少字节的 patch。任何一环
-                    // 断掉症状都是"写入卡片没有 diff"，这行日志直接指出是哪一环。
+                    // 覆盖前抓到什么、最终走哪条分支。任何一环断掉症状都是"写入卡片
+                    // 没有 diff"，这行日志直接指出是哪一环。
                     log_spawn_diag(&format!(
                         "write-diff: id={} args={} content={} prior={}",
                         tool_call_id,
                         if arg_path(&exec_args).is_some() { "有" } else { "缺" },
                         if exec_args.get("content").and_then(Value::as_str).is_some() { "有" } else { "缺" },
                         match &prior_entry {
-                            None => "未知",
-                            Some(None) => "不存在(新建)",
-                            Some(Some(_)) => "读到",
+                            None => "未抓取",
+                            Some(PriorFile::NewFile) => "不存在(新建)",
+                            Some(PriorFile::Text(_)) => "读到文本",
+                            Some(PriorFile::Bytes { .. }) => "读到字节(不可 diff)",
+                            Some(PriorFile::Unreadable) => "读不到字节",
                         }
                     ));
                     if let Some(path) = arg_path(&exec_args) {
                         if let Some(text) = exec_args.get("content").and_then(Value::as_str) {
-                            // prior_entry: Some(None)=新建 / Some(Some)=旧内容 /
-                            // None=旧内容未知（读不到，例如二进制、权限、相对路径
-                            // 无法解析）。未知时按空文件假想，但必须标 undoUnsafe ——
-                            // 否则前端按这个假 patch 反推会把现有内容切掉。
-                            let new_file = matches!(prior_entry, Some(None));
-                            let prior_text = prior_entry.as_ref().and_then(|o| o.as_deref());
-                            match write_unified_diff(path, prior_text, text, new_file) {
-                                Some(patch) => {
-                                    if patch.len() > MAX_DIFF_BYTES {
-                                        truncated_diff = true;
+                            // 能逐行 diff 的旧文本：只有 Text 有。NewFile 的 None 是
+                            // 故意的（按空文件算）；Bytes / Unreadable 走下面两条分支。
+                            let new_file =
+                                matches!(prior_entry.as_ref(), Some(PriorFile::NewFile));
+                            let prior_text: Option<&str> = match prior_entry.as_ref() {
+                                Some(PriorFile::Text(s)) => Some(s.as_str()),
+                                _ => None,
+                            };
+                            match prior_entry.as_ref() {
+                                // 新建 / 读到旧文本 → 能算出真 diff。
+                                Some(PriorFile::NewFile | PriorFile::Text(_)) => {
+                                    match write_unified_diff(path, prior_text, text, new_file) {
+                                        Some(patch) => {
+                                            if patch.len() > MAX_DIFF_BYTES {
+                                                truncated_diff = true;
+                                            }
+                                            log_spawn_diag(&format!(
+                                                "write-diff: id={} → patch {} 字节（可撤销）",
+                                                tool_call_id,
+                                                patch.len()
+                                            ));
+                                            picked.insert(
+                                                "patch".to_string(),
+                                                Value::String(truncate_diff(patch)),
+                                            );
+                                        }
+                                        // 内容与旧文件完全一致：这次 write 什么都没改，
+                                        // 不该出现在「已修改」里。
+                                        None => {
+                                            log_spawn_diag(&format!(
+                                                "write-diff: id={} → 内容与旧文件一致，不登记",
+                                                tool_call_id
+                                            ));
+                                        }
                                     }
-                                    log_spawn_diag(&format!(
-                                        "write-diff: id={} → patch {} 字节（{}）",
-                                        tool_call_id,
-                                        patch.len(),
-                                        if prior_entry.is_none() { "undoUnsafe" } else { "可撤销" }
-                                    ));
-                                    picked.insert(
-                                        "patch".to_string(),
-                                        Value::String(truncate_diff(patch)),
-                                    );
-                                    if prior_entry.is_none() {
+                                }
+                                // 读到字节但没法逐行 diff（>2MB / 非 UTF-8）：有指纹，
+                                // 比一比就知道是不是原样重写 —— 相等就是纯 no-op，
+                                // 什么都不登记（"其实没改却显示修改"的最后一格）。
+                                Some(PriorFile::Bytes { len, sha, .. }) => {
+                                    // 原样重写 = 字节数相同且指纹相同。字节数不同就直接
+                                    // 判定"改动了"，不必再算指纹。
+                                    let identical = if text.len() != *len {
+                                        false
+                                    } else {
+                                        let mut hasher = Sha256::new();
+                                        hasher.update(text.as_bytes());
+                                        hex::encode(hasher.finalize()).as_str()
+                                            == sha.as_str()
+                                    };
+                                    if identical {
+                                        log_spawn_diag(&format!(
+                                            "write-diff: id={} → 字节与原文件一致（原样重写），不登记",
+                                            tool_call_id
+                                        ));
+                                    } else {
+                                        // 真改动了，但没有旧内容可逐行 diff —— 不给
+                                        // patch（按空文件假想会谎报"整文件新增"），
+                                        // 前端凭 `path` + `undoUnsafe` 仍会列出这个
+                                        // 文件，只是没有 +N −N、不可反推撤销。
+                                        log_spawn_diag(&format!(
+                                            "write-diff: id={} → 已改动但无法逐行 diff（undoUnsafe）",
+                                            tool_call_id
+                                        ));
                                         picked.insert(
                                             "undoUnsafe".to_string(),
                                             Value::Bool(true),
                                         );
                                     }
                                 }
-                                // 内容与旧文件完全一致：这次 write 什么都没改，
-                                // 不该出现在「已修改」里。
-                                None => {
+                                // 字节都读不到（相对路径无 cwd / 权限 / I/O）：什么都
+                                // 判断不了，只能按"改过了但撤销不安全"处理，交给本轮
+                                // 快照兜底。
+                                Some(PriorFile::Unreadable) | None => {
                                     log_spawn_diag(&format!(
-                                        "write-diff: id={} → 内容与旧文件一致，不登记",
+                                        "write-diff: id={} → 覆盖前旧内容不可读，不合成 diff（undoUnsafe）",
                                         tool_call_id
                                     ));
+                                    picked.insert("undoUnsafe".to_string(), Value::Bool(true));
                                 }
                             }
                         }
@@ -6793,6 +6984,17 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         "raw": message,
                     }),
                 );
+            } else {
+                // 成功也必须发：之前只在失败时发，前端的重试提示一旦亮起来
+                // 就没人把它关掉（用户看到的是「重试中」永远挂在头上）。
+                emit_helix_event(
+                    "model/retry",
+                    &json!({
+                        "session_id": sid(),
+                        "success": true,
+                        "raw": message,
+                    }),
+                );
             }
         }
         "extension_error" => {
@@ -7075,8 +7277,54 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 }),
             );
         }
+        // queue_update：排队中的 steer / follow_up 队列变了。这两个队列只由 RPC
+        // 的 steer / follow_up 命令填充（用户手动输入不走这里，忙时发 prompt
+        // 会撞 already processing）。整份队列都在 payload 里，前端订阅它就不
+        // 需要轮询 get_state。
+        "queue_update" => {
+            let steering = message
+                .get("steering")
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let follow_up = message
+                .get("followUp")
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            emit_helix_event(
+                "session/update",
+                &json!({
+                    "session_id": sid(),
+                    "update": {
+                        "sessionUpdate": "queue_update",
+                        "steeringCount": steering,
+                        "followUpCount": follow_up,
+                        "pendingCount": steering + follow_up,
+                        "steering": message.get("steering").cloned().unwrap_or(Value::Array(vec![])),
+                        "followUp": message.get("followUp").cloned().unwrap_or(Value::Array(vec![])),
+                    },
+                }),
+            );
+        }
+        // bash_execution_update：直接 bash RPC 执行时的实时输出流。
+        // 转成 session/update 让前端能显示「正在执行……」而不是等到结束才冒结果。
+        "bash_execution_update" => {
+            emit_helix_event(
+                "session/update",
+                &json!({
+                    "session_id": sid(),
+                    "update": {
+                        "sessionUpdate": "bash_execution_update",
+                        "id": message.get("id").cloned().unwrap_or(Value::Null),
+                        "delta": message.get("delta").cloned().unwrap_or(Value::Null),
+                        "raw": message,
+                    },
+                }),
+            );
+        }
         // Pass-through / ignore: agent_start, turn_start/end, message_start/end,
-        // queue_update, summarization_retry_*, bash_execution_update.
+        // summarization_retry_*.
         _ => {}
     }
 }
@@ -7681,6 +7929,17 @@ pub fn pi_cli_strings() -> (String, Vec<String>) {
 fn pi_command() -> Command {
     let (mut command, _base) = pi_cli_args();
     command.arg("--mode").arg("rpc");
+    // 项目信任档位：只在这里选 `--approve` 或 `--no-approve`，作用域限在
+    // Helix 拉起的 pi 进程，不写 pi 的 `defaultProjectTrust`（后者会把
+    // 终端里跑的 pi 也变成自动信任）。
+    //
+    // 没有第三档「ask/不传 flag」——RPC 模式弹不出交互提示，效果等同
+    // `--no-approve`，多留一个选项只会让用户以为「项目 .pi 应该生效」却
+    // 看不到提示。要加载项目资源，选 `always`。
+    match crate::pi_advanced::configured_project_trust().as_str() {
+        "always" => { command.arg("--approve"); }
+        _ => { command.arg("--no-approve"); }
+    }
     let ext = crate::pi_extensions::browser_extension_path();
     if ext.is_file() {
         command.arg("--extension").arg(ext);
@@ -7725,6 +7984,30 @@ mod tests {
         assert_eq!(taken, vec!["a".to_string()]);
         assert!(!m.contains_key("a"));
         assert!(m.contains_key("b") && m.contains_key("c"));
+    }
+
+    #[test]
+    fn handshake_killed_by_our_own_restart_is_a_retryable_restore_failure() {
+        // 文本取自 helix-recover.log 2026-10-12 02:09:06（网关清场掐断在飞握手）。
+        // `switch_session` 是 RPC 方法名、带下划线，只匹配 "switch session"
+        // 会把这类可重试故障降成 internal。
+        assert_eq!(
+            classify_session_error(
+                "pi request switch_session failed: killed by Helix (no response channel) [waited 71ms, submit_gen=2 now_gen=2]"
+            ),
+            "session_restore_failed"
+        );
+        assert_eq!(
+            classify_session_error(
+                "pi request get_state failed: killed by Helix (no response channel) [waited 7639ms, submit_gen=2 now_gen=2]"
+            ),
+            "session_restore_failed"
+        );
+        // 「文件不存在」优先于任何包装文案。
+        assert_eq!(
+            classify_session_error("session restore task failed: no session file for 01a12b05"),
+            "session_not_found"
+        );
     }
 
     #[test]

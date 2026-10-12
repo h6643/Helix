@@ -260,7 +260,7 @@ type AgentEngine = "helix";
 
 // Helix native reasoning scale (none/minimal/low/medium/high/xhigh/max/ultra).
 export type ReasoningEffortLevel =
-  "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+  "none" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 /**
  * 审批模式。
@@ -472,6 +472,12 @@ export interface McpServerConfig {
   timeout?: number;
   headers?: Record<string, string>;
   envPassthrough?: boolean;
+  /** 给模型的服务器描述（出现在系统提示里；pi 的 description） */
+  description?: string;
+  /** 暴露方式：codemode / deferred / direct / hidden（pi 的 exposure） */
+  exposure?: "codemode" | "deferred" | "direct" | "hidden";
+  /** 按工具覆盖暴露方式：工具名或 glob → exposure（pi 的 toolExposure） */
+  toolExposure?: Record<string, "codemode" | "deferred" | "direct" | "hidden">;
 }
 
 export interface ApiConfig {
@@ -502,6 +508,11 @@ export interface ApiProfile {
    *  seedAddedModels 会把它剥成 undefined，重开编辑弹窗时开关显示为关
    *  （"我明明开了思考模式，重启后又没了"根因）。键 = 模型 id。 */
   modelReasonings?: Record<string, boolean>;
+  /** 每个模型声明的输入类型（models.json 的 `input` 数组）。
+   *  pi 只读其中的 "image" 来决定粘贴图片是原生透传还是走视觉转述管道；
+   *  之前 Helix 从不写这个字段，多模态主模型全被当成纯文本，图片永远绕道。
+   *  键 = 模型 id。 */
+  modelInputs?: Record<string, string[]>;
 }
 
 /**

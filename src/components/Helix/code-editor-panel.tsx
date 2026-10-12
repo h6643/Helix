@@ -18,9 +18,9 @@ import { loadLanguage } from "@uiw/codemirror-extensions-langs";
 import CodeMirror from "@uiw/react-codemirror";
 import { FileCode2, AlertTriangle } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { DiffBody } from "./file-change-summary";
 import { electronFS } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
-import { DiffBody } from "./file-change-summary";
 
 /* ── 跳转定位高亮（「已修改」卡片点文件名 → 滚到改动处并闪一下） ──────────
  * 用 StateField 而不是 ViewPlugin：行装饰（Decoration.line）允许由状态字段
@@ -245,11 +245,11 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
       markEditorTabSaved(id);
       showToast({ type: "success", title: "已保存", description: tab.name });
       return true;
-    } catch (e: any) {
+    } catch (e) {
       showToast({
         type: "error",
         title: "保存失败",
-        description: e?.message || "写入文件出错",
+        description: (e as { message?: string })?.message || "写入文件出错",
       });
       return false;
     }

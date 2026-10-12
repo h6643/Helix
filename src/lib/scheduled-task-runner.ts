@@ -24,7 +24,7 @@ let _started = false;
  */
 async function refreshFromBackend() {
   try {
-    const electron = (window as any).electron;
+    const electron = window.electron;
     if (!electron?.scheduledTasks?.list) return;
     const res = await electron.scheduledTasks.list();
     if (!res?.ok || !Array.isArray(res.tasks)) return;

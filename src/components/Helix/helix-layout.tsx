@@ -15,7 +15,6 @@ import {
   GripVertical,
   ChevronDown,
   FileText,
-  Keyboard,
   ListTodo,
   CheckCircle2,
   Circle,
@@ -55,9 +54,9 @@ import { Sidebar } from "./sidebar";
 import { ToastContainer } from "./toast-container";
 import { getCurrentVersion } from "@/hooks/use-check-update";
 import { useCheckUpdate } from "@/hooks/use-check-update";
-import { checkHelixAppUpdate, installHelixAppUpdate } from "@/lib/app-update";
 import { useGitChangeStat } from "@/hooks/use-git-change-stat";
 import { useRemoteTunnelReconcile } from "@/hooks/use-remote-tunnel-reconcile";
+import { checkHelixAppUpdate, installHelixAppUpdate } from "@/lib/app-update";
 import { startAutoArchiveRunner } from "@/lib/auto-archive";
 import { useBrowserAutomation } from "@/lib/browser-automation";
 import {
@@ -74,10 +73,8 @@ import {
 import { isRemoteWorkDir, parseRemoteWorkDir } from "@/lib/remote-projects";
 import { startScheduledTaskRunner } from "@/lib/scheduled-task-runner";
 import { isServeActive, getServeClient } from "@/lib/serve-gateway";
-import { resolveBackendSid, resolveBackendSids } from "@/lib/session-map";
+import { resolveBackendSids } from "@/lib/session-map";
 import { applyHelixPalette } from "@/lib/themes";
-import { isSyntheticSubAgentToolRow } from "@/lib/tool-display-utils";
-import { useElapsedSeconds } from "@/lib/use-elapsed";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -127,6 +124,30 @@ const ChannelsCenterPanel = lazy(() =>
 const RuntimePanel = lazy(() =>
   import("./runtime-panel").then((m) => ({ default: m.RuntimePanel })),
 );
+
+// ── Local structural types (replace `as any` casts) ──────────────────────
+// window.__helixOpenBrowser is a devtools / agent-triggered side door set on
+// the global Window object (see the browser-open effect below).
+type HelixOpenBrowserWindow = Window & {
+  __helixOpenBrowser?: (url: unknown) => void;
+};
+
+// Sub-agent disk record read back by the delegations IPC (`delegations.list` —
+// typed as `unknown[]` in electron.d.ts since the wire shape comes from
+// .pi/state/delegations.json). Only the fields consumed by
+// rehydrateSubAgentsFromDisk are declared here; a type guard narrows the
+// unknown entries without changing values.
+interface DiskDelegationEntry {
+  id: string;
+  agent_id?: string | null;
+  goal?: string | null;
+  prompt?: string | null;
+  status?: string | null;
+  summary?: string | null;
+}
+
+const isDiskDelegationEntry = (v: unknown): v is DiskDelegationEntry =>
+  typeof v === "object" && v !== null && "id" in v;
 const ActivityFeed = lazy(() =>
   import("./activity-feed").then((m) => ({ default: m.ActivityFeed })),
 );
@@ -173,27 +194,6 @@ function PanelSuspense({ children }: { children: React.ReactNode }) {
     >
       {children}
     </Suspense>
-  );
-}
-
-/**
- * 子 agent 运行中但还没收到工具行时的状态行：每秒刷新已运行秒数。
- * （后台子 agent 的工具活动要等 subagents:tool 桥接事件，先如实显示
- * "正在后台执行"，避免被误读为卡死。）独立成组件是因为它要用 hook，
- * 而调用方在 .map() 里无法调用 hook。
- */
-function SubAgentWaitingLine({
-  createdAt,
-  active,
-}: {
-  createdAt?: number;
-  active: boolean;
-}) {
-  const elapsed = useElapsedSeconds(createdAt, active);
-  return (
-    <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-primary">
-      正在后台执行…（已运行 {elapsed} 秒）
-    </div>
   );
 }
 
@@ -338,7 +338,6 @@ export function HelixLayout() {
       Math.min(aligned, cap),
     );
     setRightSidebarWidth(clamped);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [isMaximized, setIsMaximized] = useState(false);
   const dragStartX = useRef(0);
@@ -405,7 +404,7 @@ export function HelixLayout() {
         });
       }
     };
-    (window as any).__helixOpenBrowser = (url: unknown) =>
+    (window as HelixOpenBrowserWindow).__helixOpenBrowser = (url: unknown) =>
       open(String(url ?? ""), false);
     // Tauri event bridge: Rust commands (e.g. agent-triggered) emit this to
     // open a URL in the side browser without needing direct DOM access.
@@ -417,7 +416,9 @@ export function HelixLayout() {
         const { listen } = await import("@tauri-apps/api/event");
         const { isTauri } = await import("@/lib/tauri-bridge");
         if (isTauri()) {
-          unlisten = await listen("helix:open-browser", (e: any) => {
+          unlisten = await listen<{ url?: unknown; quiet?: unknown }>(
+            "helix:open-browser",
+            (e) => {
             // quiet:true = agent 触发（网关的 helix/app/open_browser 带）→ 不抢
             // 标签。Rust 侧现在所有生产者都带 quiet；不带 quiet 的只剩
             // __helixOpenBrowser（用户主动入口 / devtools）这一条。
@@ -425,12 +426,15 @@ export function HelixLayout() {
               String(e.payload?.url ?? ""),
               e.payload?.quiet === true,
             );
-          });
+            },
+          );
           // Automation requests from the pi extension (op + reqId + params).
           // 所有 op 一视同仁丢给执行器：目标页面（面板里那条网页页）、导航等待、
           // 结果回写都在它里面，这里不再按 op 分叉。
-          unlistenReq = await listen("helix:browser-request", (e: any) => {
-            const p: any = e.payload ?? {};
+          unlistenReq = await listen<Record<string, unknown>>(
+            "helix:browser-request",
+            (e) => {
+            const p: Record<string, unknown> = e.payload ?? {};
             const reqId = String(p.reqId ?? "");
             if (!reqId) return;
             runBrowserRequestRef.current({
@@ -438,8 +442,9 @@ export function HelixLayout() {
               url: typeof p.url === "string" ? p.url : undefined,
               reqId,
               params: p.params ?? {},
-            });
-          });
+            } as Parameters<typeof runBrowserRequestRef.current>[0]);
+            },
+          );
           // Poll the pi extension's browser request queue: the Rust command
           // emits helix:browser-request with the full payload, which the
           // listener above hands to the executor.
@@ -455,7 +460,7 @@ export function HelixLayout() {
       }
     })();
     return () => {
-      delete (window as any).__helixOpenBrowser;
+      delete (window as HelixOpenBrowserWindow).__helixOpenBrowser;
       unlisten?.();
       unlistenReq?.();
       if (pollTimer) clearInterval(pollTimer);
@@ -574,7 +579,6 @@ export function HelixLayout() {
 
   // State selectors (only re-render when this specific slice changes)
   const uiFontSize = useHelixStore((s) => s.fontSize);
-  const openTabs = useHelixStore((s) => s.openTabs);
   const showSessionManager = useHelixStore((s) => s.showSessionManager);
   const showSettings = useHelixStore((s) => s.showSettings);
   const showSkillPanel = useHelixStore((s) => s.showSkillPanel);
@@ -753,7 +757,7 @@ export function HelixLayout() {
   const loadBgTasks = useCallback(async () => {
     if (!isElectron()) return;
     try {
-      const api = (window as any).electron as any;
+      const api = window.electron;
       const res = await api?.backgroundTasks?.list?.();
       if (res?.ok) setBgTasks(res.tasks || []);
     } catch { /* empty */}
@@ -871,23 +875,25 @@ export function HelixLayout() {
           if (!cancelled) setHasDelegations(false);
           return;
         }
-        const api = (window as any).electron as any;
-        const res = await api?.delegations?.list?.(sids);
+        const res = await window.electron.delegations.list(sids);
+        // wire 返回的是 unknown[]（磁盘 manifest 原样透传），先过一遍类型守卫
+        // 收窄，后面直接拿强类型用。
+        const entries = (res.delegations || []).filter(isDiskDelegationEntry);
         console.info(
           "[SubAgentRehydrate] disk:",
-          (res?.delegations || []).length,
+          entries.length,
           "entries for sids",
           sids,
         );
-        if (!cancelled && res?.ok) {
-          setHasDelegations((res.delegations || []).length > 0);
+        if (!cancelled && res.ok) {
+          setHasDelegations(entries.length > 0);
           // 重启后实时卡片全丢——按磁盘记录重建（事件卡片已在 store 时
           // 按 id 去重跳过），让历史子 Agent 不随重启消失。
           useHelixStore
             .getState()
             .rehydrateSubAgentsFromDisk(
               currentSessionId,
-              (res.delegations || []).map((d: any) => ({
+              entries.map((d) => ({
                 id: d.id,
                 agentId: d.agent_id || undefined,
                 goal: d.goal || undefined,
@@ -918,11 +924,16 @@ export function HelixLayout() {
         setHasDelegations(false);
         return;
       }
-      const api = (window as any).electron as any;
-      const res = await api?.delegations?.list?.(sids);
-      if (res?.ok) {
-        setDelegations(res.delegations || []);
-        setHasDelegations((res.delegations || []).length > 0);
+      const res = await window.electron.delegations.list(sids);
+      const entries = (res.delegations || []).filter(isDiskDelegationEntry);
+      if (res.ok) {
+        setDelegations(
+          entries.map((d) => ({
+            id: d.id,
+            tasks: [] as Array<{ name: string; modified: number }>,
+          })),
+        );
+        setHasDelegations(entries.length > 0);
       }
     } catch { /* empty */}
   }, []);
@@ -945,13 +956,19 @@ export function HelixLayout() {
           }
           return;
         }
-        const api = (window as any).electron as any;
-        const res = await api?.delegations?.list?.(sids);
-        if (!cancelled && res?.ok) {
-          setDelegations(res.delegations || []);
-          setHasDelegations((res.delegations || []).length > 0);
+        const res = await window.electron.delegations.list(sids);
+        const entries = (res.delegations || []).filter(isDiskDelegationEntry);
+        if (!cancelled && res.ok) {
+          setDelegations(
+            entries.map((d) => ({
+              id: d.id,
+              tasks: [] as Array<{ name: string; modified: number }>,
+            })),
+          );
+          setHasDelegations(entries.length > 0);
           const before = useHelixStore.getState().subAgents.length;
-          const diskAgents = (res.delegations || []).map((d: any) => ({
+          const diskAgents = entries.map(
+            (d) => ({
             id: d.id,
             agentId: d.agent_id || undefined,
             goal: d.goal || undefined,
@@ -1009,7 +1026,7 @@ export function HelixLayout() {
     });
 
     return () => observer.disconnect();
-  }, []);
+  }, [storeActions]);
 
   // Re-assert the frontend's restored model config into Helix on startup so
   // the backend always matches the user's choice. This runs once after the
@@ -1042,11 +1059,10 @@ export function HelixLayout() {
     return () => {
       cancelled = true;
     };
-  }, [storeActions.restoreFromStorage]);
+  }, [storeActions]);
 
   // Sync agent settings to Helix via live config.set (no gateway restart).
-  // personality + reasoningEffort + fastMode are pushed instantly.
-  // Removed: temperature, maxOutputTokens, customInstructions, Chinese language injection.
+  // personality + reasoningEffort + fastMode 三条即时下发。
   const agentSettingsSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -1265,14 +1281,10 @@ export function HelixLayout() {
     };
   }, []);
 
-  // DiffPreview no longer auto-pops: per-file change stats (+green / -red) are
-  // rendered inline in the conversation transcript (FileChangeSummary). The
-  // top-right diff button still opens the review modal on demand.
-
   // Track window maximize/restore state via native events
 
   useEffect(() => {
-    const win = (window as any).electron?.window;
+    const win = window.electron?.window;
     if (!win) return;
     win.isMaximized().then(setIsMaximized);
     const removeListener = win.onMaximizedChange((maximized: boolean) =>
@@ -1293,10 +1305,10 @@ export function HelixLayout() {
   // level so the badge reflects reality from startup onward.
   useEffect(() => {
     if (!isElectron()) return;
-    const helix = (window as any).electron?.helix;
+    const helix = window.electron?.helix;
     if (!helix?.status) return;
-    let timer: any = null;
-    let startupTimer: any = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let startupTimer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
 
     // 安排下一次探测（同一时刻只保留一个 timer）。
@@ -1350,7 +1362,7 @@ export function HelixLayout() {
       }
     };
 
-    const unsubscribe = helix.onEvent?.((event: string, params?: any) => {
+    const unsubscribe = helix.onEvent?.((event: string, params?: { sameGateway?: boolean; phase?: string }) => {
       if (event === "gateway.ready") {
         useGatewayStore.getState().setHelixConnected(true);
         useGatewayStore.getState().setHelixError(null);
@@ -1413,7 +1425,7 @@ export function HelixLayout() {
 
   const handleMaximizeToggle = useCallback(async () => {
     try {
-      const win = (window as any).electron?.window;
+      const win = window.electron?.window;
       if (!win) return;
       const currentMaximized = await win.isMaximized();
       if (currentMaximized) {
@@ -1451,9 +1463,7 @@ export function HelixLayout() {
       storeActions.setSelectedWorkDir(dir);
     }
   }, [
-    storeActions.setWorkDir,
-    storeActions.setSelectedWorkDir,
-    storeActions.showToast,
+    storeActions,
     selectedWorkDir,
   ]);
 
@@ -1463,7 +1473,7 @@ export function HelixLayout() {
     useHelixStore.getState().clearExecutionFlow();
     useHelixStore.getState().setNoActiveConversation(false);
     useHelixStore.getState().setCurrentSessionId(null);
-  }, [storeActions.clearChat]);
+  }, [storeActions]);
 
   // ── System tray: "新建对话" menu item ──────────────────────────────
   useEffect(() => {
@@ -1730,16 +1740,15 @@ export function HelixLayout() {
       },
     ],
     [
+      showSidebar,
       setShowSidebar,
       storeActions,
-      toggleFullscreen,
       closeWindowMenu,
       customShortcuts,
       conversationIsRemote,
     ],
   );
 
-  const sidebarExpanded = showSidebar;
   const sidebarPixelWidth = sidebarCollapsed
     ? SIDEBAR_COLLAPSED
     : sidebarWidth * (uiFontSize / 14);
@@ -1791,7 +1800,7 @@ export function HelixLayout() {
           {/* Left: navigation buttons */}
           <div
             className="flex items-center gap-0.5"
-            style={{ WebkitAppRegion: "no-drag" } as any}
+            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
             {!showSettings && (
               <button
@@ -1892,15 +1901,15 @@ export function HelixLayout() {
                         // 2) pi agent + npm 插件（npm registry）
                         try {
                           const res = await (
-                            window as any
-                          ).electron?.helix?.piCheckUpdates?.();
+                            window.electron
+                          ).helix?.piCheckUpdates?.();
                           if (!res) {
                             return;
                           }
                           const pi = res.pi || {};
                           const outdated = (res.packages || [])
                             .filter(
-                              (p: any) =>
+                              (p: { name: string; installed: string; latest: string | null; hasUpdate?: boolean }) =>
                                 p.name !== "@zhushanwen/pi-permission" &&
                                 p.hasUpdate,
                             )
@@ -1925,7 +1934,7 @@ export function HelixLayout() {
                             const names = outdated
                               .slice(0, 3)
                               .map(
-                                (p: any) =>
+                                (p: { name: string; installed: string; latest: string | null; hasUpdate?: boolean }) =>
                                   `${p.name} v${p.installed} → v${p.latest}`,
                               )
                               .join("\n");
@@ -2436,7 +2445,7 @@ export function HelixLayout() {
                   className="fixed inset-0 bg-black/30 z-[300]"
                   onClick={() => !isCommitting && setCommitDialogOpen(false)}
                   data-tauri-drag-region="false"
-                  style={{ WebkitAppRegion: "no-drag" } as any}
+                  style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
                 />
                 {/* data-tauri-drag-region="false"：本弹窗渲染在上方 deep 拖拽区
                     （顶部图标行）的子树里，WebView2 的 app-region:drag 会覆盖到
@@ -2445,7 +2454,7 @@ export function HelixLayout() {
                 <div
                   className="fixed z-[310] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] max-h-[80vh] bg-card rounded-xl border border-border/50 shadow-2xl flex flex-col overflow-hidden"
                   data-tauri-drag-region="false"
-                  style={{ WebkitAppRegion: "no-drag" } as any}
+                  style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
                 >
                   <div className="shrink-0 px-5 pt-5 pb-3 flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -2482,7 +2491,7 @@ export function HelixLayout() {
                       rows={3}
                       autoFocus
                       data-tauri-drag-region="false"
-                      style={{ WebkitAppRegion: "no-drag" } as any}
+                      style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
                       className="w-full resize-none rounded-lg border border-border/30 bg-muted/20 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground outline-none focus:border-primary/50 transition-colors"
                     />
                   </div>
@@ -2553,7 +2562,7 @@ export function HelixLayout() {
           </>
         )}
         <button
-          onClick={() => (window as any).electron?.window?.minimize()}
+          onClick={() => window.electron?.window?.minimize()}
           data-tauri-drag-region="false"
           className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
           data-tip="最小化"
@@ -2573,7 +2582,7 @@ export function HelixLayout() {
           )}
         </button>
         <button
-          onClick={() => (window as any).electron?.window?.close()}
+          onClick={() => window.electron?.window?.close()}
           data-tauri-drag-region="false"
           className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-destructive/10 hover:text-destructive rounded-lg transition-colors"
           data-tip="关闭"
@@ -2602,9 +2611,7 @@ export function HelixLayout() {
                   setSidebarWidth={setSidebarWidth}
                   saveSidebarWidth={saveSidebarWidth}
                   showSidebar={showSidebar}
-                  setShowSidebar={setShowSidebar}
                   sidebarCollapsed={sidebarCollapsed}
-                  setSidebarCollapsed={setSidebarCollapsed}
                 />
               </PanelSuspense>
             </div>

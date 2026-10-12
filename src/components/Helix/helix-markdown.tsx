@@ -45,9 +45,6 @@ import { useHelixStore } from "@/stores/helix-store";
 interface HelixMarkdownProps {
   text: string;
   className?: string;
-  // 代码卡是否可折叠（长代码块底部「展开全部/收起」按钮）。默认 true；
-  // 思考体等自带限高滚动区的容器传 false —— 内部再折叠是冗余的。
-  foldCode?: boolean;
 }
 
 // ── GFM alerts (`> [!NOTE]` blockquotes) — ported from embeds/alert.tsx ──
@@ -226,12 +223,6 @@ function DiffView({ code }: { code: string }) {
   );
 }
 
-// Source-position ids of code blocks the user has expanded. Kept at module
-// scope so the choice survives the remounts react-markdown causes while a
-// message is still streaming (index-based keys shift as the AST grows, which
-// would otherwise reset a per-component useState back to collapsed).
-const expandedCodeBlocks = new Set<string>();
-
 // 只有真正可执行的命令/脚本语言才显示「执行」按钮（白名单）。
 const RUNNABLE_LANGS = new Set([
   "bash",
@@ -346,18 +337,14 @@ function MarkdownTable({ children }: { children: ReactNode }) {
 export function CodeCard({
   language,
   code,
-  blockId,
   showRunButton = true,
   className,
-  collapsible = true,
   showHeader = true,
 }: {
   language: string;
   code: string;
-  blockId?: string;
   showRunButton?: boolean;
   className?: string;
-  collapsible?: boolean;
   // showHeader=false 时完全不渲染顶部头部栏（语言标签 + 复制/执行按钮）——工具结果
   // 卡用它去掉那条灰底"大边框"式头部，内容直接铺开；卡片外框与圆角保留。
   showHeader?: boolean;
@@ -366,9 +353,6 @@ export function CodeCard({
   const [copied, setCopied] = useState(false);
   const [sent, setSent] = useState(false);
   const canRun = RUNNABLE_LANGS.has(language);
-  const [collapsed, setCollapsed] = useState(() =>
-    blockId ? !expandedCodeBlocks.has(blockId) : true,
-  );
   const isDiff = language === "diff";
   // 流式半截围栏（未闭合）：代码文本以 ``` 或 ~~~ 结尾，或块本身刚被开围栏
   // 创建、语言标签还是空串（"..." fence，no info string）。这些形状意味着
@@ -382,11 +366,6 @@ export function CodeCard({
   // per-line renderer (no shiki), so a patch touching a tree diagram must
   // keep its colored +/- view.
   const boxDiagram = !isDiff && !isStreamingUnclosed && isBoxDiagram(trimmed);
-  const lineCount = trimmed.split("\n").length;
-  const isLong = lineCount > 15 || trimmed.length > 800;
-  // collapsible=false 时（如工具卡片里的命令/结果代码）永不折叠：内容全量显示，
-  // 不套 max-height 截断、不渲染"展开全部/收起"按钮，点击即见全部。
-  const foldable = collapsible !== false && isLong;
 
   const body = isDiff ? (
     <DiffView code={trimmed} />
@@ -494,7 +473,6 @@ function codeText(children: unknown): string {
 const HelixMarkdown = memo(function HelixMarkdown({
   text,
   className,
-  foldCode = true,
 }: HelixMarkdownProps) {
   const processed = useMemo(
     () => (text ? preprocessMarkdown(text) : ""),
@@ -650,7 +628,7 @@ const HelixMarkdown = memo(function HelixMarkdown({
             />
           ),
           // Fenced code → the `.helix-md pre > div` code card.
-          pre: ({ children, node }) => {
+          pre: ({ children }) => {
             const child = Array.isArray(children) ? children[0] : children;
             const codeEl = (child as React.ReactElement | null) || null;
             const classNameRaw =
@@ -665,23 +643,7 @@ const HelixMarkdown = memo(function HelixMarkdown({
             const code = codeText(
               (codeEl?.props as { children?: unknown } | undefined)?.children,
             );
-            // Source offset of the opening fence is stable as the block streams,
-            // so it survives react-markdown's streaming remounts (unlike index
-            // keys) and uniquely identifies this block within the message.
-            const start = node?.position?.start;
-            const blockId =
-              start != null
-                ? `${start.offset ?? start.line}:${classNameRaw}`
-                : undefined;
-
-            return (
-              <CodeCard
-                language={language}
-                code={code}
-                blockId={blockId}
-                collapsible={foldCode}
-              />
-            );
+            return <CodeCard language={language} code={code} />;
           },
         }}
       >

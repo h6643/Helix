@@ -1,19 +1,19 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   Folder,
   HardDrive,
   KeyRound,
   Trash2,
 } from "lucide-react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   PageHeader,
   NumberField,
   SettingGroup,
   SettingRow,
 } from "./settings-ui";
-import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { electronShell } from "@/lib/electron-bridge";
 
@@ -155,8 +155,8 @@ export function BrowserSettingsPanel() {
       .then(setUsage)
       // 拿不到（非 Windows 平台后端直接返回 Err）时也要落地成一条
       // ok:false，否则界面会永远停在「加载中…」。
-      .catch((e: any) =>
-        setUsage({ ok: false, error: e?.message ?? String(e) }),
+      .catch((e: unknown) =>
+        setUsage({ ok: false, error: (e as { message?: string })?.message ?? String(e) }),
       );
   }, []);
 
@@ -179,8 +179,8 @@ export function BrowserSettingsPanel() {
   useEffect(() => {
     invoke<HandoffConfig>("browser_handoff_config")
       .then(setHandoff)
-      .catch((e: any) =>
-        setHandoff({ ok: false, error: e?.message ?? String(e) }),
+      .catch((e: unknown) =>
+        setHandoff({ ok: false, error: (e as { message?: string })?.message ?? String(e) }),
       );
   }, []);
 
@@ -196,8 +196,8 @@ export function BrowserSettingsPanel() {
       } else {
         setHandoffMsg(`没保存：${res.error ?? "后端拒绝了该值"}`);
       }
-    } catch (e: any) {
-      setHandoffMsg(`没保存：${e?.message ?? String(e)}`);
+    } catch (e) {
+      setHandoffMsg(`没保存：${(e as { message?: string })?.message ?? String(e)}`);
     }
   }, []);
 
@@ -233,8 +233,8 @@ export function BrowserSettingsPanel() {
           );
         }
         refresh();
-      } catch (e: any) {
-        setResult(`清理失败：${e?.message ?? String(e)}`);
+      } catch (e) {
+        setResult(`清理失败：${(e as { message?: string })?.message ?? String(e)}`);
       } finally {
         setBusy(false);
       }
@@ -259,8 +259,8 @@ export function BrowserSettingsPanel() {
       }
       if (res.failed) parts.push(`${res.failed} 条解密失败`);
       setPwResult(`${parts.join("；")}。`);
-    } catch (e: any) {
-      setPwResult(`导入失败：${e?.message ?? String(e)}`);
+    } catch (e) {
+      setPwResult(`导入失败：${(e as { message?: string })?.message ?? String(e)}`);
     } finally {
       setPwBusy(false);
     }

@@ -8,10 +8,8 @@ import {
   Unlock,
   FolderOpen,
   RefreshCw,
-  Check,
   Loader2,
   AlertCircle,
-  ChevronRight,
 } from "lucide-react";
 import React, { useState, useEffect, useCallback } from "react";
 import { isElectron, electronGit } from "@/lib/electron-bridge";

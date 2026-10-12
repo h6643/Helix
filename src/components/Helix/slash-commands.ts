@@ -6,11 +6,6 @@ import {
   type SessionMapEntry,
 } from "@/lib/session-map";
 import {
-  resyncCurrentSessionFromBackend,
-  isCurrentSessionRenderBroken,
-} from "@/lib/session-resync";
-import { normalizeAcpContent } from "@/lib/text-utils";
-import {
   classifyResumeError,
   brokenReasonFileGone,
   brokenReasonFromResume,
@@ -20,6 +15,10 @@ import {
   resumeSession,
   sessionFileGone,
 } from "@/lib/session-resume";
+import {
+  resyncCurrentSessionFromBackend,
+  isCurrentSessionRenderBroken,
+} from "@/lib/session-resync";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -144,6 +143,9 @@ export interface CompactContext {
   sessionMap: Map<string, SessionMapEntry>;
   /** live 映射缺失时的全局兜底 sid（组件 ref / gateway store）。 */
   fallbackSid?: string | null;
+  /** pi 的 `customInstructions`：本次压缩额外关注的东西。
+   *  只作用于模型生成的摘要，不落盘、不影响下次自动压缩。 */
+  customInstructions?: string;
 }
 
 export type CompactResult = "ok" | "busy" | "no-session" | "error";
@@ -233,9 +235,12 @@ export async function runCompactCommand(
       return "no-session";
     }
     sid = resumed.sessionId;
-    const result = await helixApi()?.send("session.compress", {
-      session_id: sid,
-    });
+    const payload: Record<string, unknown> = { session_id: sid };
+    // 手动 /compact 的额外指令：pi 只在模型生成摘要时读它，不改任何
+    // 持久化状态。空串不下发，避免把多余字段写进 pi 的调用历史。
+    const extra = ctx.customInstructions?.trim();
+    if (extra) payload.custom_instructions = extra;
+    const result = await helixApi()?.send("session.compress", payload);
     // 压缩成功说明 sid 在后端活着（可能刚被透明恢复）：刷新映射 epoch 并
     // 恢复全局绑定，让 handleRun / context-usage 后续都命中同一会话。
     if (currentSessionId) {
@@ -256,7 +261,7 @@ export async function runCompactCommand(
       }
     }
     if (result && typeof result === "object") {
-      const r = result as any;
+      const r = result as Record<string, unknown>;
       if (r.status === "compressed" && Array.isArray(r.messages)) {
         // 压缩只改**模型侧上下文**，不动用户看得见的历史。
         //
@@ -325,7 +330,10 @@ export async function runCompactCommand(
         useHelixStore.getState().showToast({
           type: "warning",
           title: "压缩进行中",
-          description: r.message || "另一个压缩任务正在运行，请稍后再试",
+          description:
+            typeof r.message === "string"
+              ? r.message || "另一个压缩任务正在运行，请稍后再试"
+              : "另一个压缩任务正在运行，请稍后再试",
         });
         return "busy";
       } else {

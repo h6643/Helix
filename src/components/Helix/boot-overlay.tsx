@@ -1,23 +1,12 @@
 "use client";
 
-import {
-  Loader2,
-  WifiOff,
-  RefreshCw,
-  Package,
-  X,
-  CheckCircle2,
-} from "lucide-react";
-import React, { useEffect, useState } from "react";
+import { RefreshCw, X, CheckCircle2 } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 
 /** Bootstrap stage reported by the Rust backend. */
 type BootstrapStage = "preparing" | "done" | null;
-
-const STAGE_LABELS: Record<string, string> = {
-  preparing: "正在准备 Helix 运行环境...",
-};
 
 /**
  * BootOverlay — full-screen frosted-glass splash shown over the app while the
@@ -45,19 +34,24 @@ export function BootOverlay() {
   // message/icon (connecting vs disconnected).
   const helixConnected = useGatewayStore((s) => s.helixConnected);
   const [bootstrapStage, setBootstrapStage] = useState<BootstrapStage>(null);
-  const [bootstrapMessage, setBootstrapMessage] = useState("");
   const [isReady, setIsReady] = useState(false);
   const [isFadingOut, setIsFadingOut] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
+  // 重入防护标记。用 ref 而不是 isFadingOut state 本身：effect 依赖数组只放
+  // helixConnected（见下方 FIX 注释），闭包里读 state 会拿到过期值；ref 每次
+  // render 都是同一个对象，随时能读到最新标记，又不会把 effect 重新挂起来。
+  const isFadingOutRef = useRef(false);
 
   // Handle fade-out animation when connected.
   // FIX: depend only on `helixConnected`. Previously `isFadingOut` was in the
   // dependency array, so flipping it to true re-ran the effect immediately and
   // the cleanup cleared the 800ms timer — `isReady` never became true and the
   // overlay stayed on screen forever even after the gateway was ready.
+  // 现在的重入防护改走 isFadingOutRef（不触发重渲染、不参与依赖），
+  // 防护语义不变但 effect 永远只随连接状态变化跑一次。
   useEffect(() => {
-    // DEBUG: 强制卡在启动页，注释掉下面整段以恢复
-    if (helixConnected && !isFadingOut) {
+    if (helixConnected && !isFadingOutRef.current) {
+      isFadingOutRef.current = true;
       setShowSuccess(true);
       setIsFadingOut(true);
       const timer = setTimeout(() => {
@@ -78,13 +72,11 @@ export function BootOverlay() {
           params: { stage: string; message: string };
         }>("helix:event", (event) => {
           if (event.payload.method === "bootstrap:progress") {
-            const { stage, message } = event.payload.params;
+            const { stage } = event.payload.params;
             if (stage === "done") {
               setBootstrapStage("done");
-              setBootstrapMessage("");
             } else {
               setBootstrapStage(stage as BootstrapStage);
-              setBootstrapMessage(message);
             }
           }
         });
@@ -108,7 +100,7 @@ export function BootOverlay() {
 
   const retry = () => {
     setGatewayStatus("connecting");
-    const helix = (window as any).electron?.helix;
+    const helix = window.electron?.helix;
     const probe = async (n = 0) => {
       try {
         const st = await helix?.status?.();

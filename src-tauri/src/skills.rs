@@ -63,6 +63,10 @@ pub struct SkillEntry {
     /// the bundling npm package name (e.g. "pi-subagents").
     pub source: String,
     pub path: String,
+    /// pi 的 `disable-model-invocation: true`：模型不主动读它，只能靠
+    /// 显式 `/skill:<name>` 触发。
+    #[serde(rename = "modelInvocationDisabled", default)]
+    pub model_invocation_disabled: bool,
 }
 
 #[tauri::command]
@@ -138,6 +142,59 @@ pub fn helix_list_skills() -> Vec<SkillEntry> {
 
     out.sort_by_key(|a| a.name.to_lowercase());
     out
+}
+
+/// 技能「模型自动调用」开关的返回体。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInvocationResult {
+    /// 真的改写了文件（否则已经是目标状态）。
+    pub changed: bool,
+    /// 修改后「模型自动调用」是否被禁用。
+    pub disabled: bool,
+}
+
+/// `SKILL.md`（或 pi 同样接受的 `README.md`）的完整路径。
+fn skill_markdown_path(skill_dir: &str) -> Option<PathBuf> {
+    let dir = Path::new(skill_dir);
+    for cand in ["SKILL.md", "README.md"] {
+        let p = dir.join(cand);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+#[tauri::command]
+/// 开关「模型自动调用」：翻转 SKILL.md frontmatter 里的
+/// `disable-model-invocation`（pi 唯一认的标记）。开启 = 把标记删掉；
+/// 关闭 = 写上 `disable-model-invocation: true`，此后只能靠显式
+/// `/skill:name` 触发。返回 (改写了, 修改后是否禁用)。
+pub fn helix_set_skill_model_invocation(
+    skill_dir: String,
+    enabled: bool,
+) -> Result<SkillInvocationResult, String> {
+    let path = skill_markdown_path(&skill_dir)
+        .ok_or_else(|| "目录下找不到 SKILL.md / README.md".to_string())?;
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let disable_key = "disable-model-invocation";
+    let new_content = if enabled {
+        strip_frontmatter_true(&content, disable_key)
+    } else {
+        insert_frontmatter_true(&content, disable_key)
+    }
+    .ok_or_else(|| "无法修改 frontmatter".to_string())?;
+    if new_content != content {
+        std::fs::write(&path, new_content).map_err(|e| e.to_string())?;
+        Ok(SkillInvocationResult { changed: true, disabled: !enabled })
+    } else {
+        Ok(SkillInvocationResult {
+            changed: false,
+            disabled: frontmatter_has_true(&content, disable_key)
+                .unwrap_or(!enabled),
+        })
+    }
 }
 
 /// `~/.pi/agent/settings.json` — pi's user settings (its `skills` array lists
@@ -262,7 +319,7 @@ fn collect_skills_from_dir(
     }
 }
 
-/// Build a SkillEntry if `dir` contains a SKILL.md.
+/// Build a SkillEntry if `dir` contains a SKILL.md (or README.md — pi 接受两个)。
 /// `id` — stable identifier (relative path); `fallback_name` — dir name used
 /// when frontmatter has no `name:`; `builtin` — non-user-managed flag (dot
 /// directory, or package-bundled).
@@ -273,7 +330,10 @@ fn read_skill_dir(
     builtin: bool,
     source: &str,
 ) -> Option<SkillEntry> {
-    let content = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
+    let Some(path) = skill_markdown_path(dir.to_str().unwrap_or("")) else {
+        return None;
+    };
+    let content = std::fs::read_to_string(&path).ok()?;
     let (name, description) = parse_skill_frontmatter(&content);
     let name = name.unwrap_or_else(|| fallback_name.to_string());
     Some(SkillEntry {
@@ -286,6 +346,9 @@ fn read_skill_dir(
         is_builtin: builtin,
         source: source.to_string(),
         path: dir.to_string_lossy().into_owned(),
+        model_invocation_disabled:
+            frontmatter_has_true(&content, "disable-model-invocation")
+                .unwrap_or(false),
     })
 }
 
@@ -926,6 +989,65 @@ fn strip_enabled_false(content: &str) -> Option<String> {
     Some(kept.join(""))
 }
 
+/// 判断 frontmatter 里 `key` 是否被显式设成真值（`true` / 裸写）。
+/// 只在前 200 行里搜：frontmatter 永远在文件头，避免撞到正文里偶然
+/// 同名的词。没有 frontmatter 块返回 None。
+fn frontmatter_has_true(content: &str, key: &str) -> Option<bool> {
+    let lines = split_lines_keep_ends(content.strip_prefix('\u{feff}').unwrap_or(content));
+    let close = frontmatter_close(&lines)?;
+    let hit = lines
+        .iter()
+        .take(close)
+        .find(|l| l.trim_start().split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+            .next()
+            .map(str::trim)
+            .map(|s| s.eq_ignore_ascii_case(key))
+            .unwrap_or(false));
+    Some(match hit {
+        Some(l) => {
+            let v = l.splitn(2, ':').nth(1).map(str::trim).unwrap_or("");
+            v.is_empty() || v.eq_ignore_ascii_case("true")
+        }
+        None => false,
+    })
+}
+
+/// 在 frontmatter 开头插入 `key: true`。None = 没有 frontmatter 块。
+fn insert_frontmatter_true(content: &str, key: &str) -> Option<String> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    if frontmatter_has_true(content, key).unwrap_or(false) {
+        return Some(content.to_string());
+    }
+    let mut lines = split_lines_keep_ends(content);
+    frontmatter_close(&lines)?;
+    let eol = if lines[0].ends_with("\r\n") { "\r\n" } else { "\n" };
+    lines.insert(1, format!("{key}: true{eol}"));
+    Some(lines.join(""))
+}
+
+/// 删掉 frontmatter 里 `key` 的所有行（无论值是真还是假）。None = 没有
+/// frontmatter 块；Some(原文) = 本来就没有这一行（调用方报 no-op）。
+fn strip_frontmatter_true(content: &str, key: &str) -> Option<String> {
+    let lines = split_lines_keep_ends(content.strip_prefix('\u{feff}').unwrap_or(content));
+    let close = frontmatter_close(&lines)?;
+    let kept: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, l)| {
+            !(*i > 0 && *i < close && {
+                l.trim_start()
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+                    .next()
+                    .map(str::trim)
+                    .map(|s| s.eq_ignore_ascii_case(key))
+                    .unwrap_or(false)
+            })
+        })
+        .map(|(_, l)| l.clone())
+        .collect();
+    Some(kept.join(""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1015,5 +1137,36 @@ mod tests {
                 .map(|s| (s.name.as_str(), s.source.as_str()))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// 开关前/后 frontmatter 标记的正确性：插入、删除、幂等。
+    #[test]
+    fn skill_frontmatter_disable_flag_roundtrips() {
+        let content = "---\nname: my-skill\ndescription: does stuff\n---\n\n# Body\n";
+        let key = "disable-model-invocation";
+
+        assert_eq!(frontmatter_has_true(content, key), Some(false));
+
+        // 插入：标记出现在第二个位置，其余行不动。
+        let inserted = insert_frontmatter_true(content, key).unwrap();
+        assert!(inserted.starts_with("---\ndisable-model-invocation: true\n"));
+        assert!(inserted.contains("name: my-skill"));
+        assert_eq!(frontmatter_has_true(&inserted, key), Some(true));
+
+        // 幂等：已经禁用了再插一次不会重复写。
+        assert_eq!(insert_frontmatter_true(&inserted, key).unwrap(), inserted);
+
+        // 删除：标记没了，其他行保持原样。
+        let stripped = strip_frontmatter_true(&inserted, key).unwrap();
+        assert_eq!(stripped, content);
+
+        // 没有 frontmatter 块的文件一律返回 None（不动）。
+        assert_eq!(insert_frontmatter_true("just a body", key), None);
+        assert_eq!(strip_frontmatter_true("just a body", key), None);
+
+        // CRLF 文件保留换行风格。
+        let crlf = "---\r\nname: x\r\n---\r\nbody";
+        let ins = insert_frontmatter_true(crlf, key).unwrap();
+        assert!(ins.starts_with("---\r\ndisable-model-invocation: true\r\n"));
     }
 }

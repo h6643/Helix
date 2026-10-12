@@ -193,7 +193,7 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
     // overlapping (non-blocking) restart: the replacement handshakes while
     // the old main keeps serving, so the Tauri command returns instantly
     // instead of blocking on sleep(300ms) + cold spawn.
-    crate::gateway::restart_gateway_now(&state);
+    crate::gateway::restart_gateway_now(&state, "工作区切换（work dir）");
     json!({ "success": true, "workDir": display_path(&canonical) })
 }
 

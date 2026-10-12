@@ -268,6 +268,7 @@ pub fn helix_set_notification_config(updates: Value) -> Value {
 
     let path = crate::config::config_yaml_path();
     if !pending.is_empty() {
+        let _guard = crate::config::config_write_lock();
         let mut yaml = std::fs::read_to_string(&path).unwrap_or_default();
         for (k, v) in &pending {
             yaml = crate::config::set_yaml_key(&yaml, &format!("notifications.{k}"), v);

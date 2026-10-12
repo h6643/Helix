@@ -2,17 +2,19 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { Globe, Maximize2, Minimize2, Plus, X } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import { AgentWorkPanel } from "./agent-work-panel";
 import { BylinePanel } from "./byline-panel";
 import { CodeEditorPanel } from "./code-editor-panel";
 import { DiffSidebarPanel } from "./diff-sidebar-panel";
 import { MoreActionsPage } from "./more-actions-page";
 import { BrowserToolbar, BrowserView } from "./preview-rail";
+import { SessionTreePanel } from "./session-tree-panel";
 import { TerminalPanel } from "./terminal-panel";
 import { isTauri } from "@/lib/tauri-bridge";
 import { cleanUrl, summarizeUrl } from "@/lib/url-utils";
 import { useHelixStore } from "@/stores/helix-store";
+import type { SidebarPage } from "@/stores/slices/sidebar-session-slice";
 
 type PageKind =
   | "browser"
@@ -21,7 +23,8 @@ type PageKind =
   | "agent"
   | "byline"
   | "terminal"
-  | "more";
+  | "more"
+  | "tree";
 interface PanelPage {
   id: string;
   kind: PageKind;
@@ -93,6 +96,7 @@ const PANEL_ORDER: PageKind[] = [
   "agent",
   "byline",
   "terminal",
+  "tree",
   "code",
 ];
 
@@ -118,21 +122,21 @@ export function RightSidebar() {
   const activeEditorTabId = useHelixStore((s) => s.activeEditorTabId);
   const activeAgentView = useHelixStore((s) => s.activeAgentView);
 
-  const [pages, setPages] = useState<PanelPage[]>(() => {
-    const start = cleanUrl(previewRailUrl ?? "") || "";
-    if (tab === "diff") return [{ id: newPageId(), kind: "diff", url: "" }];
-    if (tab === "agent") return [{ id: newPageId(), kind: "agent", url: "" }];
-    if (tab === "byline")
-      return [{ id: newPageId(), kind: "byline", url: "" }];
-    if (tab === "terminal")
-      return [{ id: newPageId(), kind: "terminal", url: "" }];
-    if (tab === "more") return [{ id: newPageId(), kind: "more", url: "" }];
-    if (tab === "browser")
-      return [{ id: newPageId(), kind: "browser", url: start }];
-    return [];
-  });
-  const [activePageId, setActivePageId] = useState<string>(
-    () => pages[0]?.id ?? "",
+  const pages = useHelixStore((s) => s.rightSidebarPages);
+  const setPages = useCallback(
+    (updater: (prev: SidebarPage[]) => SidebarPage[]) => {
+      useHelixStore.getState().setRightSidebarPages(updater(useHelixStore.getState().rightSidebarPages));
+    },
+    [],
+  );
+  const setPagesDirect = useCallback(
+    (value: SidebarPage[]) => useHelixStore.getState().setRightSidebarPages(value),
+    [],
+  );
+  const activePageId = useHelixStore((s) => s.activePageId) ?? "";
+  const setActivePageId = useCallback(
+    (id: string | null) => useHelixStore.getState().setActivePageId(id),
+    [],
   );
 
   // Ref to the whole sidebar.
@@ -190,9 +194,11 @@ export function RightSidebar() {
               ? "byline"
               : tab === "terminal"
                 ? "terminal"
-                : tab === "more"
-                  ? "more"
-                  : null;
+                : tab === "tree"
+                  ? "tree"
+                  : tab === "more"
+                    ? "more"
+                    : null;
     if (!kind) return;
     const existing = pagesRef.current.find((p) => p.kind === kind);
     if (existing) {
@@ -229,7 +235,7 @@ export function RightSidebar() {
       return next;
     });
     setActivePageId(np.id);
-  }, [tab]);
+  }, [tab, setPages, setActivePageId]);
 
   // 「旁路问答」面板的打开落点统一在这里：标题栏「更多操作」、侧栏「＋」、裸
   // `/btw` 都递增 bylineFocusSignal。只靠上面的 tab effect 不够——面板页被 ✕ 关掉
@@ -337,7 +343,7 @@ export function RightSidebar() {
     pendingActivateRef.current = null;
     activePageIdRef.current = id;
     setActivePageId(id);
-  }, [pages]);
+  }, [pages, setActivePageId]);
 
   const updatePageUrl = (id: string, url: string) =>
     setPages((prev) => prev.map((p) => (p.id === id ? { ...p, url } : p)));
@@ -348,7 +354,7 @@ export function RightSidebar() {
     // 第一条被关页的下标：关掉当前页后，落点取"顶上来"的那一条。
     const idx = pages.findIndex((p) => gone.has(p.id));
     const next = pages.filter((p) => !gone.has(p.id));
-    setPages(next);
+    setPagesDirect(next);
     let nextActiveId = activePageId;
     if (gone.has(activePageId)) {
       if (next.length > 0) {
@@ -367,12 +373,24 @@ export function RightSidebar() {
     // 没反应（终端 / 更改 / 子 Agent / 旁路问答这类单条目面板必现）。所以 tab 必须
     // 跟着现实退位到真正落在屏幕上的那一面。
     const currentTab = useHelixStore.getState().rightSidebarTab;
+
+    // 关掉最后一个"真正的"页签后只剩「更多」菜单页（或全关光），用户视角是
+    // 「没有标签了」—— 直接收起侧栏，不等异步收回 effect。
+    const hasRealPages = next.some((p) => p.kind !== "more");
+    if (!hasRealPages && editorTabs.length === 0) {
+      setTab(null);
+      if (codeFullscreen) toggleCodeFullscreen();
+      return;
+    }
+
     if (currentTab && !next.some((p) => p.kind === currentTab)) {
       const landed = next.find((p) => p.id === nextActiveId);
-      // 页签全关光且没开文件时不动 tab：那由下面的收回 effect 统一处理，它还要
-      // 顺带退出代码全屏——这里直接 setTab(null) 会漏掉那一步（空白屏）。
       if (landed) setTab(landed.kind);
       else if (editorTabs.length > 0) setTab("code");
+      else {
+        setTab(null);
+        if (codeFullscreen) toggleCodeFullscreen();
+      }
     }
   };
 
@@ -437,7 +455,7 @@ export function RightSidebar() {
     setPages((prev) => [...prev, np]);
     activePageIdRef.current = np.id;
     setActivePageId(np.id);
-  }, [browserAddSeq]);
+  }, [browserAddSeq, setPages, setActivePageId]);
 
   // Close the whole code view (empty-state "关闭编辑器" button).
   const closeCodeView = () => {
@@ -457,7 +475,7 @@ export function RightSidebar() {
     ) {
       setActivePageId(pages[0].id);
     }
-  }, [editorTabs.length, pages, activePageId]);
+  }, [editorTabs.length, pages, activePageId, setActivePageId]);
 
   // Track whether the panel has EVER shown content in this session. We use this
   // to distinguish "the user closed the last tab" (→ retract) from "the code view
@@ -477,10 +495,10 @@ export function RightSidebar() {
   // when we retract, BOTH the conversation card (hidden by codeFullscreen) AND
   // the right sidebar (hidden by rightSidebarTab=null) become invisible —
   // producing a blank screen where nothing renders at all.
-  const doRetract = () => {
+  const doRetract = useCallback(() => {
     setTab(null);
     if (codeFullscreen) toggleCodeFullscreen();
-  };
+  }, [setTab, codeFullscreen, toggleCodeFullscreen]);
 
   // 用 pagesRef / editorTabsRef 判断「是否还有页签」而不是 effect 闭包里的
   // pages/editorTabs：点击链接时会 setRightSidebarTab('browser') 与页面创建
@@ -505,7 +523,7 @@ export function RightSidebar() {
     ) {
       doRetract();
     }
-  }, [tab, pages, editorTabs]);
+  }, [tab, pages, editorTabs, doRetract]);
 
   // The sidebar is always mounted (the parent toggles visibility via the `hidden`
   // class). Render a minimal shell when there are no pages AND no open files so
@@ -545,7 +563,9 @@ export function RightSidebar() {
             ? "旁路问答"
             : k === "terminal"
               ? "终端"
-              : "代码";
+              : k === "tree"
+                ? "会话树"
+                : "代码";
   const openKind = (k: PageKind) => {
     if (k === "code") {
       setActivePageId("");
@@ -717,6 +737,7 @@ export function RightSidebar() {
                     />
                   )}
                   {p.kind === "more" && <MoreActionsPage />}
+                  {p.kind === "tree" && <SessionTreePanel />}
                 </div>
               );
             });

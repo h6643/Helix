@@ -8,6 +8,7 @@ import { isElectron } from "@/lib/electron-bridge";
 import {
   type HookType,
   type HookConfig,
+  type HooksConfig,
   type HooksSettings,
   HOOK_META,
   HOOK_TYPES,
@@ -32,13 +33,11 @@ export function HookSettings() {
 
     const loadConfig = async () => {
       try {
-        let r: any;
-        if (isTauri()) {
-          const { invoke } = await import("@tauri-apps/api/core");
-          r = await invoke("hooks_list");
-        } else {
-          r = await window.electron.hooks.getConfig();
-        }
+        const r: { ok?: boolean; config?: HooksConfig } = isTauri()
+          ? await import("@tauri-apps/api/core").then(({ invoke }) =>
+              invoke("hooks_list"),
+            )
+          : await window.electron.hooks.getConfig();
 
         if (r.ok && r.config) {
           const hooks: HookConfig[] = [];
@@ -49,8 +48,8 @@ export function HookSettings() {
                   hooks.push({
                     id: generateHookId(),
                     type: event as HookType,
-                    command: (h as any).command || "",
-                    matcher: (h as any).matcher || "",
+                    command: h.command || "",
+                    matcher: h.matcher || "",
                     enabled: true,
                   });
                 }
@@ -119,18 +118,16 @@ export function HookSettings() {
         });
       }
 
-      let r: any;
-      if (isTauri()) {
-        const { invoke } = await import("@tauri-apps/api/core");
-        r = await invoke("hooks_save", {
-          config: { enabled: settings.enabled, hooks: hooksConfig },
-        });
-      } else {
-        r = await window.electron.hooks.setConfig({
-          enabled: settings.enabled,
-          hooks: hooksConfig,
-        });
-      }
+      const r: { ok?: boolean } = isTauri()
+        ? await import("@tauri-apps/api/core").then(({ invoke }) =>
+            invoke("hooks_save", {
+              config: { enabled: settings.enabled, hooks: hooksConfig },
+            }),
+          )
+        : await window.electron.hooks.setConfig({
+            enabled: settings.enabled,
+            hooks: hooksConfig,
+          });
       setSaveState(r.ok ? "ok" : "err");
     } catch {
       setSaveState("err");

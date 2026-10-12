@@ -125,9 +125,6 @@ export function pushModelConfig(payload: {
     return;
   }
 
-  // Electron mode: serve vs IPC
-  const mode = getGatewayMode();
-
   // 按"模式"分流，而不是按"连接状态"（isServeActive）分流。
   // 关键竞态：App 启动时 helix-layout 立即调本函数，此刻 serve 还在冷启动、
   // WS 未连上 → isServeActive()===false → 若据此落 IPC，会触发
@@ -158,32 +155,6 @@ export function pushModelConfig(payload: {
     }
     pushModelConfigViaIpc(modelPayload, hasModelPayload);
   })();
-}
-
-/**
- * One-time push of a FRESHLY-SAVED api key (settings page save). Unlike
- * pushModelConfig this carries the key — it must only be called from an
- * explicit user save action, never from startup re-assertions.
- */
-export function pushModelConfigWithKey(payload: {
-  model?: string;
-  provider?: string;
-  baseUrl?: string;
-  apiKey?: string;
-}) {
-  if (!isElectron()) {
-    // Tauri mode: setConfig carries the key once (backend keeps it in
-    // models.json / auth.json from here on).
-    const helix = window.electron?.helix;
-    if (helix?.setConfig) {
-      helix.setConfig(payload).catch((e: unknown) => {
-        console.warn("[config-sync] tauri setConfig(key) 失败:", e);
-      });
-    }
-    return;
-  }
-  // Electron acp mode: reuse the IPC path (carries the key once).
-  pushModelConfigViaIpc(payload, true);
 }
 
 /** acp 模式的原有链路：冷启动缓存 + IPC setConfig（会写 config.yaml 并重启网关） */

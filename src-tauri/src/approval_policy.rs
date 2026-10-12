@@ -569,6 +569,7 @@ pub fn helix_set_permission_mode(
     session_id: Option<String>,
     cwd: Option<String>,
 ) -> Value {
+    let _guard = crate::config::config_write_lock();
     let scope = match parse_scope(scope.as_deref()) {
         Ok(s) => s,
         Err(e) => return json!({ "ok": false, "error": e }),
@@ -692,6 +693,7 @@ pub fn helix_clear_permission_override(
     session_id: Option<String>,
     cwd: Option<String>,
 ) -> Value {
+    let _guard = crate::config::config_write_lock();
     let scope = match parse_scope(Some(scope.as_str())) {
         Ok(s) => s,
         Err(e) => return json!({ "ok": false, "error": e }),
@@ -764,6 +766,7 @@ pub fn helix_clear_permission_override(
 /// （与档位切换同一限制，本地值只作卡片倒计时的展示锚点）。
 #[tauri::command]
 pub fn helix_set_approval_timeout_sec(seconds: i64) -> Value {
+    let _guard = crate::config::config_write_lock();
     let sec = seconds.clamp(MIN_APPROVAL_TIMEOUT_SEC as i64, MAX_APPROVAL_TIMEOUT_SEC as i64) as u64;
     let path = config_path();
 
@@ -1029,6 +1032,7 @@ pub fn helix_get_permission_rules() -> Value {
 /// 写用户规则（整组替换）。校验失败一条都不写。
 #[tauri::command]
 pub fn helix_set_permission_rules(rules: Vec<Value>) -> Value {
+    let _guard = crate::config::config_write_lock();
     let normalized = match normalize_rule_list(&rules) {
         Ok(v) => v,
         Err(errs) => {

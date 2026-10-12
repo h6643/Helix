@@ -89,7 +89,7 @@ export function CustomizePanel({ onClose }: CustomizePanelProps) {
 // ─── Shortcuts Section ────────────────────────────────────────────────────
 
 function ShortcutsSection() {
-  const { customShortcuts, updateCustomShortcut, showToast } = useHelixStore();
+  const { customShortcuts, updateCustomShortcut } = useHelixStore();
 
   const shortcuts = Object.entries(customShortcuts);
   const defaultIds = Object.keys(DEFAULT_SHORTCUTS);
@@ -251,7 +251,7 @@ function ShortcutsSection() {
 // ─── Instructions Section ─────────────────────────────────────────────────
 
 function InstructionsSection() {
-  const { personality, setPersonality, showToast } = useHelixStore();
+  const { personality, setPersonality } = useHelixStore();
   const [localPersonality, setLocalPersonality] = useState(personality);
 
   const handleSave = () => {
@@ -344,7 +344,6 @@ function AppearanceSection() {
     setFontSize,
     interfaceFont,
     setInterfaceFont,
-    showToast,
   } = useHelixStore();
 
   const fontOptions = [

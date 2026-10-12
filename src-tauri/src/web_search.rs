@@ -359,6 +359,7 @@ pub fn web_search_config_save(config: Value) -> Value {
     }
 
     let path = crate::config::config_yaml_path();
+    let _guard = crate::config::config_write_lock();
     let mut yaml = std::fs::read_to_string(&path).unwrap_or_default();
     for (k, v) in &pending {
         yaml = crate::config::set_yaml_key(&yaml, &format!("web_search.{k}"), &json!(v));

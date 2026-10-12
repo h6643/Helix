@@ -1,11 +1,10 @@
-﻿import { helixApi } from "@/lib/electron-bridge";
+﻿import { resolveBackendSid } from "@/lib/session-map";
 import {
   brokenReasonFromResume,
   isSessionGone,
   resumeFailureDescription,
   resumeSession,
 } from "@/lib/session-resume";
-import { loadSessionMap, resolveBackendSid } from "@/lib/session-map";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 import type { ChatMessage } from "@/stores/helix-types";
@@ -55,27 +54,52 @@ export function isGatewayNoteMessage(m: {
  *  - `tool` roles are collapsed to `assistant` (tool results render as assistant turns);
  *  - `row_id` is preserved so local withdraw/delete can sync to the backend history.
  */
+/** 后端 session history 投影过来的原始消息形状
+ * （tui_gateway/server.py::_history_to_messages）：正文在 `text` 而非 `content`；
+ * `row_id` 透传以便本地撤回/删除能同步回后端历史。标 unknown 的字段是后端
+ * 动态 JSON 字段，在校验/收窄前不能盲信其类型。 */
+export interface BackendHistoryMessage {
+  id?: unknown;
+  row_id?: unknown;
+  role?: unknown;
+  text?: unknown;
+  content?: unknown;
+  images?: ChatMessage["images"];
+  timestamp?: unknown;
+  reasoning?: unknown;
+  reasoning_content?: unknown;
+  steps?: ChatMessage["steps"];
+  fileChanges?: ChatMessage["fileChanges"];
+  blocks?: ChatMessage["blocks"];
+}
+
 export function mapBackendMessages(
-  msgs: any[] | null | undefined,
+  msgs: BackendHistoryMessage[] | null | undefined,
   sessionId: string,
 ): ChatMessage[] {
   if (!Array.isArray(msgs)) return [];
   return msgs
-    .filter((m: any) => !isGatewayNoteMessage(m))
-    .map((m: any) => ({
-      id: m.id || m.row_id || genId(),
-      role: (m.role === "tool" ? "assistant" : m.role) as
-        "user" | "assistant" | "system",
-      content: m.text ?? m.content ?? "",
-      images: m.images,
-      timestamp: m.timestamp || Date.now(),
-      reasoning: m.reasoning ?? m.reasoning_content,
-      steps: m.steps,
-      rowId: m.row_id,
-      sessionId,
-      fileChanges: m.fileChanges,
-      blocks: m.blocks,
-    }));
+    .filter((m) => !isGatewayNoteMessage(m))
+    .map((m) => {
+      const id = m.id || m.row_id || genId();
+      const timestamp = m.timestamp || Date.now();
+      const reasoning = m.reasoning ?? m.reasoning_content;
+      return {
+        id: typeof id === "string" ? id : String(id),
+        role: (m.role === "tool" ? "assistant" : m.role) as
+          "user" | "assistant" | "system",
+        content: (m.text ?? m.content ?? "") as ChatMessage["content"],
+        images: m.images,
+        timestamp: typeof timestamp === "number" ? timestamp : Date.now(),
+        reasoning:
+          typeof reasoning === "string" ? reasoning : undefined,
+        steps: m.steps,
+        rowId: typeof m.row_id === "number" ? m.row_id : undefined,
+        sessionId,
+        fileChanges: m.fileChanges,
+        blocks: m.blocks,
+      };
+    });
 }
 
 export interface ResyncOptions {
@@ -160,7 +184,10 @@ export async function resyncCurrentSessionFromBackend(
         });
       return 0;
     }
-    const msgs = mapBackendMessages(resumed.messages, currentSessionId);
+    const msgs = mapBackendMessages(
+      resumed.messages as BackendHistoryMessage[],
+      currentSessionId,
+    );
     // 不让视图**变小**：后端快照比本地可见历史更短 = 后端滞后（刚提交的消息
     // 还没落 state.db）或已被压缩摘要掉。无条件整段替换会把用户看得见的内容
     // 删掉（"之前用户的输入自动消失"），而 /resync 的诉求是"把丢掉的找回来"，

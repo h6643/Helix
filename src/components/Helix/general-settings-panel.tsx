@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import { CodemodeSettingsPanel } from "./codemode-settings";
 import {
   SettingRow,
   SettingGroup,
@@ -11,7 +12,7 @@ import {
 import { WebSearchSettings } from "./web-search-settings";
 import { Button } from "@/components/ui/button";
 import { runAutoArchiveScan } from "@/lib/auto-archive";
-import { electronApp, electronDialog } from "@/lib/electron-bridge";
+import { electronApp, electronDialog, getElectronAPI } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
 /** 审批卡超时预设（秒）：1/2/5/10/30 分钟。范围 [30,3600] 由扩展与后端收敛。 */
@@ -214,6 +215,11 @@ export function GeneralSettingsPanel() {
   // 审批卡超时（settings.json permission.approvalTimeoutSec；下拉显示回读值）。
   const [approvalTimeoutBusy, setApprovalTimeoutBusy] = useState(false);
 
+  const [cacheWarming, setCacheWarming] = useState<
+    "off" | "streaming" | "idle"
+  >("streaming");
+  const [cacheBusy, setCacheBusy] = useState<Set<string>>(new Set());
+
   // 通知开关（config.yaml notifications: 块）；改完即生效，本页无保存按钮。
   const [notifyPrefs, setNotifyPrefs] =
     useState<NotifyPrefs>(DEFAULT_NOTIFY_PREFS);
@@ -293,6 +299,64 @@ export function GeneralSettingsPanel() {
   useEffect(() => {
     void syncApprovalTimeoutSec();
   }, [syncApprovalTimeoutSec]);
+
+  // 回读提示缓存与显示（pi settings.json）。
+  useEffect(() => {
+    const api = getElectronAPI();
+    if (!api) return;
+    let cancelled = false;
+    api.helix
+      .piAdvancedConfig()
+      .then((r) => {
+        if (cancelled || !r?.ok || !r.settings) return;
+        const s = r.settings as Record<string, unknown>;
+        if (
+          s.cacheWarming === "off" ||
+          s.cacheWarming === "streaming" ||
+          s.cacheWarming === "idle"
+        )
+          setCacheWarming(s.cacheWarming);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 写提示缓存与显示：piAdvancedSet 落盘后自动重放 pi 进程。
+  const applyCacheSetting = async (
+    key: string,
+    value: unknown,
+    applyLocal: () => void,
+  ) => {
+    const api = getElectronAPI();
+    if (!api) return;
+    setCacheBusy((prev) => new Set(prev).add(key));
+    try {
+      const r = await api.helix.piAdvancedSet({ [key]: value });
+      if (r?.ok) {
+        applyLocal();
+      } else {
+        showToast({
+          type: "error",
+          title: "保存失败",
+          description: r?.errors?.join("；") || r?.error || "",
+        });
+      }
+    } catch (e) {
+      showToast({
+        type: "error",
+        title: "保存失败",
+        description: String(e),
+      });
+    } finally {
+      setCacheBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
 
   // 回读通知偏好。读不到（纯浏览器 dev / 旧 preload）就停在默认值 —— 那正是
   // 本功能改造前的固定行为，下拉不会假装出一个后端没有的档位。
@@ -551,6 +615,17 @@ export function GeneralSettingsPanel() {
         <WebSearchSettings />
       </div>
 
+      {/* Codemode：真相在 pi 的 settings.json（经后端 codemodeConfig 读写），
+          与「提示缓存与显示」同构，改完即存、无保存按钮。 */}
+      <div className="pt-1">
+        <div className="px-4 pt-3 pb-2">
+          <h4 className="ui-subtitle font-semibold text-foreground">
+            Codemode
+          </h4>
+        </div>
+        <CodemodeSettingsPanel />
+      </div>
+
       <div className="pt-1">
         <div className="px-4 pt-3 pb-2">
           <h4 className="ui-subtitle font-semibold text-foreground">审批</h4>
@@ -656,6 +731,39 @@ export function GeneralSettingsPanel() {
             >
               打开系统设置
             </button>
+          </SettingRow>
+        </SettingGroup>
+      </div>
+
+      {/* 提示缓存与显示：真相在 pi 的 settings.json，经后端白名单读写。 */}
+      <div className="pt-1">
+        <div className="px-4 pt-3 pb-2">
+          <h4 className="ui-subtitle font-semibold text-foreground">
+            提示缓存与显示
+          </h4>
+        </div>
+        <SettingGroup>
+          <SettingRow
+            label="缓存保活"
+            hint="streaming = 回合内保活；idle = 回合间也保活（会继续花钱）"
+          >
+            <PopupSelect
+              value={cacheWarming}
+              options={[
+                { label: "off", value: "off" },
+                { label: "streaming", value: "streaming" },
+                { label: "idle", value: "idle" },
+              ]}
+              className="w-32"
+              disabled={cacheBusy.has("cacheWarming")}
+              onChange={(v) =>
+                void applyCacheSetting(
+                  "cacheWarming",
+                  v,
+                  () => setCacheWarming(v as "off" | "streaming" | "idle"),
+                )
+              }
+            />
           </SettingRow>
         </SettingGroup>
       </div>

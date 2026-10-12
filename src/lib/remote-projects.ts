@@ -99,7 +99,7 @@ export function matchActiveRemote(
 /** 查隧道状态。任何异常都归一成「未知/未连接」，绝不向上抛。 */
 export async function fetchRemoteStatus(): Promise<RemoteTunnelStatus | null> {
   try {
-    const api = (window as any).electron?.helix;
+    const api = window.electron?.helix;
     if (!api?.remoteTunnelStatus) return null;
     return (await api.remoteTunnelStatus()) as RemoteTunnelStatus;
   } catch {
@@ -120,7 +120,7 @@ export async function connectRemoteProject(
   svc: Pick<ExternalService, "host" | "port" | "username">,
   remotePath?: string,
 ): Promise<{ localPort?: number }> {
-  const api = (window as any).electron?.helix;
+  const api = window.electron?.helix;
   if (!api?.remoteConnect) throw new Error("远程连接 IPC 不可用");
   const r = await api.remoteConnect({
     host: svc.host,
@@ -133,7 +133,7 @@ export async function connectRemoteProject(
 
 /** 断开：清 config 两个键 + 杀本机隧道 + 重启 gateway（同样会打断对话）。 */
 export async function disconnectRemoteProject(): Promise<void> {
-  const api = (window as any).electron?.helix;
+  const api = window.electron?.helix;
   if (!api?.remoteDisconnect) throw new Error("远程断开 IPC 不可用");
   await api.remoteDisconnect();
 }
@@ -146,7 +146,7 @@ export async function disconnectRemoteProject(): Promise<void> {
 export async function preflightRemoteProject(
   svc: Pick<ExternalService, "host" | "port" | "username">,
 ): Promise<RemotePreflightResult> {
-  const api = (window as any).electron?.helix;
+  const api = window.electron?.helix;
   if (!api?.remotePreflight) throw new Error("远程体检 IPC 不可用");
   return (await api.remotePreflight({
     host: svc.host,
@@ -166,7 +166,7 @@ export async function listRemotePaths(
   path: string,
   includeHidden?: boolean,
 ): Promise<{ cwd: string; paths: string[] }> {
-  const api = (window as any).electron?.helix;
+  const api = window.electron?.helix;
   if (!api?.remoteListPaths) throw new Error("远程目录浏览 IPC 不可用");
   const r = await api.remoteListPaths({
     host: svc.host,

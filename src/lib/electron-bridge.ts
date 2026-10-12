@@ -72,6 +72,17 @@ export function helixApi(): ElectronAPI["helix"] | null {
 }
 
 /**
+ * 通用 RPC 调用。绕过 HelixStoreApi 上那些声明了但从未接线的声明式方法
+ * （compact / fork / cycleThinkingLevel …），直接走 Tauri 桥的 send。
+ */
+export async function sendRpc(
+  method: string,
+  params?: unknown,
+): Promise<unknown> {
+  return helixApi()!.send(method, params);
+}
+
+/**
  * File system operations that work in both browser and Electron
  * In browser: uses IndexedDB via existing persist.ts
  * In Electron: uses IPC to main process

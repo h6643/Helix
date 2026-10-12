@@ -149,6 +149,9 @@ fn save_yaml_block(servers: &Map<String, Value>) -> Result<(), String> {
 }
 
 fn save_yaml_block_at(path: &std::path::Path, servers: &Map<String, Value>) -> Result<(), String> {
+    // This whole function is a read-modify-write of config.yaml's `subagents:`
+    // block, so it holds the config lock for the entire body.
+    let _guard = crate::config::config_write_lock();
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = existing.lines().collect();
 
@@ -476,7 +479,7 @@ pub fn subagents_settings_save(
     mirror_to_subagents_json(obj);
     // The extension reads settings.json at process start — respawn pi so
     // the change takes effect for the running agent.
-    gateway::restart_gateway_soon(&Arc::clone(&state));
+    gateway::restart_gateway_soon(&Arc::clone(&state), "子智能体扩展设置保存");
     json!({ "ok": true })
 }
 

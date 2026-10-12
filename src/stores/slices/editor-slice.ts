@@ -8,6 +8,11 @@
  * (helix-store → editor-slice → electron-bridge → helix-store). The slice only
  * manages in-memory tab state; the component performs the IO and then calls
  * markEditorTabSaved() once the write succeeds.
+ *
+ * Per-session: editorTabs and activeEditorTabId are the *current-session view*.
+ * The backing stores (editorTabsBySession, activeEditorTabIdBySession) hold
+ * the data for every session.  swapEditorSession() is called from
+ * setCurrentSessionId to swap the view in and out.
  */
 import type { StateCreator } from "zustand";
 
@@ -36,6 +41,7 @@ interface EditorRevealRequest {
 }
 
 export interface EditorSlice {
+  // ── Current-session view (synced by swapEditorSession) ─────────────────
   editorOpen: boolean;
   editorTabs: EditorTab[];
   activeEditorTabId: string | null;
@@ -43,6 +49,10 @@ export interface EditorSlice {
   pendingCloseId: string | null;
   /** 一次性的「跳到指定行」请求（见 revealEditorRange）。 */
   editorReveal: EditorRevealRequest | null;
+
+  // ── Per-session backing stores ──────────────────────────────────────────
+  editorTabsBySession: Record<string, EditorTab[]>;
+  activeEditorTabIdBySession: Record<string, string | null>;
 
   openFileInEditor: (path: string, name: string, content: string) => void;
   /** Synchronously create / activate a tab carrying only the file NAME (empty
@@ -79,6 +89,44 @@ function clearStaleReveal(
   if (cur && cur.path !== path) set({ editorReveal: null });
 }
 
+/** Get the current session id from the store (safe cast). */
+function currentCid(
+  s: { currentSessionId: string | null },
+): string {
+  return s.currentSessionId ?? "__draft__";
+}
+
+/** Write editorTabs to both the flat view and the per-session backing store. */
+function updateTabs(
+  s: EditorSlice,
+  updater: (prev: EditorTab[]) => EditorTab[],
+) {
+  const cid = currentCid(s as EditorSlice & { currentSessionId: string | null });
+  const next = updater(s.editorTabs);
+  return {
+    editorTabs: next,
+    editorTabsBySession: {
+      ...s.editorTabsBySession,
+      [cid]: next,
+    },
+  };
+}
+
+/** Write activeEditorTabId to both the flat view and the per-session backing store. */
+function updateActiveTab(
+  s: EditorSlice,
+  id: string | null,
+) {
+  const cid = currentCid(s as EditorSlice & { currentSessionId: string | null });
+  return {
+    activeEditorTabId: id,
+    activeEditorTabIdBySession: {
+      ...s.activeEditorTabIdBySession,
+      [cid]: id,
+    },
+  };
+}
+
 export const createEditorSlice: StateCreator<
   EditorSlice,
   [],
@@ -90,11 +138,16 @@ export const createEditorSlice: StateCreator<
   activeEditorTabId: null,
   pendingCloseId: null,
   editorReveal: null,
+  editorTabsBySession: {},
+  activeEditorTabIdBySession: {},
 
   openFileInEditor: (path, name, content) => {
     const existing = get().editorTabs.find((t) => t.id === path);
     if (existing) {
-      set({ activeEditorTabId: path, editorOpen: true });
+      set((s) => ({
+        editorOpen: true,
+        ...updateActiveTab(s, path),
+      }));
       clearStaleReveal(get, set, path);
       return;
     }
@@ -107,9 +160,9 @@ export const createEditorSlice: StateCreator<
       dirty: false,
     };
     set((s) => ({
-      editorTabs: [...s.editorTabs, tab],
-      activeEditorTabId: path,
       editorOpen: true,
+      ...updateTabs(s, (prev) => [...prev, tab]),
+      ...updateActiveTab(s, path),
     }));
     clearStaleReveal(get, set, path);
   },
@@ -117,7 +170,10 @@ export const createEditorSlice: StateCreator<
   ensureEditorTab: (path, name) => {
     const existing = get().editorTabs.find((t) => t.id === path);
     if (existing) {
-      set({ activeEditorTabId: path, editorOpen: true });
+      set((s) => ({
+        editorOpen: true,
+        ...updateActiveTab(s, path),
+      }));
       clearStaleReveal(get, set, path);
       return false;
     }
@@ -130,51 +186,79 @@ export const createEditorSlice: StateCreator<
       dirty: false,
     };
     set((s) => ({
-      editorTabs: [...s.editorTabs, tab],
-      activeEditorTabId: path,
       editorOpen: true,
+      ...updateTabs(s, (prev) => [...prev, tab]),
+      ...updateActiveTab(s, path),
     }));
     clearStaleReveal(get, set, path);
     return true;
   },
 
   fillEditorTabContent: (path, content) => {
-    set((s) => ({
-      editorTabs: s.editorTabs.map((t) =>
-        t.id === path
-          ? { ...t, content, originalContent: content, dirty: false }
-          : t,
+    set((s) =>
+      updateTabs(s, (prev) =>
+        prev.map((t) =>
+          t.id === path
+            ? { ...t, content, originalContent: content, dirty: false }
+            : t,
+        ),
       ),
-    }));
+    );
   },
 
   closeEditorTab: (id) => {
     set((s) => {
-      const idx = s.editorTabs.findIndex((t) => t.id === id);
-      const tabs = s.editorTabs.filter((t) => t.id !== id);
-      let active = s.activeEditorTabId;
+      const st = s as EditorSlice & { currentSessionId: string | null };
+      const cid = currentCid(st);
+      const tabs = st.editorTabs.filter((t) => t.id !== id);
+      const idx = st.editorTabs.findIndex((t) => t.id === id);
+      let active = st.activeEditorTabId;
       if (active === id) {
         if (tabs.length === 0) active = null;
         else active = tabs[Math.min(idx, tabs.length - 1)].id;
       }
       return {
         editorTabs: tabs,
+        editorTabsBySession: {
+          ...st.editorTabsBySession,
+          [cid]: tabs,
+        },
         activeEditorTabId: active,
-        editorOpen: tabs.length > 0 ? s.editorOpen : false,
-        editorReveal: s.editorReveal?.path === id ? null : s.editorReveal,
+        activeEditorTabIdBySession: {
+          ...st.activeEditorTabIdBySession,
+          [cid]: active,
+        },
+        editorOpen: tabs.length > 0 ? st.editorOpen : false,
+        editorReveal: st.editorReveal?.path === id ? null : st.editorReveal,
       };
     });
   },
 
   closeAllEditorTabs: () =>
-    set({
-      editorTabs: [],
-      activeEditorTabId: null,
-      editorOpen: false,
-      editorReveal: null,
+    set((s) => {
+      const st = s as EditorSlice & { currentSessionId: string | null };
+      const cid = currentCid(st);
+      return {
+        editorTabs: [],
+        editorTabsBySession: {
+          ...st.editorTabsBySession,
+          [cid]: [],
+        },
+        activeEditorTabId: null,
+        activeEditorTabIdBySession: {
+          ...st.activeEditorTabIdBySession,
+          [cid]: null,
+        },
+        editorOpen: false,
+        editorReveal: null,
+      };
     }),
 
-  setActiveEditorTab: (id) => set({ activeEditorTabId: id, editorOpen: true }),
+  setActiveEditorTab: (id) =>
+    set((s) => ({
+      editorOpen: true,
+      ...updateActiveTab(s, id),
+    })),
 
   setPendingCloseId: (id) => set({ pendingCloseId: id }),
 
@@ -192,23 +276,64 @@ export const createEditorSlice: StateCreator<
   },
 
   updateEditorTabContent: (id, content) => {
-    set((s) => ({
-      editorTabs: s.editorTabs.map((t) =>
-        t.id === id
-          ? { ...t, content, dirty: content !== t.originalContent }
-          : t,
+    set((s) =>
+      updateTabs(s, (prev) =>
+        prev.map((t) =>
+          t.id === id
+            ? { ...t, content, dirty: content !== t.originalContent }
+            : t,
+        ),
       ),
-    }));
+    );
   },
 
   markEditorTabSaved: (id) => {
-    set((s) => ({
-      editorTabs: s.editorTabs.map((t) =>
-        t.id === id ? { ...t, originalContent: t.content, dirty: false } : t,
+    set((s) =>
+      updateTabs(s, (prev) =>
+        prev.map((t) =>
+          t.id === id ? { ...t, originalContent: t.content, dirty: false } : t,
+        ),
       ),
-    }));
+    );
   },
 
   toggleCodeEditor: () => set((s) => ({ editorOpen: !s.editorOpen })),
   closeCodeEditor: () => set({ editorOpen: false }),
 });
+
+/**
+ * Pure swap function: save the current session's editor state and restore the
+ * target session's. Called from `setCurrentSessionId` alongside
+ * `swapRightSidebarTab` and `swapSidebarSession`.
+ */
+export function swapEditorSession(
+  state: EditorSlice & { currentSessionId: string | null },
+  nextId: string | null,
+): Partial<EditorSlice> {
+  const cid = currentCid(state);
+
+  // Save current session's state
+  const tabsBySession = {
+    ...state.editorTabsBySession,
+    [cid]: state.editorTabs,
+  };
+  const activeTabIdBySession = {
+    ...state.activeEditorTabIdBySession,
+    [cid]: state.activeEditorTabId,
+  };
+
+  if (!nextId) {
+    return {
+      editorTabsBySession: tabsBySession,
+      activeEditorTabIdBySession: activeTabIdBySession,
+    };
+  }
+
+  // Restore target session's state
+  return {
+    editorTabsBySession: tabsBySession,
+    activeEditorTabIdBySession: activeTabIdBySession,
+    editorTabs: tabsBySession[nextId] ?? [],
+    activeEditorTabId: activeTabIdBySession[nextId] ?? null,
+  };
+}

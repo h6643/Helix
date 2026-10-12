@@ -52,6 +52,10 @@ const KIND_TO_CODE: Record<string, ResumeErrorCode> = {
  * "no session file" 必须在最前面判断——包装后的
  * `session restore task failed: no session file for …` 也必须算
  * SESSION_NOT_FOUND。
+ *
+ * `switch_session` / `get_state` 是 pi 的 RPC 方法名（下划线），实际文本里
+ * 只有这一种形式；先前只收带空格的 "switch session"，于是「网关重启掐断
+ * 在飞握手」这类**可重试**故障全被降成 INTERNAL。
  */
 export function classifyResumeError(err: unknown): {
   code: ResumeErrorCode;
@@ -68,7 +72,7 @@ export function classifyResumeError(err: unknown): {
   )
     return { code: "SESSION_NOT_FOUND", error: msg };
   if (
-    /session_restore_failed|restore failed|switch session|permission|access denied|denied|corrupt|parse|decode|timeout/.test(
+    /session_restore_failed|restore failed|switch[_ ]session|get_state|permission|access denied|denied|corrupt|parse|decode|timeout/.test(
       m,
     )
   )
@@ -90,9 +94,17 @@ export function classifyResumeError(err: unknown): {
  */
 export async function resumeSession(sid: string): Promise<ResumeResult> {
   try {
+    // 只声明实际读到的字段（error/error_kind 是结构化失败分支，
+    // session_id/sessionID 是诊断分支，messages 是成功分支）。
     const res = (await helixApi()?.send("session/resume", {
       session_id: sid,
-    })) as any;
+    })) as {
+      error?: string;
+      error_kind?: string;
+      session_id?: string;
+      sessionID?: string;
+      messages?: unknown[];
+    };
     // Rust 网关失败时返回结构化响应 { error, error_kind }，不是 throw。
     if (res && typeof res === "object" && (res.error || res.error_kind)) {
       const kind = String(res.error_kind ?? "");

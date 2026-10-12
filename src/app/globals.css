@@ -1046,12 +1046,10 @@ input[type="number"] {
 @keyframes helix-compress-breathe {
   0%,
   100% {
-    background-color: color-mix(in oklch, var(--primary) 6%, transparent);
-    border-color: color-mix(in oklch, var(--primary) 20%, transparent);
+    opacity: 0.55;
   }
   50% {
-    background-color: color-mix(in oklch, var(--primary) 13%, transparent);
-    border-color: color-mix(in oklch, var(--primary) 36%, transparent);
+    opacity: 1;
   }
 }
 .animate-compress-breathe {

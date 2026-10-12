@@ -4,13 +4,10 @@ import {
   Search,
   Plus,
   Clock,
-  Play,
-  Pause,
   Trash2,
   RefreshCw,
   MoreHorizontal,
   Circle,
-  X,
 } from "lucide-react";
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { getSnapshot, query } from "./channels-center-state";
@@ -476,7 +473,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
   useEffect(() => {
     const load = async () => {
       try {
-        const electron = (window as any).electron;
+        const electron = window.electron;
         if (!electron?.scheduledTasks?.list) return;
         const res = await electron.scheduledTasks.list();
         if (!res.ok || !Array.isArray(res.tasks)) return;
@@ -514,7 +511,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
       let backendId: string | undefined;
       let backendNextRun: number | null = parsed.nextRun;
       try {
-        const electron = (window as any).electron;
+        const electron = window.electron;
         if (electron?.scheduledTasks?.create) {
           const res = await electron.scheduledTasks.create({
             name: label,
@@ -606,7 +603,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
     async (task: ScheduledTask) => {
       toggleScheduledTask(task.id);
       try {
-        const electron = (window as any).electron;
+        const electron = window.electron;
         if (electron?.scheduledTasks?.update) {
           await electron.scheduledTasks.update({
             id: task.id,
@@ -624,7 +621,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
     async (task: ScheduledTask) => {
       removeScheduledTask(task.id);
       try {
-        const electron = (window as any).electron;
+        const electron = window.electron;
         if (electron?.scheduledTasks?.remove) {
           await electron.scheduledTasks.remove({ id: task.id });
         }
@@ -645,7 +642,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
   }, []);
 
   const handleDeleteSelected = useCallback(async () => {
-    const electron = (window as any).electron;
+    const electron = window.electron;
     for (const id of selectedIds) {
       removeScheduledTask(id);
       try {
@@ -681,7 +678,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
     } else {
       setSelectedIds(new Set(filteredTasks.map((t) => t.id)));
     }
-  }, [selectedIds.size, filteredTasks, filteredTasks.length]);
+  }, [selectedIds.size, filteredTasks]);
 
   return (
     <div className="h-full w-full flex flex-col bg-transparent">
@@ -778,7 +775,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
                         // sessionMode 存在 jobs.json 里，不同步到后端就会被
                         // 30s 后的 refreshFromBackend 洗回旧值。
                         if (updates.sessionMode !== undefined) {
-                          const electron = (window as any).electron;
+                          const electron = window.electron;
                           void electron?.scheduledTasks?.update?.({
                             id: task.id,
                             sessionMode: updates.sessionMode,

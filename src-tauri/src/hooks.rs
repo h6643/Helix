@@ -223,6 +223,7 @@ pub fn hooks_save(state: State<'_, Arc<AppState>>, config: Value) -> Value {
         json!({})
     };
 
+    let _guard = crate::config::config_write_lock();
     let yaml_path = config_yaml_path();
     let text = std::fs::read_to_string(&yaml_path).unwrap_or_default();
 
@@ -256,7 +257,7 @@ pub fn hooks_save(state: State<'_, Arc<AppState>>, config: Value) -> Value {
     // old main keeps serving, so nothing is killed mid-handshake and rapid
     // successive saves coalesce into one restart.
     let arc: Arc<AppState> = Arc::clone(&state);
-    restart_gateway_soon(&arc);
+    restart_gateway_soon(&arc, "Hooks 配置保存");
     json!({ "ok": true })
 }
 

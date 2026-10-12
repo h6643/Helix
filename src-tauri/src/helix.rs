@@ -8,7 +8,7 @@
 
 use crate::config::{
     apply_pi_provider_models, atomic_write, read_helix_config, read_pi_models, read_pi_settings,
-    register_pi_provider_models, set_model as config_set_model, set_yaml_key, write_helix_config,
+    register_pi_provider_models, set_model as config_set_model, write_helix_config,
     HelixConfig,
 };
 use crate::gateway::restart_gateway_soon;
@@ -197,7 +197,7 @@ pub fn helix_set_config(state: State<'_, Arc<AppState>>, config: Value) -> Value
         return json!({ "success": true, "changed": false });
     }
     let arc: Arc<AppState> = Arc::clone(&state);
-    restart_gateway_soon(&arc);
+    restart_gateway_soon(&arc, "模型/供应商配置写入（helix_set_config）");
     json!({ "success": true, "changed": true })
 }
 
@@ -228,7 +228,7 @@ pub fn helix_set_provider_models(state: State<'_, Arc<AppState>>, config: Value)
         .and_then(|v| v.as_str())
         .unwrap_or("openai-completions")
         .to_string();
-    let models: Vec<(String, Option<u64>, Option<bool>)> = config
+    let models: Vec<(String, Option<u64>, Option<bool>, Option<Vec<String>>)> = config
         .get("models")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -247,6 +247,7 @@ pub fn helix_set_provider_models(state: State<'_, Arc<AppState>>, config: Value)
                         id,
                         m.get("contextWindow").and_then(|v| v.as_u64()),
                         reasoning,
+                        crate::config::parse_model_input(m),
                     ))
                 })
                 .collect()
@@ -259,22 +260,23 @@ pub fn helix_set_provider_models(state: State<'_, Arc<AppState>>, config: Value)
         return json!({ "success": true, "changed": false });
     }
     let arc: Arc<AppState> = Arc::clone(&state);
-    restart_gateway_soon(&arc);
+    restart_gateway_soon(&arc, &format!("注册供应商模型列表（{provider}）"));
     json!({ "success": true, "changed": true })
 }
 
 /// Set a single 2-level dotted key in config.yaml (agent toggles etc.).
+///
+/// Callers save one key per call and the 子智能体 page fires 6 of them
+/// concurrently, so this is the burst `restart_gateway_soon` must coalesce —
+/// don't "simplify" its restart into a per-page loop that restarts N times.
 #[tauri::command]
 pub fn helix_set_yaml_key(state: State<'_, Arc<AppState>>, key: String, value: Value) -> Value {
-    let path = crate::config::config_yaml_path();
-    let yaml = std::fs::read_to_string(&path).unwrap_or_default();
-    let updated = set_yaml_key(&yaml, &key, &value);
-    if updated == yaml {
+    let changed = crate::config::set_config_yaml_key(&key, &value);
+    if !changed {
         return json!({ "success": true, "changed": false });
     }
-    let _ = atomic_write(&path, &updated);
     let arc: Arc<AppState> = Arc::clone(&state);
-    restart_gateway_soon(&arc);
+    restart_gateway_soon(&arc, &format!("config.yaml 单键写入 {key}"));
     json!({ "success": true, "changed": true })
 }
 
@@ -284,6 +286,7 @@ pub fn helix_set_delegation_identities(
     state: State<'_, Arc<AppState>>,
     identities: Value,
 ) -> Value {
+    let _guard = crate::config::config_write_lock();
     let path = crate::config::config_yaml_path();
     let yaml = std::fs::read_to_string(&path).unwrap_or_default();
     let updated = crate::config::set_delegation_identities(&yaml, &identities);
@@ -291,8 +294,9 @@ pub fn helix_set_delegation_identities(
         return json!({ "success": true, "changed": false });
     }
     let _ = atomic_write(&path, &updated);
+    drop(_guard);
     let arc: Arc<AppState> = Arc::clone(&state);
-    restart_gateway_soon(&arc);
+    restart_gateway_soon(&arc, "子智能体身份列表保存");
     json!({ "success": true, "changed": true })
 }
 
@@ -324,7 +328,7 @@ pub fn helix_set_model(state: State<'_, Arc<AppState>>, params: Option<Value>) -
         config_set_model(model, base_url, api_key, provider, context_window);
     let arc: Arc<AppState> = Arc::clone(&state);
     if changed || key_changed {
-        restart_gateway_soon(&arc);
+        restart_gateway_soon(&arc, &format!("输入栏切换模型（{model}）"));
     }
     json!({ "success": true, "applied": true })
 }
@@ -374,7 +378,7 @@ pub fn helix_register_provider_models(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let models: Vec<(String, Option<u64>, Option<bool>)> = config
+    let models: Vec<(String, Option<u64>, Option<bool>, Option<Vec<String>>)> = config
         .get("models")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -389,6 +393,7 @@ pub fn helix_register_provider_models(
                             .or_else(|| m.get("context_window"))
                             .and_then(|v| v.as_u64()),
                         m.get("reasoning").and_then(|v| v.as_bool()),
+                        crate::config::parse_model_input(m),
                     )
                 })
                 .collect()
@@ -409,13 +414,8 @@ pub fn helix_set_config_key_value(params: Option<Value>) -> Value {
         return json!({ "success": false, "error": "missing key" });
     };
     let value = params.get("value").cloned().unwrap_or(Value::Null);
-    let path = crate::config::config_yaml_path();
-    let yaml = std::fs::read_to_string(&path).unwrap_or_default();
-    let updated = set_yaml_key(&yaml, key, &value);
-    if updated != yaml {
-        let _ = atomic_write(&path, &updated);
-    }
-    json!({ "success": true })
+    let changed = crate::config::set_config_yaml_key(key, &value);
+    json!({ "success": true, "changed": changed })
 }
 
 /// Approve/deny a pending tool call. Approvals flow through
@@ -778,6 +778,7 @@ pub fn helix_codemode_config() -> Value {
 /// `mode` / `inlineBudget` 写 codemode 对象。保留 settings.json 其它键。
 #[tauri::command]
 pub fn helix_set_codemode_config(updates: Value) -> Value {
+    let _guard = crate::config::config_write_lock();
     let mut s = crate::config::read_pi_settings();
     if !s.is_object() {
         s = json!({});
@@ -934,6 +935,7 @@ pub async fn pi_set_package_enabled(
     package: String,
     enabled: bool,
 ) -> Result<Value, String> {
+    let _guard = crate::config::config_write_lock();
     let raw = package.trim().to_string();
     if raw.is_empty() {
         return Err("package name cannot be empty".into());
@@ -979,7 +981,10 @@ pub async fn pi_set_package_enabled(
     // pi snapshots settings at process start: respawn the gateway so the
     // enabled/disabled change actually takes effect.
     let arc = Arc::clone(&state);
-    restart_gateway_soon(&arc);
+    restart_gateway_soon(
+        &arc,
+        &format!("扩展/包启用状态变更 {package} → {enabled}"),
+    );
 
     Ok(json!({ "success": true, "package": package, "enabled": enabled }))
 }
@@ -2003,7 +2008,7 @@ pub async fn pi_install_package(
 
     if output.status.success() {
         let arc: Arc<AppState> = Arc::clone(&state);
-        restart_gateway_soon(&arc);
+        restart_gateway_soon(&arc, &format!("pi 安装 {package}"));
         Ok(json!({
             "success": true,
             "message": format!("Successfully installed {package}"),
@@ -2038,7 +2043,7 @@ pub async fn pi_uninstall_package(
 
     if output.status.success() {
         let arc: Arc<AppState> = Arc::clone(&state);
-        restart_gateway_soon(&arc);
+        restart_gateway_soon(&arc, &format!("pi 卸载 {package}"));
         Ok(json!({
             "success": true,
             "message": format!("Successfully uninstalled {package}"),

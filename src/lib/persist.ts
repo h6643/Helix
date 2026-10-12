@@ -83,10 +83,6 @@ export interface PersistedChatMessage {
   isStreaming: boolean;
 }
 
-interface PersistedNote {
-  content: string;
-}
-
 interface PersistedFileSnapshot {
   id: string;
   name: string;
@@ -375,71 +371,6 @@ export const persistence = {
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
     });
-  },
-
-  // Delete all chat messages for a specific session
-  async deleteChatMessagesBySession(sessionId: string): Promise<void> {
-    const db = await openDB();
-    const transaction = db.transaction("chatMessages", "readwrite");
-    const store = transaction.objectStore("chatMessages");
-    let request: IDBRequest<PersistedChatMessage[]>;
-
-    try {
-      const index = store.index("sessionId");
-      request = index.getAll(sessionId);
-    } catch {
-      request = store.getAll();
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      request.onsuccess = () => {
-        const all = request.result as PersistedChatMessage[];
-        const messages = all.filter((m) => m.sessionId === sessionId);
-        for (const m of messages) store.delete(m.id);
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      };
-      request.onerror = () => reject(request.error);
-    });
-  },
-
-  // Load chat messages for a specific session
-  async loadChatMessagesBySession(
-    sessionId: string,
-  ): Promise<PersistedChatMessage[]> {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction("chatMessages", "readonly");
-      const store = transaction.objectStore("chatMessages");
-      let request: IDBRequest<PersistedChatMessage[]>;
-
-      try {
-        const index = store.index("sessionId");
-        request = index.getAll(sessionId);
-      } catch {
-        // Index doesn't exist yet (migration pending) — fall back to getAll + filter
-        request = store.getAll();
-      }
-
-      request.onsuccess = () => {
-        const all = request.result as PersistedChatMessage[];
-        const filtered = all
-          .filter((m) => m.sessionId === sessionId)
-          .sort((a, b) => a.timestamp - b.timestamp);
-        resolve(filtered);
-      };
-      request.onerror = () => reject(request.error);
-    });
-  },
-
-  async loadChatMessages(): Promise<PersistedChatMessage[]> {
-    const db = await openDB();
-    return txAll<PersistedChatMessage>(
-      db,
-      "chatMessages",
-      "readonly",
-      () => {},
-    );
   },
 
   // --- Settings ---
@@ -780,32 +711,6 @@ export const persistence = {
   },
 
   // --- Projects ---
-  async saveProject(data: {
-    name: string;
-    folder: string;
-    chatMessages: PersistedChatMessage[];
-    files: PersistedFileSnapshot[];
-    id?: string;
-  }): Promise<string> {
-    const db = await openDB();
-    const id = data.id || "project-" + Date.now();
-    const now = Date.now();
-    const project: PersistedProject = {
-      id,
-      name: data.name,
-      folder: data.folder,
-      createdAt: now,
-      updatedAt: now,
-      chatMessages: data.chatMessages.map((m) => ({
-        ...m,
-        sessionId: m.sessionId || "project-default",
-      })),
-      files: data.files,
-    };
-    await tx(db, "projects", "readwrite", (store) => store.put(project));
-    return id;
-  },
-
   async loadProjects(): Promise<PersistedProject[]> {
     const db = await openDB();
     return txAll<PersistedProject>(db, "projects", "readonly", () => {});
@@ -863,11 +768,6 @@ export const persistence = {
     return idx === -1;
   },
 
-  async deleteProject(id: string): Promise<void> {
-    const db = await openDB();
-    await tx(db, "projects", "readwrite", (store) => store.delete(id));
-  },
-
   async deleteSessionsByWorkDir(workDir: string): Promise<number> {
     const sessions = await this.loadSessions();
     const toDelete = sessions.filter((s) => s.workDir === workDir);
@@ -921,21 +821,6 @@ export const persistence = {
   // --- Scheduled Tasks ---
   async saveScheduledTasks(tasks: PersistedScheduledTask[]): Promise<void> {
     await this.saveSetting("scheduledTasks", tasks);
-  },
-
-  async loadScheduledTasks(): Promise<PersistedScheduledTask[]> {
-    return (
-      (await this.loadSetting<PersistedScheduledTask[]>("scheduledTasks")) ?? []
-    );
-  },
-
-  // --- Editor Theme ---
-  async saveEditorTheme(theme: string): Promise<void> {
-    await this.saveSetting("editorTheme", theme);
-  },
-
-  async loadEditorTheme(): Promise<string | null> {
-    return this.loadSetting<string>("editorTheme");
   },
 
   // --- Session Export/Import ---
@@ -1015,7 +900,7 @@ export const persistence = {
         savedAt: s.savedAt || now,
         workDir: s.workDir || null,
         goal: s.goal || null,
-        chatMessages: (s.chatMessages || []).map((m: any) => ({
+        chatMessages: (s.chatMessages || []).map((m: Partial<PersistedChatMessage>) => ({
           id: `msg-${now}-${Math.random().toString(36).slice(2, 8)}`,
           role: m.role,
           content: m.content || "",

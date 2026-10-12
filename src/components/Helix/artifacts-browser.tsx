@@ -42,8 +42,8 @@ export function ArtifactsBrowser({ onClose }: { onClose: () => void }) {
       const nodes = await electronFS.scanTree(dir || undefined);
       setTree(Array.isArray(nodes) ? (nodes as TreeNode[]) : []);
       setRoot(dir);
-    } catch (e: any) {
-      setErr(String(e?.message || e));
+    } catch (e) {
+      setErr(String((e as { message?: string })?.message || e));
     } finally {
       setLoading(false);
     }
@@ -66,8 +66,8 @@ export function ArtifactsBrowser({ onClose }: { onClose: () => void }) {
         name,
         text: typeof text === "string" ? text : String(text),
       });
-    } catch (e: any) {
-      setErr(String(e?.message || e));
+    } catch (e) {
+      setErr(String((e as { message?: string })?.message || e));
     } finally {
       setLoading(false);
     }

@@ -55,6 +55,10 @@ export default defineConfig({
         // full source tree + its own build output. Watching it would add
         // thousands of watchers and every fork rebuild would reload the app.
         '**/pi/**',
+        // pi / codemode's atomic-write temp dirs: '.<file>.<pid>.<uuid>.tmpdir/'
+        // — chokidar tries to watch the .tmp file inside during rename and gets
+        // EBUSY on Windows. Ignore the whole directory tree.
+        '**/.*.tmpdir/**',
       ],
     },
   },

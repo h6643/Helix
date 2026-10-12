@@ -1355,6 +1355,7 @@ pub fn browser_set_handoff_config(updates: serde_json::Value) -> serde_json::Val
         });
     }
     let path = crate::config::config_yaml_path();
+    let _guard = crate::config::config_write_lock();
     let mut yaml = std::fs::read_to_string(&path).unwrap_or_default();
     yaml = crate::config::set_yaml_key(&yaml, "browser.handoff_timeout_min", &serde_json::json!(min));
     if let Err(e) = crate::config::atomic_write(&path, &yaml) {

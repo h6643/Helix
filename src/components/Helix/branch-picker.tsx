@@ -138,7 +138,7 @@ export function BranchPicker({
           setOpen(false);
           return;
         }
-      } catch (_) {
+      } catch {
         /* fall through to direct switch */
       }
     }

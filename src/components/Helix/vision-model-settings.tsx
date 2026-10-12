@@ -42,7 +42,7 @@ export function VisionModelSettings() {
         return;
       }
       try {
-        const api = (window as any).electron?.vision;
+        const api = window.electron?.vision;
         if (!api?.getConfig) return;
         const r = await api.getConfig();
         if (r?.ok && r.config) {
@@ -72,7 +72,7 @@ export function VisionModelSettings() {
         apiKey: showApiKey ? apiKey : "",
       };
       if (isElectron()) {
-        const api = (window as any).electron?.vision;
+        const api = window.electron?.vision;
         if (api?.setConfig) await api.setConfig(config);
       } else {
         localStorage.setItem("helix-vision-model", JSON.stringify(config));
@@ -124,7 +124,7 @@ export function VisionModelSettings() {
     setTesting(true);
     setTestResult(null);
     try {
-      const api = (window as any).electron?.vision;
+      const api = window.electron?.vision;
       if (!api?.describe) {
         throw new Error("视觉模型接口不可用（window.electron.vision 缺失）");
       }

@@ -4,6 +4,7 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useState,
   useRef,
@@ -12,28 +13,40 @@ import { useHelixStore } from "@/stores/helix-store";
 
 const PAGE_SIZE = 20;
 
-export function HistoryStrip({
-  onHoverChange,
-}: {
-  /** 悬停条带时回调宿主：true = 淡出对话内容（避免展开的标题与模型输出重叠） */
-  onHoverChange?: (hovered: boolean) => void;
-}) {
+export function HistoryStrip() {
   const chatMessages = useHelixStore((s) => s.chatMessages);
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
   const rightSidebarOpen = useHelixStore(
     (s) => s.rightSidebarTab !== null && s.rightSidebarOpen,
   );
   const [hovered, setHovered] = useState<string | null>(null);
-  const [stripHover, setStripHover] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [pageOffset, setPageOffset] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [cardTop, setCardTop] = useState(0);
+
+  // 悬停清空走「延迟 + 取消」：指针从横杠移到预览卡片要跨出条带盒，
+  // 立刻清空会让卡片在途中消失（根本点不到）。离开后 80ms 内没有新的
+  // 进入事件才真正收起。
+  const clearTimerRef = useRef<number | null>(null);
+  const cancelClear = useCallback(() => {
+    if (clearTimerRef.current !== null) {
+      clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = null;
+    }
+  }, []);
+  const scheduleClear = useCallback(() => {
+    cancelClear();
+    clearTimerRef.current = window.setTimeout(() => setHovered(null), 80);
+  }, [cancelClear]);
+  useEffect(() => cancelClear, [cancelClear]);
 
   const messages = useMemo(
     () =>
       chatMessages.filter((m) => {
         // 与 agent-flow-panel 的 sessionMessages 同一规则（严格二选一）：
-        // 「无 sessionId」的消息属于**新对话**（currentSessionId 为 null）那一屏，
+        // 「无 sessionId 的消息」属于**新对话**（currentSessionId 为 null）那一屏，
         // 不是"每个会话都能看到"。旧写法 `!m.sessionId || …` 会让草稿期的用户输入
         // 出现在所有会话的定位条里，点进去却找不到对应消息（它根本不在那个会话里）。
         const own = currentSessionId
@@ -54,12 +67,34 @@ export function HistoryStrip({
   const curPage = safeOffset + 1;
 
   const locate = useCallback((id: string) => {
-    const viewport = document.querySelector(
-      ".msg-scroll-viewport",
-    ) as HTMLElement | null;
-    const root = viewport ?? document;
-    const el = root.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
-    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+    let tries = 12;
+    const attempt = () => {
+      const viewport = document.querySelector(
+        ".msg-scroll-viewport",
+      ) as HTMLElement | null;
+      const root = viewport ?? document;
+      const el = root.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
+      if (!el) {
+        // 目标消息可能还没挂载（切会话/流式渲染中）——按帧重试，
+        // 不能一击不中就静默放弃（点击"没反应"的来源之一）。
+        if (--tries > 0) requestAnimationFrame(attempt);
+        return;
+      }
+      if (viewport) {
+        // 只滚对话视口自己：scrollIntoView 会连带滚动所有可滚祖先，
+        // 外层若可滚会把整页/整栏挪走，对话区看起来就是"没跳"。
+        const vpRect = viewport.getBoundingClientRect();
+        const elRect = el.getBoundingClientRect();
+        const top =
+          viewport.scrollTop +
+          (elRect.top - vpRect.top) -
+          (viewport.clientHeight - elRect.height) / 2;
+        viewport.scrollTo({ top, behavior: "smooth" });
+      } else {
+        el.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    };
+    attempt();
   }, []);
 
   const onWheel = useCallback(
@@ -115,32 +150,62 @@ export function HistoryStrip({
     };
   }, [messages]);
 
-  const isAnyHovered = hovered !== null;
   // 右侧边栏打开时，条带变窄（让出空间），对话长条显示成一个个点
   const compact = rightSidebarOpen;
-  const dim = stripHover || isAnyHovered;
 
-  useEffect(() => {
-    onHoverChange?.(dim);
-  }, [dim, onHoverChange]);
+  // 悬停的消息 → 卡片内容：粗体 = 开头一行，灰色 = 后续内容（3 行截断加 …）
+  const hoveredMsg =
+    hovered !== null
+      ? (pageMessages.find((m) => m.id === hovered) ?? null)
+      : null;
+  const rawCard = (hoveredMsg?.content ?? "").trim();
+  const nlIdx = rawCard.indexOf("\n");
+  const cardTitle = rawCard
+    ? nlIdx === -1
+      ? rawCard
+      : rawCard.slice(0, nlIdx)
+    : "(空消息)";
+  const cardPreview = nlIdx === -1 ? "" : rawCard.slice(nlIdx + 1).trim();
+
+  // 卡片定位：与悬停横杠对齐（上移 8px），并在条带容器高度内夹紧，
+  // 防止悬停首/尾条时卡片溢出容器上下缘。用 rect 而非 offsetTop ——
+  // 横杠在可滚动列表里，offsetTop 不随滚动变化会错位。
+  useLayoutEffect(() => {
+    if (!hoveredMsg) return;
+    const cont = containerRef.current;
+    const card = cardRef.current;
+    if (!cont || !card) return;
+    const btn = cont.querySelector<HTMLElement>(
+      `[data-bar-id="${CSS.escape(hoveredMsg.id)}"]`,
+    );
+    if (!btn) return;
+    const cRect = cont.getBoundingClientRect();
+    const bRect = btn.getBoundingClientRect();
+    const top = Math.max(
+      0,
+      Math.min(bRect.top - cRect.top - 8, cRect.height - card.offsetHeight),
+    );
+    setCardTop(top);
+    // 宽度兜底：窄面板（侧栏全开）时 320px 卡片可能越过视口右缘，
+    // 按条带到视口右缘的可用宽度收缩。
+    const maxW = Math.max(160, window.innerWidth - cRect.left - 48);
+    card.style.width = `${Math.min(320, maxW)}px`;
+  }, [hoveredMsg]);
 
   if (messages.length === 0) return null;
 
   return (
-    // 命中范围恒为 28px 条带：外层盒与文字层均 pointer-events-none，
-    // 只有条带本体响应 hover/滚轮。悬停时所有标题一起展开，
-    // 但文字不占命中区，鼠标可穿过文字直接点到对话内容。
+    // 外层盒与条带区 pointer-events-none / auto 分工：只有条带列和预览卡片
+    // 响应鼠标，卡片紧贴条带右缘（left-2.5 = 横杠宽度），中间无死区，
+    // 指针滑过去靠延迟清空（scheduleClear）保持悬停态。
     <div
       className="absolute left-2 top-[6%] bottom-[12%] z-30 pointer-events-none"
       ref={containerRef}
     >
       <div
         className="flex flex-col gap-1.5 overflow-y-auto hide-scrollbar py-1 pointer-events-auto"
-        onMouseEnter={() => setStripHover(true)}
-        onMouseLeave={() => {
-          setStripHover(false);
-          setHovered(null);
-        }}
+        onMouseEnter={cancelClear}
+        onMouseLeave={scheduleClear}
         onWheel={onWheel}
       >
         {pageMessages.map((m) => {
@@ -151,12 +216,16 @@ export function HistoryStrip({
             <button
               key={m.id}
               type="button"
+              data-bar-id={m.id}
               onClick={() => locate(m.id)}
-              onMouseEnter={() => setHovered(m.id)}
+              onMouseEnter={() => {
+                cancelClear();
+                setHovered(m.id);
+              }}
               className={`
-                flex items-center h-2.5 shrink-0 rounded-md
+                flex items-center h-1.5 shrink-0 rounded-md
                 transition-all duration-200
-                ${compact ? "w-2.5 px-0" : "w-7 px-1"}
+                ${compact ? "w-2.5 px-0" : "w-2.5 px-0"}
                 ${isHovered ? "bg-muted/60" : ""}
               `}
             >
@@ -164,7 +233,7 @@ export function HistoryStrip({
               <span
                 className={`
                   rounded-full shrink-0 transition-all duration-200
-                  ${compact ? "size-1" : "w-5 h-1"}
+                  ${compact ? "size-1" : "w-2 h-0.5"}
                   ${isActive ? "bg-primary" : "bg-primary/30"}
                 `}
               />
@@ -173,7 +242,7 @@ export function HistoryStrip({
         })}
 
         {totalPages > 1 && !compact && (
-          <div className="flex items-center gap-0.5 pt-1 mt-0.5 border-t border-border/40">
+          <div className="relative z-10 flex items-center gap-0.5 pt-1 mt-0.5 border-t border-border/40">
             <button
               type="button"
               onClick={() =>
@@ -202,28 +271,27 @@ export function HistoryStrip({
         )}
       </div>
 
-      {/* 文字层：与左侧条带逐行对齐（h-2.5 + gap-1.5 同节奏，top-1 对齐 py-1），
-          pointer-events-none —— 悬停时全部标题一起显示，但不占命中区。
-          紧凑模式（右侧边栏打开）下隐藏。 */}
-      {!compact && (
-        <div className="absolute left-8 top-1 flex flex-col gap-1.5 pointer-events-none">
-          {pageMessages.map((m) => {
-            const raw = (m.content ?? "").trim() || "(空消息)";
-            const text = raw.replace(/\s+/g, " ").slice(0, 10);
-            return (
-              <span
-                key={m.id}
-                className={`
-                  flex h-2.5 items-center whitespace-nowrap text-foreground/75
-                  transition-opacity duration-200
-                  text-[calc(var(--helix-transcript-size)*0.8571)]
-                  ${isAnyHovered ? "opacity-100" : "opacity-0"}
-                `}
-              >
-                {text}
-              </span>
-            );
-          })}
+      {/* 预览卡片：只显示悬停的那一条消息——粗体开头一行 + 灰色后续内容
+          （line-clamp-3，超出加省略号）。可点击：点卡片 = 跳到这条消息
+          （旧版标题层 pointer-events-none，点标题只会穿透到对话区，
+          表现为"点了不跳转"）。对话不再整段淡出，卡片浮在上方。 */}
+      {hoveredMsg && (
+        <div
+          ref={cardRef}
+          style={{ top: cardTop }}
+          onMouseEnter={cancelClear}
+          onMouseLeave={scheduleClear}
+          onClick={() => locate(hoveredMsg.id)}
+          className="absolute left-2.5 bg-card border border-border/40 rounded-xl shadow-lg px-4 py-3 pointer-events-auto cursor-pointer select-none"
+        >
+          <div className="truncate text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
+            {cardTitle}
+          </div>
+          {cardPreview && (
+            <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.8571)] leading-relaxed text-muted-foreground line-clamp-3">
+              {cardPreview}
+            </div>
+          )}
         </div>
       )}
     </div>

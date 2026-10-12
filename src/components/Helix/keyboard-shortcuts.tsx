@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useCallback, useEffect } from "react";
-import { useHelixStore } from "@/stores/helix-store";
+import { useCallback, useEffect } from "react";
 import { isRemoteWorkDir } from "@/lib/remote-projects";
+import { useHelixStore } from "@/stores/helix-store";
 
 // Parse key string like "Ctrl+Shift+X" into a normalized format
 function parseKeyString(keys: string[]): {
@@ -132,12 +132,9 @@ export function KeyboardShortcuts() {
   const {
     activeTabId,
     closeTab,
-    openTabs,
     setActiveTab,
     markTabSaved,
-    showToast,
     customShortcuts,
-    toggleSessionManager,
     toggleSkillPanel,
     toggleScheduledTasksPanel,
   } = storeState;
@@ -152,7 +149,7 @@ export function KeyboardShortcuts() {
         target.isContentEditable;
 
       // Check custom shortcuts first (always active)
-      for (const [id, shortcut] of Object.entries(customShortcuts)) {
+      for (const [, shortcut] of Object.entries(customShortcuts)) {
         if (matchShortcut(e, shortcut.keys)) {
           e.preventDefault();
           // Dispatch action
@@ -245,7 +242,7 @@ export function KeyboardShortcuts() {
       // F12: Toggle DevTools
       if (e.key === "F12") {
         e.preventDefault();
-        (window as any).electron?.window?.toggleDevTools();
+        window.electron?.window?.toggleDevTools();
         return;
       }
 
@@ -264,12 +261,9 @@ export function KeyboardShortcuts() {
     [
       activeTabId,
       closeTab,
-      openTabs,
       setActiveTab,
       markTabSaved,
-      showToast,
       customShortcuts,
-      toggleSessionManager,
       toggleSkillPanel,
       toggleScheduledTasksPanel,
     ],

@@ -8,13 +8,10 @@ import {
   MessageSquare,
   FolderPlus,
   Save,
-  Trash2,
   Keyboard,
   Moon,
   Sun,
   Copy,
-  Settings,
-  Sparkles,
 } from "lucide-react";
 import React, {
   useState,
@@ -23,9 +20,9 @@ import React, {
   useMemo,
   useCallback,
 } from "react";
+import { isRemoteWorkDir } from "@/lib/remote-projects";
 import { useHelixStore, type FileNode } from "@/stores/helix-store";
 import { DEFAULT_SHORTCUTS } from "@/stores/helix-types";
-import { isRemoteWorkDir } from "@/lib/remote-projects";
 
 function getShortcutLabel(
   id: string,
@@ -55,13 +52,11 @@ export function CommandPalette() {
     clearChat,
     createFile,
     files,
-    showToast,
     markTabSaved,
     activeTabId,
     openTabs,
     editorTheme,
     setEditorTheme,
-    getAllFiles,
     getFilePath,
     customShortcuts,
     activeSessionWorkDir,
@@ -238,8 +233,6 @@ export function CommandPalette() {
     toggleTerminal,
     clearChat,
     createFile,
-    files,
-    showToast,
     markTabSaved,
     activeTabId,
     openTabs,
@@ -247,6 +240,7 @@ export function CommandPalette() {
     setEditorTheme,
     getFilePath,
     customShortcuts,
+    conversationIsRemote,
   ]);
 
   // Fuzzy match

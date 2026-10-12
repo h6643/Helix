@@ -13,12 +13,12 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { isElectron } from "@/lib/electron-bridge";
+import { useHelixStore } from "@/stores/helix-store";
 import type {
   DiagnosticCheck,
   DiagnosticProblem,
   DiagnosticRunResult,
 } from "@/types/electron";
-import { useHelixStore } from "@/stores/helix-store";
 
 interface DiagnosticsPanelProps {
   onClose: () => void;

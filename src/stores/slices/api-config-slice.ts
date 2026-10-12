@@ -86,6 +86,7 @@ export interface ApiConfigSlice {
     models?: string[],
     modelContextWindows?: Record<string, number>,
     modelReasonings?: Record<string, boolean>,
+    modelInputs?: Record<string, string[]>,
   ) => string;
   updateApiProfileConfig: (
     id: string,
@@ -93,6 +94,7 @@ export interface ApiConfigSlice {
     models?: string[],
     modelContextWindows?: Record<string, number>,
     modelReasonings?: Record<string, boolean>,
+    modelInputs?: Record<string, string[]>,
   ) => void;
   renameApiProfile: (id: string, name: string) => void;
   removeApiProfile: (id: string) => void;
@@ -166,10 +168,10 @@ export const createApiConfigSlice: StateCreator<
     // (handleSaveApi/applyProfile don't always re-anchor it), and keying the
     // fetched list under the wrong provider hides those models from the
     // selector — the "获取到 2 个模型，切换后只剩 1 个" bug.
-    const resolvePid = (state: any): string | undefined => {
+    const resolvePid = (state: ApiConfigSlice): string | undefined => {
       if (providerId) return providerId;
       if (baseUrl) {
-        const match = state.providers.find((p: any) => p.baseUrl === baseUrl);
+        const match = state.providers.find((p: ProviderConfig) => p.baseUrl === baseUrl);
         if (match) return match.id;
       }
       if (state.activeProviderId) return state.activeProviderId;
@@ -284,12 +286,21 @@ export const createApiConfigSlice: StateCreator<
     models?,
     modelContextWindows?,
     modelReasonings?,
+    modelInputs?,
   ) => {
     const id = generateId();
     set((state) => ({
       apiProfiles: [
         ...state.apiProfiles,
-        { id, name, config, models, modelContextWindows, modelReasonings },
+        {
+          id,
+          name,
+          config,
+          models,
+          modelContextWindows,
+          modelReasonings,
+          modelInputs,
+        },
       ],
     }));
     // 名单不再为空 → 解除「用户自己删光了」的意图标记，让冷启动的空列表自愈
@@ -305,6 +316,7 @@ export const createApiConfigSlice: StateCreator<
     models?,
     modelContextWindows?,
     modelReasonings?,
+    modelInputs?,
   ) =>
     set((state) => ({
       apiProfiles: state.apiProfiles.map((p) =>
@@ -315,6 +327,7 @@ export const createApiConfigSlice: StateCreator<
               ...(models ? { models } : {}),
               ...(modelContextWindows ? { modelContextWindows } : {}),
               ...(modelReasonings ? { modelReasonings } : {}),
+              ...(modelInputs ? { modelInputs } : {}),
             }
           : p,
       ),
@@ -591,10 +604,10 @@ export const createApiConfigSlice: StateCreator<
     try {
       if (
         typeof window === "undefined" ||
-        !(window as any).electron?.helix?.fetchModels
+        !window.electron?.helix?.fetchModels
       )
         return [];
-      const result = await (window as any).electron.helix.fetchModels({
+      const result = await window.electron.helix.fetchModels({
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
       });
@@ -626,11 +639,13 @@ export const createApiConfigSlice: StateCreator<
     try {
       if (
         typeof window === "undefined" ||
-        !(window as any).electron?.helix?.piGetAvailableModels
+        !window.electron?.helix?.piGetAvailableModels
       )
         return;
-      const r = await (window as any).electron.helix.piGetAvailableModels();
-      const models: any[] = Array.isArray(r?.models) ? r.models : [];
+      const r = await window.electron.helix.piGetAvailableModels();
+      const models: Awaited<
+        ReturnType<typeof window.electron.helix.piGetAvailableModels>
+      >["models"] = Array.isArray(r?.models) ? r.models : [];
       const grouped = new Map<string, { id: string; label: string }[]>();
       for (const m of models) {
         if (!m?.id || !m?.provider || m.baseUrl !== PI_CHANNEL_BASE_URL) continue;

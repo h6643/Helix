@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { Plus, Terminal, X } from "lucide-react";
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { isElectron, electronTerminal, helixApi } from "@/lib/electron-bridge";
+import { isElectron, electronTerminal } from "@/lib/electron-bridge";
 import { isRemoteWorkDir } from "@/lib/remote-projects";
 import { useHelixStore } from "@/stores/helix-store";
 import "@xterm/xterm/css/xterm.css";

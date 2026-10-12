@@ -131,8 +131,11 @@ const PICK_SCRIPT = `
  *  结果通过 parent.postMessage 回传给宿主页面。 */
 function injectPickScript(doc: Document) {
   try {
-    if ((doc.defaultView as any)?.__helixPickerInstalled) return;
-    (doc.defaultView as any).__helixPickerInstalled = true;
+    const view = doc.defaultView as
+      | (Window & { __helixPickerInstalled?: boolean })
+      | null;
+    if (view?.__helixPickerInstalled) return;
+    if (view) view.__helixPickerInstalled = true;
     const script = doc.createElement("script");
     script.textContent = PICK_SCRIPT;
     (doc.head || doc.documentElement).appendChild(script);
@@ -182,11 +185,11 @@ export function BrowserToolbar({
 
   const go = (dir: "back" | "forward" | "reload") => {
     if (!native) return;
-    void browserHistory(pageId, dir).catch((e: any) =>
+    void browserHistory(pageId, dir).catch((e: unknown) =>
       useHelixStore.getState().showToast({
         type: "error",
         title: dir === "reload" ? "刷新失败" : "翻页失败",
-        description: String(e?.message ?? e ?? ""),
+        description: String((e as { message?: string })?.message ?? e ?? ""),
       }),
     );
   };
@@ -241,11 +244,11 @@ export function BrowserToolbar({
         title: "已截取网页",
         description: "图片已放进聊天输入框，可以直接问 Agent",
       });
-    } catch (e: any) {
+    } catch (e) {
       st.showToast({
         type: "error",
         title: "截图失败",
-        description: String(e?.message ?? e ?? "未知错误"),
+        description: String((e as { message?: string })?.message ?? e ?? "未知错误"),
       });
     } finally {
       setShooting(false);
@@ -421,10 +424,10 @@ export function BrowserView({
         if (!res || typeof res.html !== "string")
           throw new Error("fetch failed");
         if (!cancelled) setPickSrcDoc(res.html);
-      } catch (e: any) {
+      } catch (e) {
         if (cancelled) return;
         useHelixStore.getState().setBrowserPickPageId(null);
-        setPickError(`无法载入页面进行选取：${e?.message || e || "未知错误"}`);
+        setPickError(`无法载入页面进行选取：${(e as { message?: string })?.message || e || "未知错误"}`);
         if (pickErrorTimer.current) clearTimeout(pickErrorTimer.current);
         pickErrorTimer.current = setTimeout(() => setPickError(""), 5000);
       }
@@ -445,9 +448,9 @@ export function BrowserView({
       if (!u) return;
       if (native) {
         setBusy(true);
-        void call("browser_webview_open", { url: u }).catch((e: any) => {
+        void call("browser_webview_open", { url: u }).catch((e: unknown) => {
           setBusy(false);
-          setError(String(e?.message ?? e ?? "无法打开浏览器视图"));
+          setError(String((e as { message?: string })?.message ?? e ?? "无法打开浏览器视图"));
         });
       }
     },

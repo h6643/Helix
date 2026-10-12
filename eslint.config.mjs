@@ -20,6 +20,7 @@ export default defineConfig([
     "node_modules/**",
     "dist/**",
     "out/**",
+    ".scratch/**",
     "build/**",
     "release/**",
     "src-tauri/**",

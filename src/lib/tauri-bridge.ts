@@ -149,10 +149,6 @@ function onMaximizedChange(callback: (maximized: boolean) => void): () => void {
   };
 }
 
-function stubError(message: string) {
-  return { ok: false, error: message };
-}
-
 function buildTauriAPI(): ElectronAPI {
   const api: Record<string, unknown> = {};
 
@@ -187,6 +183,8 @@ function buildTauriAPI(): ElectronAPI {
     readFile: (filePath: string) => invoke("helix_read_file", { filePath }),
     deleteDir: (dirPath: string) => invoke("helix_delete_dir", { dirPath }),
     listSkills: () => invoke("helix_list_skills"),
+    setSkillModelInvocation: (skillPath: string, enabled: boolean) =>
+      invoke("helix_set_skill_model_invocation", { skillDir: skillPath, enabled }),
   };
 
   // ── shell ───────────────────────────────────────────────────────────────
@@ -355,6 +353,17 @@ function buildTauriAPI(): ElectronAPI {
     codemodeConfig: () => invoke("helix_codemode_config"),
     setCodemodeConfig: (updates: Record<string, unknown>) =>
       invoke("helix_set_codemode_config", { updates }),
+    // 高级 pi 设置（retry / compaction / 思考 / 模型循环 / 缓存 / 队列 /
+    // 工具集）。写盘后后端会去抖重放 pi —— pi 在实例启动时快照 settings.json。
+    piAdvancedConfig: () => invoke("helix_pi_advanced_get"),
+    piAdvancedSet: (updates: Record<string, unknown>) =>
+      invoke("helix_pi_advanced_set", { updates }),
+    // 项目信任档位：只决定 spawn 时加不加 --approve / --no-approve，
+    // 不碰 pi 自己的 defaultProjectTrust（那会影响终端里的 pi）。
+    // 只保留 always/never 两档：RPC 模式弹不出交互提示，ask 等同 never。
+    projectTrust: () => invoke("helix_project_trust_get"),
+    setProjectTrust: (mode: "always" | "never") =>
+      invoke("helix_project_trust_set", { mode }),
     setConfigKeyValue: (params: unknown) =>
       invoke("helix_set_config_key_value", { params }),
     approvalRespond: (params: unknown) =>
@@ -557,7 +566,9 @@ function buildTauriAPI(): ElectronAPI {
 
   // ── delegations ─────────────────────────────────────────────────────────
   api.delegations = {
-    list: (sessionId?: string) =>
+    // 一个 sid 或整组 sid（后端 delegations_list 两种都接；一个对话在
+    // session/new / restart 后会横跨多个后端 sid）。
+    list: (sessionId?: string | string[]) =>
       invoke("delegations_list", { sessionId: sessionId ?? null }),
     readLog: (path: string, lines?: number) =>
       invoke("delegations_read_log", { path, lines: lines ?? null }),

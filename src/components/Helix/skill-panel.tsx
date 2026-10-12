@@ -54,6 +54,9 @@ interface HelixSkill {
    * or the bundling npm package name. */
   source?: string;
   path: string;
+  /** pi 的 `disable-model-invocation: true`：模型不主动读它，只能靠
+   *  显式 `/skill:<name>` 触发。 */
+  modelInvocationDisabled?: boolean;
 }
 
 interface PackageResult {
@@ -511,6 +514,46 @@ export function SkillPanel({}: SkillPanelProps) {
     window.addEventListener("focus", handleFocus);
     return () => window.removeEventListener("focus", handleFocus);
   }, [activeTab]);
+
+  // 开关「模型自动调用」：改 SKILL.md frontmatter 的 disable-model-invocation。
+  // 关闭后模型不会主动读它，只能显式 /skill:<name> 触发——比删技能轻得多。
+  const onToggleSkillAuto = async (skill: HelixSkill) => {
+    try {
+      const r = await window.electron?.helixSkills?.setSkillModelInvocation(
+        skill.path,
+        !skill.modelInvocationDisabled,
+      );
+      if (!r) {
+        useHelixStore.getState().showToast({
+          type: "error",
+          title: "当前环境不支持",
+          description: "本地后端未提供技能开关命令",
+        });
+        return;
+      }
+      setSkills((prev) =>
+        prev.map((s) =>
+          s.id === skill.id
+            ? { ...s, modelInvocationDisabled: r.disabled }
+            : s,
+        ),
+      );
+      useHelixStore.getState().showToast({
+        type: "success",
+        title: r.disabled ? "已关闭模型自动调用" : "已开启模型自动调用",
+        description: r.disabled
+          ? `${skill.name} 只能靠 /skill:${skill.name} 显式触发`
+          : `${skill.name} 会被模型按描述主动读取`,
+      });
+    } catch (e) {
+      console.error("toggleSkillAuto error:", e);
+      useHelixStore.getState().showToast({
+        type: "error",
+        title: "修改失败",
+        description: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
 
   const onDeleteSkill = async (skill: HelixSkill) => {
     if (skill.isBuiltin) return;
@@ -1029,6 +1072,22 @@ export function SkillPanel({}: SkillPanelProps) {
                           </p>
                         )}
                       </div>
+                      <button
+                        onClick={() => void onToggleSkillAuto(skill)}
+                        className={`shrink-0 flex items-center gap-1 px-1.5 h-7 rounded text-[calc(var(--helix-transcript-size)*0.786)] border transition-colors ${
+                          skill.modelInvocationDisabled
+                            ? "border-border/50 bg-muted/30 text-muted-foreground/60 hover:text-muted-foreground"
+                            : "border-primary/40 bg-primary/10 text-primary hover:bg-primary/20"
+                        }`}
+                        data-tip={
+                          skill.modelInvocationDisabled
+                            ? "模型不会主动读这个技能，只能显式 /skill:name 触发。点击开启"
+                            : "模型会按描述主动读这个技能。点击关闭后只能显式 /skill:name 触发"
+                        }
+                      >
+                        <Zap className="size-3" />
+                        {skill.modelInvocationDisabled ? "仅手动" : "自动"}
+                      </button>
                       {!skill.isBuiltin && (
                         <button
                           onClick={() => void onDeleteSkill(skill)}

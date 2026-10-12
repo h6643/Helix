@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useState, useCallback, useEffect, useRef } from "react";
-import { useHelixStore, DEFAULT_SHORTCUTS } from "@/stores/helix-store";
 import { PageHeader } from "./settings-ui";
+import { useHelixStore, DEFAULT_SHORTCUTS } from "@/stores/helix-store";
 
 export function ShortcutsPage() {
-  const { customShortcuts, updateCustomShortcut, showToast } = useHelixStore();
+  const { customShortcuts, updateCustomShortcut } = useHelixStore();
 
   const shortcuts = Object.entries(customShortcuts);
   const defaultIds = Object.keys(DEFAULT_SHORTCUTS);

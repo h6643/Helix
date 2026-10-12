@@ -9,8 +9,8 @@ import {
   Wand2,
 } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Button } from "@/components/ui/button";
 import { SettingGroup } from "./settings-ui";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 interface SubagentPreset {
@@ -60,13 +60,13 @@ export function AgentOrchestrationPanel({
 
   useEffect(() => {
     let alive = true;
-    const listSubagents = (window as any).electron?.helix?.listSubagents;
+    const listSubagents = window.electron?.helix?.listSubagents;
     if (typeof listSubagents !== "function") {
       setLoading(false);
       return;
     }
     listSubagents()
-      .then((ps: any[]) => {
+      .then((ps) => {
         if (!alive) return;
         if (Array.isArray(ps)) {
           setPresets(

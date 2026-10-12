@@ -3,6 +3,7 @@
 import {
   FileDiff,
   Globe,
+  ListTree,
   MessagesSquare,
   TerminalSquare,
   type LucideIcon,
@@ -38,6 +39,12 @@ export function MoreActionsPage() {
       icon: FileDiff,
       label: "打开审阅",
       onClick: () => useHelixStore.getState().setRightSidebarTab("diff"),
+    },
+    {
+      key: "tree",
+      icon: ListTree,
+      label: "会话树",
+      onClick: () => useHelixStore.getState().setRightSidebarTab("tree"),
     },
     {
       key: "terminal",

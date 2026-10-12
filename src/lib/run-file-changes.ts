@@ -17,7 +17,11 @@
  *                        推不出路径 —— 只能当"没有 patch"时的兜底，通常会被
  *                        下面的形态校验直接淘汰（这正是它不该被喂给卡片的原因）。
  *   - `details.undoUnsafe` ← 网关标了"这份 diff 不能反推撤销"（write 覆盖前
- *                        内容没读到 / diff 被截断）。
+ *                        内容没读到 / diff 被截断）。**也可能没有 diff**：write
+ *                        覆盖前旧内容读不到时网关不再按空文件假想合成 patch
+ *                        （否则模型原样重写一遍会被报成"整文件新增"），只给
+ *                        `path` + `undoUnsafe`；这里仍凭 `path` 登记，让卡片
+ *                        看得见这个文件，但没有 +N −N、也不参与逐文件反推撤销。
  *   - `update.inlineDiff` ← 旧 ACP 后端的字段，pi 不发；保留以兼容旧数据。
  *
  * 没有 `details.path`（旧网关 / 旧数据）时才退化成从 diff 文本推断路径。
@@ -285,7 +289,45 @@ export function registerFileChangesFromToolUpdate(
     ],
     d?.path,
   );
-  if (!picked) return 0;
+  // undoUnsafe：网关明确标了（write 覆盖前内容没取到 / diff 截断）才算；
+  // 旧 ACP 的 inlineDiff 是按渲染结果给的，没有这个标记 → 保持可撤销。
+  const undoUnsafe = d?.undoUnsafe === true;
+  if (!picked) {
+    // 没有可用 diff，但网关给了权威路径并标了 undoUnsafe = 文件确实被写过了，
+    // 只是 diff 拿不到：write 覆盖前的旧内容读不到（>2MB / 非 UTF-8 / 权限 /
+    // 相对路径无 cwd）。网关**不**再按空文件假想合成 patch（那会把整份新内容标成
+    // 「新增」，模型原样重写一遍时卡片凭空显示 +N）。这里仍凭 `path` 登记，让卡片
+    // 看得见这个文件（宁可多一行不少一行）——只是没有 +N −N、也不参与逐文件反推
+    // 撤销（handleUndoRun 跳过 undoUnsafe，只靠本轮快照兜底）。
+    const forced = normalizeAuthoritativePath(d?.path);
+    if (undoUnsafe && forced && changeBelongsToProject(forced, sink.projectRoot)) {
+      const fileName = forced.split(/[/\\]/).pop() || forced;
+      const changeId = sink.addPendingChange({
+        fileId: forced,
+        fileName,
+        filePath: forced,
+        oldContent: "",
+        newContent: "",
+        language: diffLanguageForPath(forced),
+        unifiedDiff: undefined,
+        undoUnsafe: true,
+      });
+      sink.runChanges.push({
+        id: changeId,
+        fileId: forced,
+        fileName,
+        filePath: forced,
+        oldContent: "",
+        newContent: "",
+        language: diffLanguageForPath(forced),
+        unifiedDiff: undefined,
+        undoUnsafe: true,
+      });
+      sink.afterRegister?.();
+      return 1;
+    }
+    return 0;
+  }
   const { diff, filePath } = picked;
   // 项目外的改动不进卡片（也不进 pendingChanges、不触发 git 重算）——
   // 判据与「为什么不知道根时放行」见 changeBelongsToProject。
@@ -294,9 +336,6 @@ export function registerFileChangesFromToolUpdate(
     return 0;
   }
   const fileName = filePath.split(/[/\\]/).pop() || filePath;
-  // undoUnsafe：网关明确标了（write 覆盖前内容没取到 / diff 截断）才算；
-  // 旧 ACP 的 inlineDiff 是按渲染结果给的，没有这个标记 → 保持可撤销。
-  const undoUnsafe = d?.undoUnsafe === true;
   const changeId = sink.addPendingChange({
     fileId: filePath,
     fileName,

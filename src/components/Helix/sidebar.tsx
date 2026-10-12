@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import {
   Plus,
@@ -707,8 +707,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     new Set(),
   );
-  // Bumped to force the full-area directory view's FileTreePanel to reload.
-  const [dirReloadKey, setDirReloadKey] = useState(0);
 
   const sortSessions = useCallback(
     (list: PersistedSession[]) =>
@@ -1489,6 +1487,11 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           .map((s) => s.id),
       );
       await persistence.deleteSessionsByWorkDir(deleteProjectDir);
+      // 清理被删会话的 per-session 侧栏状态（页签、编辑器 tab、子 Agent 视图）
+      const store = useHelixStore.getState();
+      for (const sid of deletedIds) {
+        store.clearSessionSidebarState(sid);
+      }
       // 批量清理磁盘反向索引里的对应 conversation 条目
       await removeConversationIndex([...deletedIds]);
       await persistence.deleteProjectFolder(deleteProjectDir);
@@ -1640,19 +1643,17 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         </div>
       ) : directoryProjectDir ? (
         /* Full-area directory explorer: takes over the ENTIRE left sidebar
-           (not a small inset panel) while active. The header (back / name /
-           refresh) and the search box both live inside FileTreePanel, with the
-           search box rendered above the header.
+           (not a small inset panel) while active. The header (back / name)
+           and the search box both live inside FileTreePanel, with the search
+           box rendered above the header.
 
            `directoryProjectDir` 恒为**本机路径**（只有本地项目行给「打开目录」
            按钮），所以它展示什么与隧道在不在无关 —— 双通道下远程对话照样可以
            浏览本地项目。 */
         <FileTreePanel
           rootDir={directoryProjectDir}
-          reloadKey={dirReloadKey}
           onOpenFile={() => setRightSidebarTab("code")}
           onBack={() => toggleDirectoryProject(directoryProjectDir)}
-          onRefresh={() => setDirReloadKey((k) => k + 1)}
         />
       ) : (
         <>
@@ -1848,7 +1849,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                     return (
                       <div
                         key={project.dir}
-                        className="group rounded-lg overflow-hidden"
+                        className="group/project rounded-lg overflow-hidden"
                       >
                         <div
                           className={`w-full flex items-center rounded-lg px-3 py-1.5 transition-colors ${
@@ -1902,7 +1903,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                               </span>
                             )}
                           </div>
-                          <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
+                          <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover/project:opacity-100 focus-within:opacity-100">
                             {isRemote ? (
                               <>
                                 {connected && (

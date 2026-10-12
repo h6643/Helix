@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import {
   FolderOpen,
@@ -22,6 +22,7 @@ import React, {
 } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { sendRpc } from "@/lib/electron-bridge";
 import { timeAgo } from "@/lib/format";
 import { persistence, type PersistedSession } from "@/lib/persist";
 import { removeConversationIndex } from "@/lib/session-map";
@@ -61,6 +62,8 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
       await persistence.deleteSession(deleteTarget.id);
       // 同步清理磁盘反向索引，避免 conversation-index.json 只增不减
       await removeConversationIndex(deleteTarget.id);
+      // 清理 per-session 侧栏状态（页签、编辑器 tab、子 Agent 视图）
+      useHelixStore.getState().clearSessionSidebarState(deleteTarget.id);
       setDeleteTarget(null);
       await loadSessions();
     } catch (e) {
@@ -98,6 +101,59 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
     } catch (e) {
       console.error("Export failed:", e);
       useHelixStore.getState().showToast({ type: "error", title: "导出失败" });
+    }
+  };
+
+  // pi 原生 HTML 导出：含工具调用、思考块、命令输出——比 Helix 的
+  // JSON/Markdown 序列化完整得多。注意它导出的是 **pi 当前会话**
+  // （不是列表里选中的那一条），所以放这里而不是单条会话的菜单里。
+  const [exportingPiHtml, setExportingPiHtml] = useState(false);
+  const handleExportPiHtml = async () => {
+    if (exportingPiHtml) return;
+    setExportingPiHtml(true);
+    try {
+      const r = (await sendRpc("export_html", {}).catch(() => null)) as
+        | { data?: { path?: unknown } }
+        | null;
+      const path = typeof r?.data?.path === "string" ? r.data.path : null;
+      if (!path) {
+        useHelixStore.getState().showToast({
+          type: "error",
+          title: "pi HTML 导出失败",
+          description: "后端未返回导出文件路径",
+        });
+        return;
+      }
+      const data = await window.electron?.helixSkills.readFile(path);
+      if (!data) {
+        useHelixStore.getState().showToast({
+          type: "error",
+          title: "pi HTML 导出失败",
+          description: `读不到导出文件：${path}`,
+        });
+        return;
+      }
+      const blob = new Blob([data], { type: "text/html" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `pi-session-${new Date()
+        .toISOString()
+        .slice(0, 19)
+        .replace(/[T:]/g, "-")}.html`;
+      a.click();
+      URL.revokeObjectURL(url);
+      useHelixStore
+        .getState()
+        .showToast({ type: "success", title: "已导出 pi 原生 HTML" });
+    } catch (e) {
+      console.error("Export pi html failed:", e);
+      useHelixStore.getState().showToast({
+        type: "error",
+        title: "pi HTML 导出失败",
+      });
+    } finally {
+      setExportingPiHtml(false);
     }
   };
 
@@ -142,11 +198,12 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
           }
         } else {
           // JSON: 支持单会话包裹格式、裸单会话，以及「导出全部」裸数组 / {sessions:[...]}
-          const data = JSON.parse(text);
+          const data: unknown = JSON.parse(text);
           const arr = Array.isArray(data)
             ? data
-            : data && Array.isArray((data as any).sessions)
-              ? (data as any).sessions
+            : data &&
+                Array.isArray((data as { sessions?: unknown }).sessions)
+              ? (data as { sessions: unknown[] }).sessions
               : null;
           if (arr && arr.length > 0) {
             for (const item of arr) {
@@ -163,7 +220,9 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
             }
           } else {
             const jsonStr =
-              data.type === "helix-session" ? text : JSON.stringify(data);
+              (data as { type?: unknown })?.type === "helix-session"
+                ? text
+                : JSON.stringify(data);
             const session = await persistence.importSessionFromJson(jsonStr);
             if (session) {
               imported++;
@@ -377,6 +436,19 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                 全部导出
               </button>
             )}
+            <button
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7"
+              onClick={() => void handleExportPiHtml()}
+              disabled={exportingPiHtml}
+              data-tip="导出 pi 当前会话为原生 HTML（含工具调用/思考块），需 pi 后端在线"
+            >
+              {exportingPiHtml ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <Download className="size-3" />
+              )}
+              pi HTML
+            </button>
             <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7">
               <Upload className="size-3" />
               导入

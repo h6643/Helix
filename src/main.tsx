@@ -7,9 +7,7 @@ import "@/app/reconnect-keyframes.css";
 import { ErrorBoundary } from "@/components/Helix/error-boundary";
 import { installTauriBridge } from "@/lib/tauri-bridge";
 
-// The old Next.js entry (app/page.tsx) dynamically imported the layout with
-// ssr:false. In a static Vite SPA every module is client-only, so React.lazy is
-// the equivalent — the heavy layout loads on first paint.
+// 重组件懒加载：首屏只拉布景，面板代码在首次渲染时才拉。
 const HelixLayout = lazy(() =>
   import("@/components/Helix/helix-layout").then((m) => ({
     default: m.HelixLayout,

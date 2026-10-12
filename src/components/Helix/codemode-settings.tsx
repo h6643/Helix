@@ -2,7 +2,6 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import {
-  PageHeader,
   SettingGroup,
   SettingRow,
   Toggle,
@@ -17,7 +16,8 @@ interface CodemodeConfig {
   inlineBudget: number;
 }
 
-/** Codemode 配置：启用开关 + 工具展示模式 + 声明预算（写 pi settings.json）。 */
+/** Codemode 配置：启用开关 + 工具展示模式 + 声明预算（写 pi settings.json）。
+    以「常规」页里的一节呈现（不带 PageHeader，与 WebSearchSettings 同构）。 */
 export function CodemodeSettingsPanel() {
   const [cfg, setCfg] = useState<CodemodeConfig | null>(null);
   const [busy, setBusy] = useState(false);
@@ -45,9 +45,7 @@ export function CodemodeSettingsPanel() {
   );
 
   return (
-    <div className="flex-1 flex flex-col space-y-6">
-      <PageHeader>Codemode</PageHeader>
-
+    <>
       <SettingGroup>
         <SettingRow
           label="启用 Codemode"
@@ -92,6 +90,6 @@ export function CodemodeSettingsPanel() {
           正在保存…
         </div>
       )}
-    </div>
+    </>
   );
 }

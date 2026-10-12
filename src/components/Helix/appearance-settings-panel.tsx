@@ -1,7 +1,8 @@
 "use client";
 
-import { Check, ChevronDown, X } from "lucide-react";
+import { Check, ChevronDown } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
+import { useLockScrollOnOpen } from "./settings-hooks";
 import {
   SettingRow,
   SettingGroup,
@@ -9,11 +10,10 @@ import {
   PopupSelect,
   NumberField,
   Toggle,
-  useLockScrollOnOpen,
 } from "./settings-ui";
+import { Button } from "@/components/ui/button";
 import { THEME_SELECT_GROUPS } from "@/lib/themes";
 import { useHelixStore } from "@/stores/helix-store";
-import { Button } from "@/components/ui/button";
 
 /**
  * Custom theme picker. Native `<select>` + `<optgroup>` popups are unreliable

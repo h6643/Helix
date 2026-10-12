@@ -49,6 +49,7 @@ pub fn image_config_save(config: Value) -> Value {
         return json!({ "ok": false, "error": "invalid config" });
     }
     let yaml_path = config_yaml_path();
+    let _guard = crate::config::config_write_lock();
     let mut yaml = std::fs::read_to_string(&yaml_path).unwrap_or_default();
     for k in IMAGE_KEYS {
         let v = config

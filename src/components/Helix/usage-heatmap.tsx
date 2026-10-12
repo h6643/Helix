@@ -124,7 +124,6 @@ export function UsageHeatmap({
     <div ref={containerRef}>
       <div className="overflow-hidden">
         <div style={{ width: gridW, margin: "0 auto" }}>
-          {/* 图例：右上角（已移除色块图例） */}
           <div style={{ display: "flex" }}>
             <div
               style={{

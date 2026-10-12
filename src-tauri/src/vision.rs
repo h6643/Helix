@@ -24,21 +24,27 @@ fn read_config() -> Value {
         if let Ok(raw) = std::fs::read_to_string(&legacy_path) {
             if let Ok(old) = serde_json::from_str::<Value>(&raw) {
                 if old.get("provider").and_then(|v| v.as_str()).is_some() {
-                    let mut yaml = yaml;
-                    for k in VISION_KEYS {
-                        if let Some(v) = old.get(k).and_then(|v| v.as_str()) {
-                            if !v.is_empty() {
-                                yaml = set_yaml_key(&yaml, &format!("vision.{k}"), &json!(v));
+                    let _guard = crate::config::config_write_lock();
+                    // Re-read under the lock: the copy above was taken before we
+                    // held it, and writing that back would revert whatever a
+                    // concurrent settings save did in between.
+                    let mut yaml = std::fs::read_to_string(config_yaml_path()).unwrap_or_default();
+                    if read_yaml_block(&yaml, "vision").is_empty() {
+                        for k in VISION_KEYS {
+                            if let Some(v) = old.get(k).and_then(|v| v.as_str()) {
+                                if !v.is_empty() {
+                                    yaml = set_yaml_key(&yaml, &format!("vision.{k}"), &json!(v));
+                                }
                             }
                         }
+                        let _ = atomic_write(&config_yaml_path(), &yaml);
+                        let _ = std::fs::remove_file(&legacy_path);
+                        return read_yaml_block(&yaml, "vision")
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect::<serde_json::Map<String, Value>>()
+                            .into();
                     }
-                    let _ = atomic_write(&config_yaml_path(), &yaml);
-                    let _ = std::fs::remove_file(&legacy_path);
-                    return read_yaml_block(&yaml, "vision")
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect::<serde_json::Map<String, Value>>()
-                        .into();
                 }
             }
         }
@@ -78,6 +84,7 @@ pub fn vision_config_save(config: Value) -> Value {
         return json!({ "ok": false, "error": "invalid config" });
     }
     let yaml_path = config_yaml_path();
+    let _guard = crate::config::config_write_lock();
     let mut yaml = std::fs::read_to_string(&yaml_path).unwrap_or_default();
     for k in VISION_KEYS {
         let v = config

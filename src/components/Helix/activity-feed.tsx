@@ -105,9 +105,12 @@ export function ActivityFeed({ onClose }: { onClose: () => void }) {
 
   // Expose push for other modules (session save / git).
   useEffect(() => {
-    (window as any).__helixActivity = push;
+    const w = window as Window & {
+      __helixActivity?: typeof push;
+    };
+    w.__helixActivity = push;
     return () => {
-      delete (window as any).__helixActivity;
+      delete w.__helixActivity;
     };
   }, []);
 

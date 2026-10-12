@@ -15,8 +15,8 @@ import {
   XCircle,
 } from "lucide-react";
 import React, { useState, useEffect, useCallback } from "react";
-import { isElectron } from "@/lib/electron-bridge";
 import { AgentOrchestrationPanel } from "./agent-orchestration-panel";
+import { isElectron } from "@/lib/electron-bridge";
 import { timeAgo } from "@/lib/format";
 import { resolveBackendSids } from "@/lib/session-map";
 import { isSyntheticSubAgentToolRow } from "@/lib/tool-display-utils";
@@ -264,7 +264,7 @@ export function DelegationsPanel({
     }
     setError(null);
     try {
-      const api = (window as any).electron as any;
+      const api = window.electron;
       // 过滤键 = 会话全部历史后端 sid（manifest.json 里的命名空间）。无后端
       // 会话 → 无磁盘记录，不退化为列出全部（否则草稿对话会看到别的会话的记录）。
       const sids = await resolveBackendSids(
@@ -276,7 +276,7 @@ export function DelegationsPanel({
       }
       const res = await api?.delegations?.list?.(sids);
       if (res?.ok) {
-        setDelegations(res.delegations || []);
+        setDelegations((res.delegations || []) as Delegation[]);
       } else if (!silent) {
         setError(res?.error || "加载失败");
       }
@@ -299,7 +299,7 @@ export function DelegationsPanel({
     setLogLoading(true);
     setLogContent("");
     try {
-      const api = (window as any).electron as any;
+      const api = window.electron;
       const res = await api?.delegations?.readLog?.(path, 200);
       if (res?.ok) {
         setLogContent(res.content || "");

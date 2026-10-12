@@ -128,7 +128,6 @@ export function BackgroundTasksPanel({
     }
   }
   const running = myTasks.filter((t) => t.status === "running");
-  const done = myTasks.filter((t) => t.status !== "running");
   const runningAll = tasks.filter((t) => t.status === "running");
   // 每组只列「运行中 + 最近 5 条已结束」——沿用旧「其他来源」的限流（避免历史
   // 堆积把真正在跑的任务挤出视野），只是现在这个上限按**每组**各算。
@@ -188,7 +187,7 @@ export function BackgroundTasksPanel({
       setViewing(task);
       setOutputText("加载中…");
       try {
-        const api = (window as any).electron as any;
+        const api = window.electron;
         const res = await api?.backgroundTasks?.read?.(task.id, 16384);
         if (res?.ok) {
           const text = (res.text || "").trim();
@@ -222,7 +221,7 @@ export function BackgroundTasksPanel({
   const killTask = useCallback(
     async (task: BgTask) => {
       try {
-        const api = (window as any).electron as any;
+        const api = window.electron;
         await api?.backgroundTasks?.kill?.(task.id);
       } catch { /* empty */}
       onRefresh();

@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
 import { Folder, Globe, Trash2 } from "lucide-react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   PageHeader,
   SettingGroup,
@@ -10,8 +10,8 @@ import {
   NumberField,
   PopupSelect,
 } from "./settings-ui";
-import { getElectronAPI } from "@/lib/electron-bridge";
 import { Button } from "@/components/ui/button";
+import { getElectronAPI } from "@/lib/electron-bridge";
 
 interface MemoryStats {
   file_count: number;
@@ -36,7 +36,13 @@ interface DeleteTarget {
   count: number;
 }
 
-type MemoryConfig = Record<string, any>;
+type MemoryConfig = Record<string, unknown>;
+
+/** cfg 里的标量项（字符串枚举/开关/数字），unknown 安全收窄。 */
+const cfgStr = (cfg: MemoryConfig | null, key: string, fallback: string) => {
+  const v = cfg?.[key];
+  return typeof v === "string" && v ? v : fallback;
+};
 
 /** 记忆设置：全局/项目记忆开关 + 记忆文件统计 + pi-hermes-memory 全量配置。 */
 export function MemorySettingsPanel() {
@@ -145,10 +151,14 @@ export function MemorySettingsPanel() {
   const bool = (key: string, fallback = true) =>
     typeof cfg?.[key] === "boolean" ? cfg[key] : fallback;
 
-  const sessionVariant =
-    typeof cfg?.sessionSearch === "object" && cfg.sessionSearch?.variant
-      ? cfg.sessionSearch.variant
-      : "legacy";
+  const sessionVariant = (() => {
+    const s = cfg?.sessionSearch;
+    const v =
+      typeof s === "object" && s !== null
+        ? (s as { variant?: unknown }).variant
+        : undefined;
+    return typeof v === "string" && v ? v : "legacy";
+  })();
 
   return (
     <div className="flex-1 flex flex-col space-y-6">
@@ -291,7 +301,7 @@ export function MemorySettingsPanel() {
           hint="记忆超限时的处理：自动整理 / 拒绝写入 / 先进先出淘汰"
         >
           <PopupSelect
-            value={cfg?.memoryOverflowStrategy ?? "auto-consolidate"}
+            value={cfgStr(cfg, "memoryOverflowStrategy", "auto-consolidate")}
             options={[
               { label: "自动整理", value: "auto-consolidate" },
               { label: "拒绝写入", value: "reject" },
@@ -471,7 +481,7 @@ export function MemorySettingsPanel() {
           hint="记忆策略注入方式（full / compact / none）"
         >
           <PopupSelect
-            value={cfg?.memoryPolicyStyle ?? "full"}
+            value={cfgStr(cfg, "memoryPolicyStyle", "full")}
             options={[
               { label: "完整", value: "full" },
               { label: "精简", value: "compact" },

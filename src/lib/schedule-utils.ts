@@ -9,7 +9,6 @@
  * (scheduled_tasks.rs poll_due_jobs) — this module only computes the initial
  * nextRunAt / cronExpression for creation.
  */
-import { useHelixStore } from "@/stores/helix-store";
 
 // ── Minimal cron engine（与 Rust next_cron_occurrence / pi 扩展同语义）──────
 function parseCronField(
@@ -273,7 +272,7 @@ export function syncTaskToBackend(
   sessionMode?: "fresh" | "reuse",
 ) {
   try {
-    const electron = (window as any).electron;
+    const electron = window.electron;
     if (electron?.scheduledTasks?.create) {
       electron.scheduledTasks
         .create({
@@ -284,7 +283,7 @@ export function syncTaskToBackend(
           nextRunAt: nextRunAt ?? undefined,
           sessionMode: sessionMode ?? "fresh",
         })
-        .catch((e: any) =>
+        .catch((e: unknown) =>
           console.error("sync scheduled task to backend failed:", e),
         );
     }

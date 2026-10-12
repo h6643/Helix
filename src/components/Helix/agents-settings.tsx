@@ -29,6 +29,37 @@ interface DelegationConfig {
   subagent_auto_approve: boolean;
 }
 
+/** helix.getConfig 是 config.yaml 全量透传（electron.d.ts 标 Promise<any>）；
+ *  这里只取 delegation 块的局部形状，逐字段 ?. / ?? 兜底，行为和原来一致。 */
+interface DelegationYamlBlock {
+  delegation?: {
+    provider?: string;
+    model?: string;
+    base_url?: string;
+    max_iterations?: unknown;
+    reasoning_effort?: string;
+    subagent_auto_approve?: unknown;
+    /** YAML flow 存的一行 JSON 字符串 */
+    identities?: string;
+  };
+}
+
+/** pi-subagents 扩展解析后的 agent 类型（listSubagents / helix_list_subagents）。
+ *  ElectronAPI 已有该返回类型，但这里要复用给 presets state，本地复制一份。 */
+interface SubagentPreset {
+  id: string;
+  name: string;
+  description: string;
+  tools: string[];
+  model: string;
+  thinking: string;
+  systemPromptMode: string;
+  systemPrompt: string;
+  path: string;
+  disabled: boolean;
+  source: "default" | "project" | "workspace" | "global";
+}
+
 const DEFAULTS: DelegationConfig = {
   provider: "",
   model: "",
@@ -72,7 +103,6 @@ const SubagentModelPicker = ({
   const ref = useRef<HTMLDivElement>(null);
 
   const providers = useHelixStore((s) => s.providers);
-  const activeProviderId = useHelixStore((s) => s.activeProviderId);
 
   useEffect(() => {
     if (!open) return;
@@ -225,14 +255,13 @@ const PresetSubagentItem = ({
   onDelete,
   onModelChange,
 }: {
-  p: any;
+  p: SubagentPreset;
   onToggle: (id: string, enabled: boolean) => void;
   onDelete: (id: string) => void;
   onModelChange: (id: string, model: string) => void;
 }) => {
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [toggling, setToggling] = useState(false);
   const disabled = p.disabled === true;
   return (
     <div
@@ -278,12 +307,7 @@ const PresetSubagentItem = ({
             <Toggle
               enabled={!disabled}
               onToggle={async () => {
-                setToggling(true);
-                try {
-                  await onToggle(p.id, !disabled);
-                } finally {
-                  setToggling(false);
-                }
+                await onToggle(p.id, !disabled);
               }}
             />
           </div>
@@ -383,20 +407,19 @@ export function AgentsSettings() {
   };
   const [saSettings, setSaSettings] = useState<SubagentSettings>({});
   const [, setSaLoading] = useState(false);
-  const [saSaving, setSaSaving] = useState(false);
-  const [saSaved, setSaSaved] = useState(false);
   const [saErr, setSaErr] = useState<string | null>(null);
+  const saSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let alive = true;
-    const api = (window as any).electron?.subagentsConfig;
+    const api = window.electron?.subagentsConfig;
     if (!api?.list) {
       // Tauri bridge not available — fall back silently.
       return;
     }
     api
       .list()
-      .then((r: any) => {
+      .then((r) => {
         if (!alive) return;
         if (r?.ok && r.settings) {
           setSaSettings(r.settings);
@@ -409,49 +432,35 @@ export function AgentsSettings() {
     };
   }, []);
 
-  const saveSubagentSettings = async () => {
-    const api = (window as any).electron?.subagentsConfig;
-    if (!api?.save) {
-      setSaErr("网关未连接，无法保存子智能体设置");
-      return;
-    }
-    setSaSaving(true);
-    setSaErr(null);
-    try {
-      const r = await api.save(saSettings);
-      if (!r?.ok) throw new Error(r?.error ?? "保存失败");
-      setSaSaved(true);
-      setTimeout(() => setSaSaved(false), 2000);
-    } catch (e: any) {
-      setSaErr(String(e?.message || e));
-    } finally {
-      setSaSaving(false);
-    }
-  };
+  // 设置变更即保存（去抖）
+  useEffect(() => {
+    if (Object.keys(saSettings).length === 0) return;
+    if (saSaveTimer.current) clearTimeout(saSaveTimer.current);
+    saSaveTimer.current = setTimeout(async () => {
+      const api = window.electron?.subagentsConfig;
+      if (!api?.save) return;
+      try {
+        const r = await api.save(saSettings);
+        if (!r?.ok) setSaErr(r?.error ?? "保存失败");
+      } catch (e) {
+        setSaErr(String((e as { message?: string })?.message || e));
+      }
+    }, 500);
+    return () => {
+      if (saSaveTimer.current) clearTimeout(saSaveTimer.current);
+    };
+  }, [saSettings]);
+
 
   // pi-subagents agent types (extension defaults + project/workspace/global
   // .md files), with reversible enable/disable + delete.
-  const [presets, setPresets] = useState<
-    {
-      id: string;
-      name: string;
-      description: string;
-      tools: string[];
-      model: string;
-      thinking: string;
-      systemPromptMode: string;
-      systemPrompt: string;
-      path: string;
-      disabled: boolean;
-      source: "default" | "project" | "workspace" | "global";
-    }[]
-  >([]);
+  const [presets, setPresets] = useState<SubagentPreset[]>([]);
 
   const apiHistory = useHelixStore((s) => s.apiHistory);
 
   useEffect(() => {
     let alive = true;
-    const api = (window as any).electron?.helix;
+    const api = window.electron?.helix;
     if (!api?.getConfig) {
       setErr("网关未连接，无法读取配置");
       setLoading(false);
@@ -459,7 +468,7 @@ export function AgentsSettings() {
     }
     api
       .getConfig()
-      .then((r: any) => {
+      .then((r: DelegationYamlBlock) => {
         if (!alive) return;
         const d = r?.delegation ?? {};
         setCfg({
@@ -476,7 +485,7 @@ export function AgentsSettings() {
         // identities is persisted as a JSON-on-one-line YAML flow value, so
         // getConfig returns it as a string we JSON.parse here.
         const rawIds = d?.identities;
-        let parsedIds: any[] = [];
+        let parsedIds: unknown = [];
         if (rawIds) {
           try {
             parsedIds = JSON.parse(rawIds);
@@ -486,13 +495,13 @@ export function AgentsSettings() {
           setIdentities(
             parsedIds.map((x, i) => ({
               id: `id-${i}`,
-              name: String(x?.name ?? ""),
-              system_prompt: String(x?.system_prompt ?? ""),
+              name: String((x as { name?: unknown })?.name ?? ""),
+              system_prompt: String((x as { system_prompt?: unknown })?.system_prompt ?? ""),
             })),
           );
         }
       })
-      .catch((e: any) => alive && setErr(String(e?.message || e)))
+      .catch((e: unknown) => alive && setErr(String((e as { message?: string })?.message || e)))
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
@@ -505,10 +514,10 @@ export function AgentsSettings() {
   // section).
   useEffect(() => {
     let alive = true;
-    const listSubagents = (window as any).electron?.helix?.listSubagents;
+    const listSubagents = window.electron?.helix?.listSubagents;
     if (typeof listSubagents !== "function") return;
     listSubagents()
-      .then((ps: any[]) => {
+      .then((ps) => {
         if (alive && Array.isArray(ps)) setPresets(ps);
       })
       .catch(() => {});
@@ -517,8 +526,8 @@ export function AgentsSettings() {
     };
   }, []);
 
-  const setKey = (key: string, value: any) =>
-    (window as any).electron?.helix?.setYamlKey(`delegation.${key}`, value);
+  const setKey = (key: string, value: string | number | boolean) =>
+    window.electron?.helix?.setYamlKey(`delegation.${key}`, value);
 
   const save = async () => {
     setSaving(true);
@@ -539,12 +548,12 @@ export function AgentsSettings() {
           name: name.trim(),
           system_prompt,
         }));
-      await (window as any).electron?.helix?.setDelegationIdentities?.(payload);
+      await window.electron?.helix?.setDelegationIdentities?.(payload);
       // 与「保存 Hooks 配置」一致：保存后停留在本页并显示行内「已保存」状态，
       // 不再自动跳回列表（避免状态一闪而过）。
       setSaved(true);
-    } catch (e: any) {
-      setErr(String(e?.message || e));
+    } catch (e) {
+      setErr(String((e as { message?: string })?.message || e));
     } finally {
       setSaving(false);
     }
@@ -604,7 +613,7 @@ export function AgentsSettings() {
   // Delete a pi-subagents custom agent: unlinks its .md (built-in defaults
   // have no file and are refused), then drop it from view.
   const deletePreset = async (id: string) => {
-    const fn = (window as any).electron?.helix?.deleteSubagent;
+    const fn = window.electron?.helix?.deleteSubagent;
     if (typeof fn !== "function") {
       setErr("网关未连接，无法删除预设");
       return;
@@ -612,8 +621,8 @@ export function AgentsSettings() {
     try {
       await fn(id);
       setPresets((prev) => prev.filter((p) => p.id !== id));
-    } catch (e: any) {
-      setErr(String(e?.message || e));
+    } catch (e) {
+      setErr(String((e as { message?: string })?.message || e));
     }
   };
 
@@ -622,7 +631,7 @@ export function AgentsSettings() {
   // so both surfaces stay in sync. Disabling a compiled default writes a
   // stub to ~/.pi/agent/agents/<type>.md.
   const togglePreset = async (id: string, enabled: boolean) => {
-    const fn = (window as any).electron?.helix?.setSubagentEnabled;
+    const fn = window.electron?.helix?.setSubagentEnabled;
     if (typeof fn !== "function") {
       setErr("网关未连接，无法切换预设状态");
       return;
@@ -632,15 +641,15 @@ export function AgentsSettings() {
       setPresets((prev) =>
         prev.map((p) => (p.id === id ? { ...p, disabled: !enabled } : p)),
       );
-    } catch (e: any) {
-      setErr(String(e?.message || e));
+    } catch (e) {
+      setErr(String((e as { message?: string })?.message || e));
     }
   };
 
   // Set the model on a preset: writes `model: "<provider/modelId>"` into the
   // agent's .md frontmatter. Empty string clears the field (inherit parent).
   const handleModelChange = async (id: string, model: string) => {
-    const fn = (window as any).electron?.helix?.setSubagentModel;
+    const fn = window.electron?.helix?.setSubagentModel;
     if (typeof fn !== "function") {
       setErr("网关未连接，无法设置模型");
       return;
@@ -650,8 +659,8 @@ export function AgentsSettings() {
       setPresets((prev) =>
         prev.map((p) => (p.id === id ? { ...p, model } : p)),
       );
-    } catch (e: any) {
-      setErr(String(e?.message || e));
+    } catch (e) {
+      setErr(String((e as { message?: string })?.message || e));
     }
   };
 
@@ -665,7 +674,7 @@ export function AgentsSettings() {
     <SettingRow label={label} hint={hint}>
       <input
         type={type}
-        value={cfg[key] as any}
+        value={String(cfg[key])}
         placeholder={placeholder}
         onChange={(e) =>
           setCfg((c) => ({
@@ -921,21 +930,13 @@ export function AgentsSettings() {
                 />
               </SettingRow>
 
-              <div className="flex items-center justify-end gap-3 px-4 py-3">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={saveSubagentSettings}
-                  disabled={saSaving}
-                >
-                  {saSaving ? "保存中…" : saSaved ? "已保存" : "保存行为设置"}
-                </Button>
+              <div className="px-4 py-3">
+                {saErr && (
+                  <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-red-400">
+                    {saErr}
+                  </p>
+                )}
               </div>
-              {saErr && (
-                <p className="px-4 pb-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-400">
-                  {saErr}
-                </p>
-              )}
             </SettingGroup>
 
             {identities.length > 0 && (

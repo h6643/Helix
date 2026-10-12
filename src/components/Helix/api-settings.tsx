@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import {
   Settings,
@@ -12,7 +12,6 @@ import {
   GripVertical,
   Globe,
   Keyboard,
-  Zap,
   Bot,
   Activity,
   Workflow,
@@ -20,7 +19,6 @@ import {
   Trash2,
   Folder,
   Brain,
-  Code2,
   Compass,
 } from "lucide-react";
 import React, {
@@ -32,33 +30,19 @@ import React, {
 } from "react";
 import { AgentsSettings } from "./agents-settings";
 import { AppearanceSettingsPanel } from "./appearance-settings-panel";
+import { BrowserSettingsPanel } from "./browser-settings";
 import { ChannelModelSettings } from "./channel-model-settings";
 import { GeneralSettingsPanel } from "./general-settings-panel";
 import { HookSettings } from "./hook-settings";
 import { ImageModelSettings } from "./image-model-settings";
-import { MemorySettingsPanel } from "./memory-settings";
-import { BrowserSettingsPanel } from "./browser-settings";
-import { CodemodeSettingsPanel } from "./codemode-settings";
 import { McpEditorForm, type McpFormData } from "./mcp-editor-form";
+import { MemorySettingsPanel } from "./memory-settings";
 import { PageHeader, PopupSelect, SettingGroup } from "./settings-ui";
 import { ShortcutsPage } from "./shortcuts-page";
-import {
-  ModelUsageStats,
-  UsageSummary,
-  UsageDetail,
-  TokenUsagePanel,
-} from "./usage-stats";
+import { TokenUsagePanel } from "./usage-stats";
 import { VisionModelSettings } from "./vision-model-settings";
 import { Button } from "@/components/ui/button";
-import { getCurrentVersion } from "@/hooks/use-check-update";
-import { pushModelConfig, pushModelConfigWithKey } from "@/lib/config-sync";
-import {
-  isElectron,
-  helixApi,
-  electronFS,
-  electronDialog,
-  electronApp,
-} from "@/lib/electron-bridge";
+import { isElectron, helixApi, electronApp } from "@/lib/electron-bridge";
 import { persistence } from "@/lib/persist";
 import { getAllProviders, getBaseUrl } from "@/lib/providers";
 import { useGatewayStore } from "@/stores/gateway-store";
@@ -75,10 +59,6 @@ const API_FORMATS = [
 ];
 const DEFAULT_API_FORMAT = "openai-completions";
 
-const PERSONALITY_LABELS: Record<string, string> = {};
-
-const CUSTOM_PROVIDER_ID = "__custom__";
-
 /* Derives a friendly provider name from a baseUrl hostname, falling back to the
  *  "配置 · <model>" pattern, which becomes meaningless once a profile accumulates
  *  models from multiple endpoints. */
@@ -93,9 +73,7 @@ interface SettingsProps {
   setSidebarWidth: (w: number) => void;
   saveSidebarWidth: (w: number) => void;
   showSidebar: boolean;
-  setShowSidebar: (v: boolean | ((prev: boolean) => boolean)) => void;
   sidebarCollapsed: boolean;
-  setSidebarCollapsed: (v: boolean | ((prev: boolean) => boolean)) => void;
 }
 
 type SettingsPage =
@@ -111,7 +89,6 @@ type SettingsPage =
   | "agents"
   | "memory"
   | "browser"
-  | "codemode";
 
 interface NavItem {
   id: SettingsPage;
@@ -142,7 +119,6 @@ const NAV_GROUPS: NavGroup[] = [
       { id: "agents", label: "子智能体", icon: Bot },
       { id: "memory", label: "记忆", icon: Brain },
       { id: "browser", label: "浏览器", icon: Compass },
-      { id: "codemode", label: "Codemode", icon: Code2 },
     ],
   },
   {
@@ -161,16 +137,121 @@ const archiveProjectName = (workDir: string | null): string => {
   return parts[parts.length - 1] || workDir;
 };
 
+// 网关 config.yaml `mcp_servers:` 块的 wire 形状：app 侧 McpServerConfig
+// （command: string[] / environment）与网关条目（command: string / args /
+// env / env_passthrough，外加合井保存时原样带回的未知标量键）的并集。
+// 只用于 mcpConfig.list/save 的读写边界。
+interface GatewayMcpServerWire {
+  type?: "local" | "remote";
+  command?: string | string[];
+  url?: string;
+  args?: unknown[];
+  environment?: Record<string, string>;
+  env?: Record<string, string>;
+  enabled?: boolean;
+  cwd?: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+  envPassthrough?: boolean;
+  env_passthrough?: boolean;
+  description?: string;
+  exposure?: "codemode" | "deferred" | "direct" | "hidden";
+  toolExposure?: Record<string, string>;
+  [key: string]: unknown;
+}
+
+// mcpConfig.list 的返回值 / mcpConfig.save 的参数在 d.ts 里标的是 app 侧
+// McpServerConfig 记录，但运行时字段是网关 wire 形状（command 可能是字符串、
+// 带 args/env），Rust 端也接受任意 YAML 映射。这两个 wrapper 只做类型边界
+// 收窄，值原样透传。
+// pi 的 exposure / toolExposure：表单（多行文本）与 wire（对象）互转。
+// 每行「工具名或 glob=exposure」；空行与没有 = 的行丢弃。
+const MCP_EXPOSURES = ["codemode", "deferred", "direct", "hidden"] as const;
+type McpExposure = (typeof MCP_EXPOSURES)[number];
+
+function advancedFromWire(entry: object): {
+  description: string;
+  exposure: McpExposure;
+  toolExposureText: string;
+  timeoutText: string;
+} {
+  const e = entry as Record<string, unknown>;
+  const exposure = (MCP_EXPOSURES as readonly string[]).includes(
+    String(e.exposure ?? ""),
+  )
+    ? (e.exposure as McpExposure)
+    : "codemode";
+  const toolExposureText =
+    e.toolExposure && typeof e.toolExposure === "object"
+      ? Object.entries(e.toolExposure as Record<string, unknown>)
+          .map(([k, v]) => `${k}=${v}`)
+          .join("\n")
+      : "";
+  return {
+    description: typeof e.description === "string" ? e.description : "",
+    exposure,
+    toolExposureText,
+    timeoutText: typeof e.timeout === "number" ? String(e.timeout) : "",
+  };
+}
+
+/** 表单 → wire：只写非空项，空值不覆盖旧值（调用方按 merge 处理）。 */
+function advancedToWire(form: McpFormData): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (form.description.trim()) out.description = form.description.trim();
+  out.exposure = form.exposure;
+  const toolExposure: Record<string, string> = {};
+  for (const line of form.toolExposureText.split("\n")) {
+    const i = line.indexOf("=");
+    if (i > 0 && line.slice(i + 1).trim())
+      toolExposure[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  if (Object.keys(toolExposure).length > 0) out.toolExposure = toolExposure;
+  const timeout = Number(form.timeoutText.trim());
+  if (form.timeoutText.trim() && Number.isFinite(timeout) && timeout > 0)
+    out.timeout = Math.round(timeout);
+  return out;
+}
+
+// 服务器工具数的小标签（只给连上的服务器显示；工具数 = pi 实际拿到的）
+const mcpToolCountLabel = (count: number | undefined) =>
+  typeof count === "number" ? ` · ${count} 工具` : "";
+
+type McpConfigApi = {
+  list: (includeEnv?: boolean) => Promise<{
+    ok: boolean;
+    servers?: Record<string, import("@/stores/helix-types").McpServerConfig>;
+    error?: string;
+  }>;
+  save: (
+    servers: Record<string, import("@/stores/helix-types").McpServerConfig>,
+  ) => Promise<{ ok: boolean; error?: string }>;
+};
+
+const listGatewayMcp = async (
+  api: McpConfigApi,
+): Promise<{ ok: boolean; servers?: Record<string, GatewayMcpServerWire>; error?: string }> => {
+  const r: { ok: boolean; servers?: unknown; error?: string } = await api.list();
+  return {
+    ok: r.ok,
+    servers: r.servers as Record<string, GatewayMcpServerWire> | undefined,
+    error: r.error,
+  };
+};
+
+const saveGatewayMcp = (
+  api: McpConfigApi,
+  servers: Record<string, GatewayMcpServerWire>,
+): Promise<{ ok: boolean; error?: string }> =>
+  api.save(
+    servers as Record<string, import("@/stores/helix-types").McpServerConfig>,
+  );
+
 const formatArchiveDate = (ts: number): string => {
   const d = new Date(ts);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
-
-// ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel — extracted to ./usage-stats.tsx
-
-// ShortcutsPage — extracted to ./shortcuts-page.tsx
-// McpEditorForm — extracted to ./mcp-editor-form.tsx
 
 // ─── Shared components ──────────────────────────────────────────────────────
 const Toggle = ({
@@ -202,22 +283,14 @@ export function ApiSettings({
   setSidebarWidth,
   saveSidebarWidth,
   showSidebar,
-  setShowSidebar,
   sidebarCollapsed,
-  setSidebarCollapsed,
 }: SettingsProps) {
   const {
     apiConfig,
     apiProfiles,
     activeProfileId,
-    apiHistory,
     addApiHistory,
-    removeApiHistory,
-    providers,
-    activeModel,
     upsertProvider,
-    removeProvider,
-    setActiveModel,
     setApiConfig,
     addApiProfile,
     updateApiProfileConfig,
@@ -228,23 +301,9 @@ export function ApiSettings({
     persistToStorage,
     setAvailableModels,
     availableModels,
-    fontFamily,
-    setFontFamily,
-    fontSize,
-    setFontSize,
-    interfaceFont,
-    setInterfaceFont,
-    transcriptFontSize,
-    setTranscriptFontSize,
     mcpServers,
     removeMcpServer,
     toggleMcpServer,
-    // Helix config-backed toggles
-    personality,
-    setPersonality,
-    // Agent settings
-    autoCompactContext,
-    setAutoCompactContext,
   } = useHelixStore();
 
   const settingsPage = useHelixStore((s) => s.settingsPage);
@@ -282,10 +341,6 @@ export function ApiSettings({
     }
   }, [settingsPage, setSettingsPage]);
   const [localConfig, setLocalConfig] = useState<ApiConfig>({ ...apiConfig });
-  const [appVersion, setAppVersion] = useState("");
-  useEffect(() => {
-    getCurrentVersion().then((v) => v && setAppVersion(v));
-  }, []);
 
   // ── Settings nav resize (synced with the main sidebar width) ──────────────
   // The main sidebar width lives in helix-layout and is the single source of
@@ -366,6 +421,7 @@ export function ApiSettings({
       ids: string[],
       persistedWindows?: Record<string, number>,
       persistedReasonings?: Record<string, boolean>,
+      persistedInputs?: Record<string, string[]>,
     ) => {
       setAddedModels((prev) =>
         ids.map((id) => {
@@ -375,14 +431,17 @@ export function ApiSettings({
               id,
               contextWindow: old.contextWindow,
               reasoning: old.reasoning,
+              input: old.input,
             };
           }
           const cw = persistedWindows?.[id];
           const rs = persistedReasonings?.[id];
+          const inp = persistedInputs?.[id];
           return {
             id,
             ...(cw !== undefined ? { contextWindow: cw } : {}),
             ...(rs !== undefined ? { reasoning: rs } : {}),
+            ...(inp !== undefined ? { input: inp } : {}),
           };
         }),
       );
@@ -405,6 +464,7 @@ export function ApiSettings({
       p.models || [],
       p.modelContextWindows,
       p.modelReasonings,
+      p.modelInputs,
     );
   }, [activeProfileId, apiProfiles, seedAddedModels]);
 
@@ -421,10 +481,10 @@ export function ApiSettings({
   // they open Settings (the old behaviour).
   useEffect(() => {
     if (!isElectron()) return;
-    const h = (window as any).electron?.helix;
+    const h = window.electron?.helix;
     if (!h?.getConfig) return;
     h.getConfig()
-      .then((r: any) => {
+      .then((r: { model?: string; provider?: string; baseUrl?: string }) => {
         if (!r || !r.model) return;
         // Read the latest store value at resolve time (restoreFromStorage may have
         // just rehydrated it). Preserve its key; only fill backend-known fields.
@@ -469,17 +529,26 @@ export function ApiSettings({
 
   const [showApiKey, setShowApiKey] = useState(false);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
-  const [showAddModelModal, setShowAddModelModal] = useState(false);
   // 已添加的模型（第一个是默认模型）。每项的 contextWindow 单独落到
   // models.json 里对应模型条目上，所以不能复用 localConfig.contextWindow。
   const [addedModels, setAddedModels] = useState<
-    { id: string; contextWindow?: number; reasoning?: boolean }[]
+    {
+      id: string;
+      contextWindow?: number;
+      reasoning?: boolean;
+      /** models.json 的 `input` 数组。pi 只读 "image" 决定图片原生透传。 */
+      input?: string[];
+    }[]
   >([]);
   const [showAddModelDialog, setShowAddModelDialog] = useState(false);
   const [pickedModel, setPickedModel] = useState("");
   const [pickedContext, setPickedContext] = useState("");
   const [manualModel, setManualModel] = useState("");
   const [pickedReasoning, setPickedReasoning] = useState(false);
+  // 输入类型：文字始终开；图片/视频是可选项。
+  // 后端白名单里收了 video/audio（pi 现在只认 image），留位不丢数据。
+  const [pickedInputImage, setPickedInputImage] = useState(false);
+  const [pickedInputVideo, setPickedInputVideo] = useState(false);
   type ModelTab = "main" | "vision" | "image" | `channel:${string}`;
   const [modelTab, setModelTab] = useState<ModelTab>("main");
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
@@ -494,7 +563,7 @@ export function ApiSettings({
     const loadVisionImage = async () => {
       if (isElectron()) {
         try {
-          const visionApi = (window as any).electron?.vision;
+          const visionApi = window.electron?.vision;
           if (visionApi?.getConfig) {
             const r = await visionApi.getConfig();
             if (r?.ok && r.config) {
@@ -504,7 +573,7 @@ export function ApiSettings({
           }
         } catch { /* empty */ }
         try {
-          const imageApi = (window as any).electron?.image;
+          const imageApi = window.electron?.image;
           if (imageApi?.getConfig) {
             const r = await imageApi.getConfig();
             if (r?.ok && r.config) {
@@ -542,14 +611,11 @@ export function ApiSettings({
     contextWindow?: number;
   };
   const [piModels, setPiModels] = useState<PiModel[]>([]);
-  const [isLoadingPiModels, setIsLoadingPiModels] = useState(false);
   // pi-connect 渠道 provider（WorkBuddy / Trae / Qoder）——由 helix-layout 在
   // 网关就绪时刷新，这里只读用于左栏渠道行。
   const piChannelProviders = useHelixStore((s) => s.piChannelProviders);
-
   const loadPiModels = useCallback(async () => {
     if (!isElectron()) return;
-    setIsLoadingPiModels(true);
     try {
       const r = await window.electron.helix.piGetAvailableModels();
       const list = Array.isArray(r?.models) ? (r.models as PiModel[]) : [];
@@ -558,16 +624,8 @@ export function ApiSettings({
       // Pi may still be spawning (gateway not INITIALIZED yet) — degrade to the
       // manual probe path silently instead of firing a scary toast on open.
       setPiModels([]);
-    } finally {
-      setIsLoadingPiModels(false);
     }
   }, []);
-
-  // Refresh whenever the add-model form opens so the list can't go stale after
-  // the user edits ~/.pi/agent/custom-providers.json outside Helix.
-  useEffect(() => {
-    if (showAddModelModal) void loadPiModels();
-  }, [showAddModelModal, loadPiModels]);
 
   // 挂载即拉一次 pi 的模型列表：per-model 的 contextWindow / reasoning 只
   // 持久化在 ~/.pi/agent/models.json，profile 重启后只剩 id，冷启动后编辑
@@ -586,7 +644,12 @@ export function ApiSettings({
     setAddedModels((prev) => {
       let changed = false;
       const next = prev.map((m) => {
-        if (m.contextWindow !== undefined && m.reasoning !== undefined) return m;
+        if (
+          m.contextWindow !== undefined &&
+          m.reasoning !== undefined &&
+          m.input !== undefined
+        )
+          return m;
         const pm =
           piModels.find(
             (x) => x.id === m.id && (!prov || x.provider === prov),
@@ -594,52 +657,20 @@ export function ApiSettings({
         if (!pm) return m;
         const contextWindow = m.contextWindow ?? pm.contextWindow;
         const reasoning = m.reasoning ?? pm.reasoning;
-        if (contextWindow === m.contextWindow && reasoning === m.reasoning) {
+        const input = m.input ?? pm.input;
+        if (
+          contextWindow === m.contextWindow &&
+          reasoning === m.reasoning &&
+          input === m.input
+        ) {
           return m;
         }
         changed = true;
-        return { ...m, contextWindow, reasoning };
+        return { ...m, contextWindow, reasoning, input };
       });
       return changed ? next : prev;
     });
   }, [piModels, addedModels, localConfig.provider]);
-
-  /** Providers Pi actually has configured, with their model counts. */
-  const piProviders = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const m of piModels) {
-      counts.set(m.provider, (counts.get(m.provider) ?? 0) + 1);
-    }
-    return [...counts.entries()].map(([id, count]) => ({ id, count }));
-  }, [piModels]);
-
-  /** Provider dropdown: Pi's live providers first (they're the ones that will
-   *  actually work), then the static table, then the custom escape hatch. */
-  const providerOptions = useMemo(() => {
-    const piIds = new Set(piProviders.map((p) => p.id));
-    return [
-      ...piProviders.map((p) => ({
-        label: `${p.id} · Pi (${p.count})`,
-        value: p.id,
-      })),
-      ...ALL_PROVIDERS.filter((p) => !piIds.has(p.id)).map((p) => ({
-        label: `${p.name} (${p.id})`,
-        value: p.id,
-      })),
-      { label: "＋ 自定义", value: CUSTOM_PROVIDER_ID },
-    ];
-  }, [piProviders]);
-
-  /** Pi model ids scoped to the selected provider. Helix prefixes custom
-   *  providers with `custom:` to avoid colliding with built-in env-var names,
-   *  while Pi stores them under the bare name — strip it before matching. */
-  const piModelIds = useMemo(() => {
-    const prov = localConfig.provider.trim().replace(/^custom:/, "");
-    const scoped = prov
-      ? piModels.filter((m) => m.provider === prov)
-      : piModels;
-    return [...new Set(scoped.map((m) => m.id))];
-  }, [piModels, localConfig.provider]);
 
   /** Pi's registered wire format for the current provider. When a provider was
    *  registered in Pi with a format other than the OpenAI default (a pi-messages
@@ -667,58 +698,21 @@ export function ApiSettings({
     );
   }, [piFormatForProvider]);
 
-  /** Union of the endpoint probe result and Pi's configured list, so neither
-   *  source hides the other (probe first — the user asked for it explicitly). */
-  const modelOptions = useMemo(() => {
-    const out = [...availableModels];
-    for (const id of piModelIds) if (!out.includes(id)) out.push(id);
-    return out;
-  }, [availableModels, piModelIds]);
-
-  const applyYamlKey = useCallback(
-    async (key: string, value: boolean) => {
-      if (!isElectron) return;
-      try {
-        const r: any = await window.electron.helix.setYamlKey(key, value);
-        if (r?.success && r?.changed) {
-          showToast({
-            title: "设置已保存",
-            description: "Helix 已重启生效",
-            type: "success",
-          });
-        } else if (!r?.success) {
-          showToast({
-            title: "保存失败",
-            description: r?.error || "未知错误",
-            type: "error",
-          });
-        }
-      } catch (e: any) {
-        showToast({
-          title: "保存失败",
-          description: e?.message || String(e),
-          type: "error",
-        });
-      }
-    },
-    [showToast],
-  );
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const [modelSearch, setModelSearch] = useState("");
-  const [modelSort, setModelSort] = useState<"asc" | "desc" | "none">("asc");
 
-  // Search-filtered + sorted view of the model list (the dropdown renders this,
-  // not the raw availableModels, so the search box and sort buttons compose).
+  // Search-filtered view of the model list (the dropdown renders this, not the
+  // raw availableModels, so the search box composes with it).
   const sortedModelOptions = useMemo(() => {
     const q = modelSearch.trim().toLowerCase();
     const filtered = q
       ? availableModels.filter((m) => m.toLowerCase().includes(q))
       : availableModels;
-    const copy = [...filtered];
-    copy.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    return modelSort === "desc" ? copy.reverse() : copy;
-  }, [availableModels, modelSearch, modelSort]);
+    return [...filtered].sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true }),
+    );
+  }, [availableModels, modelSearch]);
 
   useEffect(() => {
     if (!showModelDropdown) return;
@@ -766,13 +760,24 @@ export function ApiSettings({
     command: "",
     url: "",
     args: "",
+    description: "",
+    exposure: "codemode",
+    toolExposureText: "",
+    timeoutText: "",
   });
   const mcpServerNames = Object.keys(mcpServers);
   const [mcpStatus, setMcpStatus] = useState<Record<string, string>>({});
+  // 同一份状态响应里的附加信息：工具数与连接错误原因。
+  // 单独一份 state，是为了不改 mcpStatus 的两个渲染点（它们只认字符串）。
+  const [mcpStatusDetail, setMcpStatusDetail] = useState<
+    Record<string, { toolCount?: number; error?: string }>
+  >({});
   // Gateway MCP servers — read-only view of config.yaml `mcp_servers` (loaded
   // by the gateway at startup; separate from the app-managed list above, which
   // is persisted locally and sent per-session via session/new).
-  const [gatewayMcp, setGatewayMcp] = useState<Record<string, any>>({});
+  const [gatewayMcp, setGatewayMcp] = useState<
+    Record<string, GatewayMcpServerWire>
+  >({});
   const [gatewayMcpLoaded, setGatewayMcpLoaded] = useState(false);
   // Name of a gateway (config.yaml mcp_servers) server being edited — opens
   // the shared McpEditorForm with its config; null = not editing.
@@ -781,26 +786,54 @@ export function ApiSettings({
   // MCP status - read the REAL runtime connection state from the backend via
   // `mcp.servers.status` (session-independent; covers both config.yaml servers
   // and session-injected servers). Replaces the old tools/list tool-name probe.
-  const helixSessionId = useGatewayStore((s) => s.helixSessionId);
+  // （此前这里还订阅 helixSessionId 放在 fetchMcpStatus 依赖里——回调体从未
+  //  读过它，exhaustive-deps 判定为多余依赖后一并移除。）
   const [mcpStatusAttempt, setMcpStatusAttempt] = useState(0);
   const fetchMcpStatus = useCallback(async () => {
     try {
-      const result = (await helixApi()!.send("mcp.servers.status", {})) as any;
-      const servers: any[] = result?.servers || [];
+      const result = (await helixApi()!.send("mcp.servers.status", {})) as
+        | {
+            servers?: Array<{
+              name?: string;
+              state?: string;
+              status?: string;
+              connected?: boolean;
+              toolCount?: number;
+              tools?: unknown;
+              error?: string;
+            }>;
+            timeout?: boolean;
+          }
+        | null;
+      const servers = result?.servers || [];
       const status: Record<string, string> = {};
+      const detail: Record<string, { toolCount?: number; error?: string }> = {};
       for (const s of servers) {
-        if (s?.name)
-          status[s.name] =
-            s.status || (s.connected ? "connected" : "configured");
+        if (!s?.name) continue;
+        status[s.name] =
+          s.state || s.status || (s.connected ? "connected" : "configured");
+        const count =
+          typeof s.toolCount === "number"
+            ? s.toolCount
+            : Array.isArray(s.tools)
+              ? s.tools.length
+              : undefined;
+        if (typeof count === "number" || (s.error && typeof s.error === "string")) {
+          detail[s.name] = {
+            toolCount: count,
+            error: typeof s.error === "string" && s.error ? s.error : undefined,
+          };
+        }
       }
       setMcpStatus(status);
+      setMcpStatusDetail(detail);
       setMcpStatusAttempt(0); // success resets the retry counter
     } catch {
       // Transient failure (WS not ready, RPC timeout): keep last status and
       // schedule a retry instead of wiping to {} (which shows "检测中" forever).
       setMcpStatusAttempt((a) => a + 1);
     }
-  }, [mcpServers, gatewayMcp, helixSessionId]);
+  }, []);
 
   // Run on mount + whenever session id / server list changes.
   useEffect(() => {
@@ -835,12 +868,12 @@ export function ApiSettings({
       return;
     }
     try {
-      const api = (window as any).electron?.mcpConfig;
+      const api = window.electron?.mcpConfig;
       if (!api?.list) {
         setGatewayMcpLoaded(true);
         return;
       }
-      const r = await api.list();
+      const r = await listGatewayMcp(api);
       if (r?.ok && r.servers) setGatewayMcp(r.servers || {});
     } catch {
       // settings page must not break on IPC failure
@@ -903,7 +936,6 @@ export function ApiSettings({
   }, []);
 
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
-  const [apiView, setApiView] = useState<"list" | "edit">("list");
 
   // API 格式下拉：即时持久化（profile + apiConfig + pi models.json）。
   // 旧行为只改内存 localConfig，保存按钮又已移除 → 重开设置从 profile
@@ -942,6 +974,9 @@ export function ApiSettings({
                 id: m.id.trim(),
                 contextWindow: m.contextWindow,
                 ...(m.reasoning ? { reasoning: true } : {}),
+                ...(m.input && m.input.length > 0
+                  ? { input: m.input }
+                  : {}),
               })),
           })
           ?.catch((e) =>
@@ -1015,7 +1050,7 @@ export function ApiSettings({
         const result = (await window.electron.helix.fetchModels({
           baseUrl: localConfig.baseUrl,
           apiKey: localConfig.apiKey,
-        })) as any;
+        })) as { models?: string[]; error?: string };
         if (result.error) throw new Error(result.error);
         models = result.models || [];
       } else {
@@ -1043,82 +1078,7 @@ export function ApiSettings({
     } finally {
       setIsLoadingModels(false);
     }
-  }, [localConfig.apiKey, localConfig.baseUrl, showToast, setAvailableModels]);
-
-  const applyProfile = useCallback(
-    async (id: string) => {
-      const p = apiProfiles.find((x) => x.id === id);
-      if (!p) return;
-      setLocalConfig({ ...p.config });
-      setApiConfig({ ...p.config });
-      // 同步 activeModel 到该 profile 的模型：applyProfile 之前只更新 apiConfig /
-      // activeProviderId / activeProfileId，漏了 activeModel —— 重启时
-      // restoreFromStorage 以 activeModel 为准（builtActiveModel），残留的旧模型
-      // （如 deepseek-v4-flash）会把一切拉回旧端点（"每次重启都是 deepseek"）。
-      if (p.config.model) {
-        useHelixStore.setState({ activeModel: p.config.model });
-      }
-      // Re-anchor activeProviderId to the profile's endpoint. applyProfile used to
-      // leave it at the previously-active provider, so the chat dropdown's open
-      // refetch hit the wrong endpoint and the selector dropped to 1 model.
-      useHelixStore.setState((s) => {
-        const pid = s.providers.find(
-          (pr) => pr.baseUrl === s.apiConfig.baseUrl,
-        )?.id;
-        return pid ? { activeProviderId: pid } : {};
-      });
-      setActiveProfile(id);
-      // Clear stale available models from the previous provider so the dropdown
-      // only shows models fetched from the NEW endpoint.
-      setAvailableModels([]);
-      // Persist the selection so it survives a cold restart (otherwise the active
-      // profile is forgotten and restoreFromStorage reverts to the old apiConfig).
-      try {
-        await persistToStorage();
-      } catch { /* empty */}
-      // Invalidate the cached Helix session so the next prompt rebuilds it with
-      // the newly-selected profile's model/key (prevents stale-session 401s).
-      useGatewayStore.getState().setHelixSessionId(null);
-      if (isElectron()) {
-        try {
-          const cfg = {
-            model: p.config.model,
-            provider:
-              p.config.provider && p.config.provider !== "__custom__"
-                ? p.config.provider
-                : "custom",
-            baseUrl: p.config.baseUrl,
-            apiKey: p.config.apiKey,
-          };
-          // serve 模式：helix:setConfig 是 no-op（main.js 直接 return success），
-          // 必须走 pushModelConfigWithKey —— 内部按模式分流：serve → setModel 写
-          // config.yaml（生效）；acp → setConfig + cacheConfig（行为不变）。
-          // 否则在设置里切换 profile 永远到不了网关，config.yaml 残留旧配置
-          // （如 deepseek+Kimi 错配 → 400 无输出）。这是用户显式切换 profile 的
-          // 动作，key 走一次性通道（cacheConfig 落盘时会剥掉 key）。
-          pushModelConfigWithKey(cfg);
-          // Persist the active profile so the next cold start re-asserts it
-          // into Helix config.yaml (no hardcoded pin, free switching preserved).
-          await window.electron.profile.cacheConfig(cfg);
-        } catch { /* empty */}
-      }
-    },
-    [
-      apiProfiles,
-      setLocalConfig,
-      setApiConfig,
-      setActiveProfile,
-      persistToStorage,
-    ],
-  );
-
-  const handleAddProfile = useCallback(() => {
-    setEditingProfileId(null);
-    setLocalConfig({ provider: "", apiKey: "", baseUrl: "", model: "" });
-    setAvailableModels([]);
-    setShowModelDropdown(false);
-    setApiView("edit");
-  }, []);
+  }, [localConfig.apiKey, localConfig.baseUrl, showToast, setAvailableModels, loadPiModels, piModels.length]);
 
   const handleRemoveProfile = useCallback(
     async (e: React.MouseEvent, id: string) => {
@@ -1128,31 +1088,6 @@ export function ApiSettings({
     },
     [removeApiProfile, persistToStorage],
   );
-
-  const handleEditProfile = useCallback(
-    (id: string) => {
-      const p = apiProfiles.find((x) => x.id === id);
-      if (!p) return;
-      setEditingProfileId(id);
-      setLocalConfig({ ...p.config });
-      setAvailableModels([]);
-      setShowModelDropdown(false);
-      // 编辑既有供应商时把已保存的模型带进卡片，否则列表会显示为空、
-      // 保存一次就把 models 数组清空。
-      seedAddedModels(
-        p.models || [],
-        p.modelContextWindows,
-        p.modelReasonings,
-      );
-      setApiView("edit");
-    },
-    [apiProfiles, seedAddedModels],
-  );
-
-  const handleBackToList = useCallback(() => {
-    setApiView("list");
-    setEditingProfileId(null);
-  }, []);
 
   // Ref to the auto-save function so `confirmAddModel` (defined earlier in the
   // component body) can trigger persistence after adding a model. Assigned
@@ -1179,249 +1114,258 @@ export function ApiSettings({
       showToast({ type: "error", title: "模型上下文限制必须是正整数" });
       return;
     }
+    // 输入类型：文字始终在，图片/视频按勾选附加。
+    const inputList = ["text"];
+    if (pickedInputImage) inputList.push("image");
+    if (pickedInputVideo) inputList.push("video");
     const newModels = [
       ...addedModels.filter((m) => m.id !== id),
-      { id, contextWindow, reasoning: pickedReasoning || undefined },
+      {
+        id,
+        contextWindow,
+        reasoning: pickedReasoning || undefined,
+        input: inputList,
+      },
     ];
     setAddedModels(newModels);
     setPickedModel("");
     setManualModel("");
     setPickedContext("");
     setPickedReasoning(false);
+    setPickedInputImage(false);
+    setPickedInputVideo(false);
     setModelSearch("");
     setShowAddModelDialog(false);
     // 保存按钮已移除：添加模型后立即自动持久化（传入刚更新好的列表，
     // 避免 state 尚未刷新的闭包陈旧）。
     void saveApiRef.current?.(newModels);
-  }, [pickedModel, manualModel, pickedContext, pickedReasoning, addedModels, showToast]);
-
-  // 保存状态（与「保存 Hooks 配置」一致的行内反馈，不依赖 toast）
-  const [apiSaving, setApiSaving] = useState(false);
-  const [apiSaveState, setApiSaveState] = useState<null | "ok" | "err">(null);
-  const [apiSaveErr, setApiSaveErr] = useState<string | null>(null);
+  }, [
+    pickedModel,
+    manualModel,
+    pickedContext,
+    pickedReasoning,
+    pickedInputImage,
+    pickedInputVideo,
+    addedModels,
+    showToast,
+  ]);
 
   const handleSaveApi = useCallback(
     async (modelsList?: typeof addedModels) => {
       // 无参调用用 state 里的 addedModels（供未来保存入口）；传参则用调用方给的
       // 刚更新过的列表（添加模型即自动保存的场景，避免 state 尚未刷新的闭包陈旧）。
       const models = modelsList ?? addedModels;
-      setApiSaving(true);
-      setApiSaveState(null);
-      setApiSaveErr(null);
-      let failed = false;
-      try {
-        if (!localConfig.baseUrl.trim()) {
-          failed = true;
-          setApiSaveErr("请填写 Base URL");
-          setApiSaveState("err");
-          return;
-        }
-        const savedModels = models.map((m) => m.id.trim()).filter(Boolean);
-    if (savedModels.length === 0) {
-      failed = true;
-      setApiSaveErr("请至少添加一个模型");
-      setApiSaveState("err");
-      return;
-    }
-    if (
-      models.some(
-        (m) =>
-          m.contextWindow !== undefined &&
-          (!Number.isFinite(m.contextWindow) ||
-            !Number.isInteger(m.contextWindow) ||
-            m.contextWindow <= 0),
-      )
-    ) {
-      failed = true;
-      setApiSaveErr("模型上下文限制必须是正整数");
-      setApiSaveState("err");
-      return;
-    }
-    // 第一个模型是默认模型（写入 settings.json 的 defaultModel），其余只进
-    // models.json 的模型列表；每个模型的上下文限制落在各自条目上。
-    const firstModel = models.find((m) => m.id.trim())!;
-    // 每个模型各自的 contextWindow 必须随 profile 落盘：models 数组只存 id，
-    // 若不单独存一份映射，重开编辑时 `p.models.map(id => ({id}))` 会把所有
-    // per-model 窗口剥掉，再保存就送 undefined → 后端 256_000 回退把用户
-    // 填过的值重置（"我之前填的上下文窗口被改掉了"根因）。
-    const modelContextWindows: Record<string, number> = {};
-    // 同理：reasoning（开启思考模式）也必须随 profile 落盘，否则冷启动
-    // seedAddedModels 剥成 undefined，重开编辑弹窗开关显示为关
-    // （"我开了思考模式，重启后没了"根因）。
-    const modelReasonings: Record<string, boolean> = {};
-    for (const m of models) {
-      const id = m.id.trim();
-      if (id && m.contextWindow !== undefined && Number.isFinite(m.contextWindow)) {
-        modelContextWindows[id] = m.contextWindow;
-      }
-      if (id && m.reasoning !== undefined) {
-        modelReasonings[id] = m.reasoning;
-      }
-    }
-    const finalConfig: ApiConfig = {
-      ...localConfig,
-      apiFormat: localConfig.apiFormat || DEFAULT_API_FORMAT,
-      model: firstModel.id,
-      contextWindow: firstModel.contextWindow,
-    };
-    // Persist the whole added list (the fetched list stays in-memory: it is
-    // re-fetched whenever the selector opens, so caching it would only hide
-    // newly added models until a manual refresh).
-    const profileModels = savedModels;
-    // Bind to current profile: update the active one, otherwise reuse a matching
-    // profile or create a new named one.
-    const profileName = localConfig.provider.trim().replace(/^custom:/, "") || "配置";
-    if (editingProfileId) {
-      updateApiProfileConfig(
-        editingProfileId,
-        finalConfig,
-        profileModels,
-        modelContextWindows,
-        modelReasonings,
-      );
-      renameApiProfile(editingProfileId, profileName);
-      setActiveProfile(editingProfileId);
-    } else {
-      const dup = apiProfiles.find(
-        (p) =>
-          p.config.baseUrl === finalConfig.baseUrl &&
-          p.config.apiKey === finalConfig.apiKey,
-      );
-      if (dup) {
-        // Same endpoint — reuse that profile and let this card's list be the
-        // provider's authoritative model list (deletions in the card apply).
-        updateApiProfileConfig(
-          dup.id,
-          finalConfig,
-          profileModels,
-          modelContextWindows,
-          modelReasonings,
-        );
-        renameApiProfile(dup.id, profileName);
-        setActiveProfile(dup.id);
-      } else {
-        const id = addApiProfile(
-          profileName,
-          finalConfig,
-          profileModels,
-          modelContextWindows,
-          modelReasonings,
-        );
-        setActiveProfile(id);
-      }
-    }
-    // 让聊天输入框的两级模型选择器立刻看到这个供应商。`providers` 只在启动
-    // 恢复时从 apiProfiles 重建，不同步的话保存完得重启才看得到刚加的模型。
-    // 按 baseUrl 复用已有条目，避免重复保存一次就多一张重复的供应商卡片。
-    {
-      const st = useHelixStore.getState();
-      const existing =
-        st.providers.find(
-          (p) =>
-            p.baseUrl === finalConfig.baseUrl &&
-            (!finalConfig.apiKey || p.apiKey === finalConfig.apiKey),
-        ) || st.providers.find((p) => p.baseUrl === finalConfig.baseUrl);
-      upsertProvider({
-        id: existing?.id,
-        name: finalConfig.provider.trim(),
-        baseUrl: finalConfig.baseUrl,
-        // 留空就沿用该条目已有的 key，别把已保存的密钥覆盖成空串。
-        apiKey: finalConfig.apiKey.trim() || existing?.apiKey || "",
-        models: profileModels,
-        defaultModel: profileModels[0],
-      });
-    }
-    setApiConfig(finalConfig);
-    // Keep activeModel in sync with the saved model. Without this the chat
-    // dropdown highlight (activeModel-first) and the settings backend mirror
-    // (which guards on activeModel || cur.model) would keep pinning the
-    // PREVIOUS model — e.g. after saving deepseek-v4-flash while a different
-    // model was active, the dropdown would never highlight it and the mirror
-    // would revert the backend model back. Use the POST-snap apiConfig.model (setApiConfig
-    // may correct a model/baseUrl mismatch), so activeModel can't drift from it.
-    // Also re-anchor activeProviderId to the endpoint just saved: leaving it at
-    // the PREVIOUS provider makes the chat dropdown's open-refetch hit the wrong
-    // endpoint and scopes providerModels reads to the wrong key — the "fetched 2
-    // models, selector shows only 1" bug.
-    useHelixStore.setState((s) => {
-      const pid = s.providers.find(
-        (p) => p.baseUrl === s.apiConfig.baseUrl,
-      )?.id;
-      return {
-        activeModel: s.apiConfig.model,
-        ...(pid ? { activeProviderId: pid } : {}),
-      };
-    });
-    // Persist the snapped (mismatch-corrected) config into history so a
-    // model/baseUrl split can never be re-saved as a new history entry.
-    const snapped = useHelixStore.getState().apiConfig;
-    addApiHistory(snapped);
-    // Clear any stale per-provider fetched model cache for this endpoint so the
-    // next open of the chat model selector re-fetches live (per user request:
-    // "保存时不存储模型列表"). The live fetch on open repopulates it.
-    {
-      const st = useHelixStore.getState();
-      const pid = st.providers.find(
-        (p) => p.baseUrl === finalConfig.baseUrl,
-      )?.id;
-      if (pid) st.clearProviderModels(pid);
-    }
-    await persistToStorage();
 
-    // Sync to Helix if running in Electron or Tauri
-    const helix = (window as any).electron?.helix;
-    if (isElectron() || helix?.setConfig) {
-      try {
-        const cfg = {
-          model: finalConfig.model,
-          provider:
-            finalConfig.provider && finalConfig.provider !== "__custom__"
-              ? finalConfig.provider
-              : "custom",
-          baseUrl: finalConfig.baseUrl,
-          apiKey: finalConfig.apiKey,
-          contextWindow: finalConfig.contextWindow,
-          api: finalConfig.apiFormat,
-        };
-        // Register the whole model list first (per-model contextWindow + the
-        // API format), then point pi's default at the first model.
-        if (typeof helix?.setProviderModels === "function") {
-          await helix.setProviderModels({
-            provider: cfg.provider,
-            baseUrl: cfg.baseUrl,
-            apiKey: cfg.apiKey,
-            api: cfg.api,
-            models: models
-              .filter((m) => m.id.trim())
-              .map((m) => ({
-                id: m.id.trim(),
-                contextWindow: m.contextWindow,
-                ...(m.reasoning ? { reasoning: true } : {}),
-              })),
-          });
-        }
-        await helix.setConfig(cfg);
-        // Persist the active profile so the next cold start re-asserts it
-        // into Helix config.yaml (no hardcoded pin, free switching preserved).
-        await (window as any).electron?.profile?.cacheConfig?.(cfg);
-        // Invalidate the cached session so the next prompt creates a fresh one
-        // with the updated config. Without this, a stale session ID could be
-        // reused against a restarted gateway, producing 401 errors.
-        useGatewayStore.getState().setHelixSessionId(null);
-      } catch {
-        failed = true;
-        setApiSaveErr("配置已保存，但 Helix 同步失败");
+      if (!localConfig.baseUrl.trim()) return;
+
+      const savedModels = models.map((m) => m.id.trim()).filter(Boolean);
+      if (savedModels.length === 0) return;
+
+      // 模型上下文限制必须是正整数
+      if (
+        models.some(
+          (m) =>
+            m.contextWindow !== undefined &&
+            (!Number.isFinite(m.contextWindow) ||
+              !Number.isInteger(m.contextWindow) ||
+              m.contextWindow <= 0),
+        )
+      ) {
+        return;
       }
-    }
-    if (!failed) {
-      setApiSaveState("ok");
-      setTimeout(() => setApiSaveState(null), 2000);
-    } else {
-      setApiSaveState("err");
-    }
-    } finally {
-      setApiSaving(false);
-    }
+      // 第一个模型是默认模型（写入 settings.json 的 defaultModel），其余只进
+      // models.json 的模型列表；每个模型的上下文限制落在各自条目上。
+      const firstModel = models.find((m) => m.id.trim())!;
+      // 每个模型各自的 contextWindow 必须随 profile 落盘：models 数组只存 id，
+      // 若不单独存一份映射，重开编辑时 `p.models.map(id => ({id}))` 会把所有
+      // per-model 窗口剥掉，再保存就送 undefined → 后端 256_000 回退把用户
+      // 填过的值重置（"我之前填的上下文窗口被改掉了"根因）。
+      const modelContextWindows: Record<string, number> = {};
+      // 同理：reasoning（开启思考模式）也必须随 profile 落盘，否则冷启动
+      // seedAddedModels 剥成 undefined，重开编辑弹窗开关显示为关
+      // （"我开了思考模式，重启后没了"根因）。
+      const modelReasonings: Record<string, boolean> = {};
+      // 同 contextWindow / reasoning：input 也必须随 profile 落盘，否则冷启动
+      // seedAddedModels 剥成 undefined，多模态模型又变回「图片走转述管道」。
+      const modelInputs: Record<string, string[]> = {};
+      for (const m of models) {
+        const id = m.id.trim();
+        if (id && m.contextWindow !== undefined && Number.isFinite(m.contextWindow)) {
+          modelContextWindows[id] = m.contextWindow;
+        }
+        if (id && m.reasoning !== undefined) {
+          modelReasonings[id] = m.reasoning;
+        }
+        if (id && Array.isArray(m.input)) {
+          modelInputs[id] = m.input;
+        }
+      }
+      const finalConfig: ApiConfig = {
+        ...localConfig,
+        apiFormat: localConfig.apiFormat || DEFAULT_API_FORMAT,
+        model: firstModel.id,
+        contextWindow: firstModel.contextWindow,
+      };
+      // Persist the whole added list (the fetched list stays in-memory: it is
+      // re-fetched whenever the selector opens, so caching it would only hide
+      // newly added models until a manual refresh).
+      const profileModels = savedModels;
+      // Bind to current profile: update the active one, otherwise reuse a matching
+      // profile or create a new named one.
+      const profileName = localConfig.provider.trim().replace(/^custom:/, "") || "配置";
+      if (editingProfileId) {
+        updateApiProfileConfig(
+          editingProfileId,
+          finalConfig,
+          profileModels,
+          modelContextWindows,
+          modelReasonings,
+          modelInputs,
+        );
+        renameApiProfile(editingProfileId, profileName);
+        setActiveProfile(editingProfileId);
+      } else {
+        const dup = apiProfiles.find(
+          (p) =>
+            p.config.baseUrl === finalConfig.baseUrl &&
+            p.config.apiKey === finalConfig.apiKey,
+        );
+        if (dup) {
+          // Same endpoint — reuse that profile and let this card's list be the
+          // provider's authoritative model list (deletions in the card apply).
+          updateApiProfileConfig(
+            dup.id,
+            finalConfig,
+            profileModels,
+            modelContextWindows,
+            modelReasonings,
+            modelInputs,
+          );
+          renameApiProfile(dup.id, profileName);
+          setActiveProfile(dup.id);
+        } else {
+          const id = addApiProfile(
+            profileName,
+            finalConfig,
+            profileModels,
+            modelContextWindows,
+            modelReasonings,
+            modelInputs,
+          );
+          setActiveProfile(id);
+        }
+      }
+      // 让聊天输入框的两级模型选择器立刻看到这个供应商。`providers` 只在启动
+      // 恢复时从 apiProfiles 重建，不同步的话保存完得重启才看得到刚加的模型。
+      // 按 baseUrl 复用已有条目，避免重复保存一次就多一张重复的供应商卡片。
+      {
+        const st = useHelixStore.getState();
+        const existing =
+          st.providers.find(
+            (p) =>
+              p.baseUrl === finalConfig.baseUrl &&
+              (!finalConfig.apiKey || p.apiKey === finalConfig.apiKey),
+          ) || st.providers.find((p) => p.baseUrl === finalConfig.baseUrl);
+        upsertProvider({
+          id: existing?.id,
+          name: finalConfig.provider.trim(),
+          baseUrl: finalConfig.baseUrl,
+          // 留空就沿用该条目已有的 key，别把已保存的密钥覆盖成空串。
+          apiKey: finalConfig.apiKey.trim() || existing?.apiKey || "",
+          models: profileModels,
+          defaultModel: profileModels[0],
+        });
+      }
+      setApiConfig(finalConfig);
+      // Keep activeModel in sync with the saved model. Without this the chat
+      // dropdown highlight (activeModel-first) and the settings backend mirror
+      // (which guards on activeModel || cur.model) would keep pinning the
+      // PREVIOUS model — e.g. after saving deepseek-v4-flash while a different
+      // model was active, the dropdown would never highlight it and the mirror
+      // would revert the backend model back. Use the POST-snap apiConfig.model (setApiConfig
+      // may correct a model/baseUrl mismatch), so activeModel can't drift from it.
+      // Also re-anchor activeProviderId to the endpoint just saved: leaving it at
+      // the PREVIOUS provider makes the chat dropdown's open-refetch hit the wrong
+      // endpoint and scopes providerModels reads to the wrong key — the "fetched 2
+      // models, selector shows only 1" bug.
+      useHelixStore.setState((s) => {
+        const pid = s.providers.find(
+          (p) => p.baseUrl === s.apiConfig.baseUrl,
+        )?.id;
+        return {
+          activeModel: s.apiConfig.model,
+          ...(pid ? { activeProviderId: pid } : {}),
+        };
+      });
+      // Persist the snapped (mismatch-corrected) config into history so a
+      // model/baseUrl split can never be re-saved as a new history entry.
+      const snapped = useHelixStore.getState().apiConfig;
+      addApiHistory(snapped);
+      // Clear any stale per-provider fetched model cache for this endpoint so the
+      // next open of the chat model selector re-fetches live (per user request:
+      // "保存时不存储模型列表"). The live fetch on open repopulates it.
+      {
+        const st = useHelixStore.getState();
+        const pid = st.providers.find(
+          (p) => p.baseUrl === finalConfig.baseUrl,
+        )?.id;
+        if (pid) st.clearProviderModels(pid);
+      }
+      await persistToStorage();
+
+      // Sync to Helix if running in Electron or Tauri
+      const helix = window.electron?.helix;
+      if (isElectron() || helix?.setConfig) {
+        try {
+          const cfg = {
+            model: finalConfig.model,
+            provider:
+              finalConfig.provider && finalConfig.provider !== "__custom__"
+                ? finalConfig.provider
+                : "custom",
+            baseUrl: finalConfig.baseUrl,
+            apiKey: finalConfig.apiKey,
+            contextWindow: finalConfig.contextWindow,
+            api: finalConfig.apiFormat,
+          };
+          // 先把整个模型列表下发（每个模型自己的 contextWindow + API 格式），
+          // 再由下面的 setConfig 把 pi 的默认指向当前选中项。register 不动全局
+          // 默认、也不 respawn，所以顺序必须是 register → setConfig（后者写默认 +
+          // respawn）—— 反过来的话 respawn 会把刚注册的列表冲掉。
+          //
+          // 这里曾经写的是 helix.setProviderModels —— bridge 从没定义过那个方法
+          // （只有 registerProviderModels），于是这个守卫永远为假，模型列表事实上
+          // 从未下发到 pi 的 models.json。类型收紧成 ElectronAPI 后 tsc 才报出来。
+          if (typeof helix?.registerProviderModels === "function") {
+            await helix.registerProviderModels({
+              provider: cfg.provider,
+              baseUrl: cfg.baseUrl,
+              apiKey: cfg.apiKey,
+              api: cfg.api,
+              models: models
+                .filter((m) => m.id.trim())
+                .map((m) => ({
+                  id: m.id.trim(),
+                  contextWindow: m.contextWindow,
+                  ...(m.reasoning ? { reasoning: true } : {}),
+                  ...(m.input && m.input.length > 0
+                    ? { input: m.input }
+                    : {}),
+                })),
+            });
+          }
+          await helix.setConfig(cfg);
+          // Persist the active profile so the next cold start re-asserts it
+          // into Helix config.yaml (no hardcoded pin, free switching preserved).
+          await window.electron?.profile?.cacheConfig?.(cfg);
+          // Invalidate the cached session so the next prompt creates a fresh one
+          // with the updated config. Without this, a stale session ID could be
+          // reused against a restarted gateway, producing 401 errors.
+          useGatewayStore.getState().setHelixSessionId(null);
+        } catch {
+          // 配置已落本地，只是同步回 Helix 失败 —— 不阻断保存
+        }
+      }
   }, [
     localConfig,
     addedModels,
@@ -1430,18 +1374,16 @@ export function ApiSettings({
     setApiConfig,
     addApiProfile,
     updateApiProfileConfig,
+    renameApiProfile,
     setActiveProfile,
     addApiHistory,
     upsertProvider,
     persistToStorage,
-    showToast,
   ]);
 
   // Keep the ref current so `confirmAddModel`'s auto-save always calls the
   // latest `handleSaveApi` (avoids stale-closure issues across re-renders).
   saveApiRef.current = handleSaveApi;
-
-  const hasApiConfig = !!apiConfig.apiKey;
 
   // ── MCP handlers ─────────────────────────────────────────────────────────
   const mcpArgText = useCallback((v: unknown) => {
@@ -1455,7 +1397,17 @@ export function ApiSettings({
   }, []);
 
   const resetMcpForm = useCallback(() => {
-    setMcpForm({ name: "", type: "local", command: "", url: "", args: "" });
+    setMcpForm({
+      name: "",
+      type: "local",
+      command: "",
+      url: "",
+      args: "",
+      description: "",
+      exposure: "codemode",
+      toolExposureText: "",
+      timeoutText: "",
+    });
   }, []);
 
   const handleSaveMcp = useCallback(async () => {
@@ -1475,7 +1427,7 @@ export function ApiSettings({
       setMcpSaveErr("请填写 URL");
       return;
     }
-    const api = (window as any).electron?.mcpConfig;
+    const api = window.electron?.mcpConfig;
     if (!api?.save) {
       setMcpSaveState("err");
       setMcpSaveErr("当前环境不支持写入 mcp.json");
@@ -1491,7 +1443,7 @@ export function ApiSettings({
     const nextCwd =
       mcpServers[editingMcpName || name]?.cwd || resolveDefaultMcpCwd();
     const old = mcpServers[editingMcpName || name] || {};
-    const gatewayEntry: Record<string, any> = {
+    const gatewayEntry: GatewayMcpServerWire = {
       enabled: old.enabled ?? true,
       ...(mcpForm.type === "remote"
         ? { url: mcpForm.url.trim() }
@@ -1508,14 +1460,15 @@ export function ApiSettings({
         ? { headers: old.headers }
         : {}),
       ...(typeof old.timeout === "number" ? { timeout: old.timeout } : {}),
+      ...advancedToWire(mcpForm),
     };
-    const servers: Record<string, any> = { ...gatewayMcp };
+    const servers: Record<string, GatewayMcpServerWire> = { ...gatewayMcp };
     if (editingMcpName && editingMcpName !== name)
       delete servers[editingMcpName];
     servers[name] = gatewayEntry;
 
     try {
-      const r = await api.save(servers);
+      const r = await saveGatewayMcp(api, servers);
       if (!r?.ok) {
         setMcpSaveState("err");
         setMcpSaveErr(`保存失败：${r?.error || "未知错误"}`);
@@ -1563,6 +1516,7 @@ export function ApiSettings({
         command: cmdParts[0] || "",
         url: config.url || "",
         args: cmdParts.slice(1).map(mcpArgText).filter(Boolean).join(" "),
+        ...advancedFromWire(config),
       });
     },
     [mcpServers, setEditingMcpName, mcpArgText],
@@ -1606,6 +1560,7 @@ export function ApiSettings({
           .map(mcpArgText)
           .filter(Boolean)
           .join(" "),
+        ...advancedFromWire(cfg),
       });
     },
     [gatewayMcp, mcpArgText],
@@ -1628,7 +1583,7 @@ export function ApiSettings({
       setMcpSaveErr("请填写 URL");
       return;
     }
-    const api = (window as any).electron?.mcpConfig;
+    const api = window.electron?.mcpConfig;
     if (!api?.save) {
       setMcpSaveState("err");
       setMcpSaveErr("当前环境不支持保存");
@@ -1649,7 +1604,7 @@ export function ApiSettings({
     // cleared. env is NOT sent when untouched — the Rust side then carries
     // the old env block over, so secrets never get clobbered by a display
     // round trip (config.yaml env values are hidden from the renderer).
-    const merged: Record<string, any> = { ...oldCfg };
+    const merged: GatewayMcpServerWire = { ...oldCfg };
     if (mcpForm.type === "remote") {
       merged.url = mcpForm.url.trim();
       delete merged.command;
@@ -1663,12 +1618,21 @@ export function ApiSettings({
     if (nextCwd) merged.cwd = nextCwd;
     else delete merged.cwd;
 
-    const servers: Record<string, any> = { ...gatewayMcp };
+    // 描述 / 暴露方式 / 按工具覆盖 / 超时：表格里空值要 delete 旧值，
+    // 否则清空描述后旧描述还会被写回去（merged 的基底是上一份配置）。
+    for (const [k, v] of Object.entries(advancedToWire(mcpForm))) {
+      merged[k] = v;
+    }
+    if (!mcpForm.description.trim()) delete merged.description;
+    if (!mcpForm.toolExposureText.trim()) delete merged.toolExposure;
+    if (!mcpForm.timeoutText.trim()) delete merged.timeout;
+
+    const servers: Record<string, GatewayMcpServerWire> = { ...gatewayMcp };
     if (oldName && oldName !== name) delete servers[oldName];
     servers[name] = merged;
 
     try {
-      const r = await api.save(servers);
+      const r = await saveGatewayMcp(api, servers);
       if (!r?.ok) {
         setMcpSaveState("err");
         setMcpSaveErr(`保存失败：${r?.error || "未知错误"}`);
@@ -1694,15 +1658,15 @@ export function ApiSettings({
 
   const handleDeleteGatewayMcp = useCallback(
     async (name: string) => {
-      const api = (window as any).electron?.mcpConfig;
+      const api = window.electron?.mcpConfig;
       if (!api?.save) {
         showToast({ type: "error", title: "当前环境不支持保存" });
         return;
       }
-      const servers: Record<string, any> = { ...gatewayMcp };
+      const servers: Record<string, GatewayMcpServerWire> = { ...gatewayMcp };
       delete servers[name];
       try {
-        const r = await api.save(servers);
+        const r = await saveGatewayMcp(api, servers);
         if (!r?.ok) {
           showToast({
             type: "error",
@@ -1730,6 +1694,7 @@ export function ApiSettings({
   const handleDeleteArchive = useCallback(
     async (id: string) => {
       await persistence.deleteSession(id);
+      useHelixStore.getState().clearSessionSidebarState(id);
       showToast({ type: "success", title: "已删除" });
       await loadArchives();
     },
@@ -1739,8 +1704,10 @@ export function ApiSettings({
   const handleDeleteAllArchives = useCallback(async () => {
     setArchiveDeletingAll(true);
     try {
+      const store = useHelixStore.getState();
       for (const a of archives) {
         await persistence.deleteSession(a.id);
+        store.clearSessionSidebarState(a.id);
       }
       showToast({
         type: "success",
@@ -1801,29 +1768,6 @@ export function ApiSettings({
     [showToast, persistToStorage, loadArchives],
   );
 
-  // ── Shared components ─────────────────────────────────────────────────────
-  const SettingRow = ({
-    icon,
-    label,
-    children,
-  }: {
-    icon: React.ReactNode;
-    label: string;
-    children: React.ReactNode;
-  }) => (
-    <div className="flex items-center justify-between px-4 py-3 border-b border-border/40 last:border-b-0 gap-3 transition-colors duration-150">
-      <div className="flex items-center gap-3 flex-1 min-w-0">
-        <span className="text-muted-foreground shrink-0">{icon}</span>
-        <div className="min-w-0">
-          <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
-            {label}
-          </p>
-        </div>
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
-  );
-
   const InputField = React.forwardRef<
     HTMLInputElement,
     {
@@ -1865,198 +1809,6 @@ export function ApiSettings({
     ),
   );
   InputField.displayName = "InputField";
-
-  // ── Render content ────────────────────────────────────────────────────────
-  const ModelHistoryList = () => {
-    if (apiHistory.length === 0) {
-      return null;
-    }
-
-    // Group by baseUrl (preserve first-appearance order). Within a group the
-    // entries share the same endpoint but may carry different apiKeys — the
-    // addApiHistory dedup already collapses same baseUrl+apiKey, so each item
-    // here is a distinct (baseUrl, apiKey) pair. Grouping keeps one endpoint's
-    // many keys visually together instead of scattered across the flat list.
-    type HistoryItem = { h: (typeof apiHistory)[number]; index: number };
-    const groups: { baseUrl: string; items: HistoryItem[] }[] = [];
-    const groupPos = new Map<string, number>();
-    apiHistory.forEach((h, index) => {
-      const url = h.baseUrl || "(无 baseUrl)";
-      let pos = groupPos.get(url);
-      if (pos === undefined) {
-        pos = groups.length;
-        groupPos.set(url, pos);
-        groups.push({ baseUrl: url, items: [] });
-      }
-      groups[pos].items.push({ h, index });
-    });
-
-    // Whether the CURRENT connection (baseUrl + apiKey) exists in history at
-    // all. Computed ONCE per render, not per entry (renderItem). The list
-    // groups entries by baseUrl only, so one endpoint can hold entries saved
-    // under different apiKeys. When the current connection IS present, highlight
-    // only the exact key; when it's NOT (legacy keys only), fall back to
-    // baseUrl+model so the highlight never orphans the whole group.
-    const activeCfg = useHelixStore.getState().apiConfig;
-    const connPresent =
-      !!activeCfg?.baseUrl &&
-      !!activeCfg?.apiKey &&
-      apiHistory.some(
-        (x) => x.baseUrl === activeCfg.baseUrl && x.apiKey === activeCfg.apiKey,
-      );
-
-    const renderItem = ({ h, index }: HistoryItem) => {
-      // Use the same unified criterion as the chat input's model selector
-      // (activeModel || apiConfig.model) so both pages always agree on which
-      // model is "current". Without this, selecting a model in chat would leave
-      // the settings list highlighting a stale entry (or nothing at all).
-      const store = useHelixStore.getState();
-      const displayModel = store.activeModel || apiConfig.model;
-      const isActive =
-        !!activeCfg?.baseUrl &&
-        activeCfg.baseUrl === h.baseUrl &&
-        displayModel === h.model &&
-        (connPresent ? !!h.apiKey && h.apiKey === activeCfg.apiKey : true);
-      return (
-        <div
-          key={index}
-          onClick={async () => {
-            // Write the history entry through setApiConfig first: it guards
-            // against model/baseUrl mismatches (poisoned history) and snaps
-            // the model to the endpoint it actually belongs to.
-            setApiConfig({ ...h });
-            // Then anchor activeModel/activeProviderId directly to this history
-            // entry's endpoint. Don't use setActiveModel here: its model-name-based
-            // resolution can pick the wrong provider when a model name also exists
-            // in another provider's fetched list (e.g. cross-endpoint pollution),
-            // causing an explicit deepseek click to snap back to a different provider.
-            const state = useHelixStore.getState();
-            let match = state.providers.find((p) => p.baseUrl === h.baseUrl);
-            if (!match) {
-              // This endpoint lives only in history (no saved Profile). Upsert a
-              // runtime provider so the input-bar model list can resolve to it and
-              // the active model stays pinned instead of snapping to the default
-              // provider (a runtime-synthesized entry) after a refresh.
-              const exists = state.providers.some(
-                (p) => p.baseUrl === h.baseUrl,
-              );
-              useHelixStore.setState((s) => ({
-                providers: exists
-                  ? s.providers.map((p) =>
-                      p.baseUrl === h.baseUrl
-                        ? {
-                            ...p,
-                            models: Array.from(
-                              new Set([...(p.models || []), h.model]),
-                            ),
-                          }
-                        : p,
-                    )
-                  : [
-                      ...s.providers,
-                      {
-                        id: `hist-${h.baseUrl}`,
-                        name:
-                          h.provider ||
-                          (() => {
-                            try {
-                              return new URL(h.baseUrl).hostname;
-                            } catch {
-                              return "配置";
-                            }
-                          })(),
-                        baseUrl: h.baseUrl,
-                        apiKey: h.apiKey || "",
-                        models: [h.model],
-                        isDefault: false,
-                      } as any,
-                    ],
-              }));
-              match = useHelixStore
-                .getState()
-                .providers.find((p) => p.baseUrl === h.baseUrl) as any;
-            }
-            useHelixStore.setState({
-              activeModel: h.model,
-              activeProviderId: match?.id || null,
-              apiConfig: {
-                ...state.apiConfig,
-                ...h,
-                provider: match?.name || h.provider || "custom",
-                model: h.model,
-              },
-            });
-            const final = useHelixStore.getState().apiConfig;
-            setLocalConfig({ ...final });
-            await persistToStorage();
-            const helix = (window as any).electron?.helix;
-            if (isElectron() || helix?.setConfig) {
-              try {
-                const cfg = {
-                  model: final.model,
-                  provider:
-                    final.provider && final.provider !== "__custom__"
-                      ? final.provider
-                      : "custom",
-                  baseUrl: final.baseUrl,
-                  apiKey: final.apiKey,
-                };
-                await helix.setConfig(cfg);
-                await (window as any).electron?.profile?.cacheConfig?.(cfg);
-                useGatewayStore.getState().setHelixSessionId(null);
-              } catch { /* empty */}
-            }
-            showToast({ type: "success", title: `已切换到 ${final.model}` });
-          }}
-          className={`flex items-center justify-between px-3 py-1.5 rounded-xl bg-card shadow-sm cursor-pointer transition-colors group ${isActive ? "ring-1 ring-primary/30 bg-primary/5" : "hover:bg-muted/40"}`}
-        >
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              {isActive && (
-                <span className="size-1.5 rounded-full bg-primary shrink-0" />
-              )}
-              <p
-                className={`text-[length:var(--helix-transcript-size)] truncate ${isActive ? "font-semibold text-primary" : "font-medium text-foreground"}`}
-              >
-                {h.model}
-              </p>
-            </div>
-            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 truncate mt-0.5 font-mono">
-              {h.baseUrl}
-            </p>
-          </div>
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setLocalConfig({ ...h });
-                setShowAddModelModal(true);
-              }}
-              className="ml-2 p-1 rounded text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/20 hover:text-foreground hover:bg-accent transition-all"
-            >
-              编辑
-            </button>
-            <button
-              onClick={async (e) => {
-                e.stopPropagation();
-                removeApiHistory(index);
-                await persistToStorage();
-              }}
-              className="ml-1 p-1 rounded text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/20 hover:text-red-500 transition-all"
-            >
-              删除
-            </button>
-          </div>
-        </div>
-      );
-    };
-
-    return (
-      <div className="space-y-1.5">
-        {groups.flatMap((g) => g.items).map(renderItem)}
-      </div>
-    );
-  };
 
   const renderContent = () => {
     switch (page) {
@@ -2131,6 +1883,7 @@ export function ApiSettings({
                             p.models || [],
                             p.modelContextWindows,
                             p.modelReasonings,
+                            p.modelInputs,
                           );
                           setAvailableModels([]);
                           setShowModelDropdown(false);
@@ -2351,7 +2104,7 @@ export function ApiSettings({
                           </p>
                         ) : (
                           <div className="max-h-[80px] overflow-y-auto space-y-1.5 pr-1">
-                            {addedModels.map((m, idx) => (
+                            {addedModels.map((m) => (
                               <div
                                 key={m.id}
                                 className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border/40 bg-muted/30 group/model-row"
@@ -2374,7 +2127,7 @@ export function ApiSettings({
                                           window.electron.helix.fetchModels({
                                             baseUrl: localConfig.baseUrl,
                                             apiKey: localConfig.apiKey,
-                                          }).then((r: any) => {
+                                          }).then((r: { models?: string[]; error?: string }) => {
                                             if (r?.error) reject(new Error(r.error));
                                             else resolve(r?.models || []);
                                           }).catch(reject);
@@ -2387,11 +2140,11 @@ export function ApiSettings({
                                       } else {
                                         showToast({ type: "warning", title: `未找到「${m.id}」，请检查模型名称` });
                                       }
-                                    } catch (e: any) {
+                                    } catch (e) {
                                       showToast({
                                         type: "error",
                                         title: `「${m.id}」连接失败`,
-                                        description: String(e?.message || e),
+                                        description: String((e as { message?: string })?.message || e),
                                       });
                                     }
                                   }}
@@ -2445,6 +2198,14 @@ export function ApiSettings({
                                     );
                                     setPickedReasoning(
                                       !!(m.reasoning ?? pm?.reasoning),
+                                    );
+                                    const inputList =
+                                      m.input ?? pm?.input ?? [];
+                                    setPickedInputImage(
+                                      inputList.includes("image"),
+                                    );
+                                    setPickedInputVideo(
+                                      inputList.includes("video"),
                                     );
                                     setModelSearch("");
                                     setShowAddModelDialog(true);
@@ -2664,6 +2425,52 @@ export function ApiSettings({
                               />
                             </div>
 
+                            <div className="rounded-lg border border-border/40 bg-muted/20 px-3 py-2">
+                              <div className="mb-1.5 ui-text font-medium text-foreground">
+                                输入类型
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                <span
+                                  className="px-2.5 py-1.5 rounded-lg text-[length:var(--helix-transcript-size)*0.9] font-mono border border-primary/50 bg-primary/10 text-primary"
+                                  data-tip="始终开启"
+                                >
+                                  文字
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setPickedInputImage((v) => !v)
+                                  }
+                                  className={`px-2.5 py-1.5 rounded-lg text-[length:var(--helix-transcript-size)*0.9] font-mono border transition-colors ${
+                                    pickedInputImage
+                                      ? "border-primary/50 bg-primary/10 text-primary"
+                                      : "border-border/40 text-muted-foreground/60 hover:bg-accent/40"
+                                  }`}
+                                  data-tip="开启后粘贴的图片直接发给模型，不再先走视觉转述"
+                                >
+                                  图片
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setPickedInputVideo((v) => !v)
+                                  }
+                                  className={`px-2.5 py-1.5 rounded-lg text-[length:var(--helix-transcript-size)*0.9] font-mono border transition-colors ${
+                                    pickedInputVideo
+                                      ? "border-primary/50 bg-primary/10 text-primary"
+                                      : "border-border/40 text-muted-foreground/60 hover:bg-accent/40"
+                                  }`}
+                                  data-tip="会写入 models.json，但 pi 目前只识别 image，视频不会生效"
+                                >
+                                  视频
+                                </button>
+                              </div>
+                              <p className="mt-1.5 text-[length:var(--helix-transcript-size)*0.85] text-muted-foreground/60">
+                                pi 只认「图片」：勾了才把图片原生透传给模型，
+                                不勾则先转成文字描述。
+                              </p>
+                            </div>
+
                             <div className="flex justify-end gap-2 pt-1">
                               <Button
                                 size="sm"
@@ -2763,6 +2570,7 @@ export function ApiSettings({
                           >
                             <div className="relative shrink-0">
                               <div
+                                title={mcpStatusDetail[name]?.error || undefined}
                                 className={`w-2.5 h-2.5 rounded-full ${cfg?.enabled === false ? "bg-gray-300" : st === "connected" ? "bg-green-500" : st === "failed" ? "bg-red-400" : "bg-amber-400"}`}
                               />
                             </div>
@@ -2778,7 +2586,7 @@ export function ApiSettings({
                                 </span>
                               </div>
                               <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 font-mono truncate mt-0.5">
-                                {cfg?.url || cmd || "(环境变量式配置)"}
+                                {mcpToolCountLabel(mcpStatusDetail[name]?.toolCount)}{cfg?.url || cmd || "(环境变量式配置)"}
                               </p>
                             </div>
                             <button
@@ -2815,6 +2623,7 @@ export function ApiSettings({
                       >
                         <div className="relative shrink-0">
                           <div
+                            title={mcpStatusDetail[name]?.error || undefined}
                             className={`w-2.5 h-2.5 rounded-full ${config.enabled === false ? "bg-gray-300" : st === "connected" ? "bg-green-500" : st === "failed" ? "bg-red-400" : "bg-amber-400"}`}
                           />
                           {config.enabled !== false && st === "connected" && (
@@ -2833,7 +2642,7 @@ export function ApiSettings({
                             </span>
                           </div>
                           <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 font-mono truncate mt-0.5">
-                            {config.type === "local"
+                            {mcpToolCountLabel(mcpStatusDetail[name]?.toolCount)}{config.type === "local"
                               ? config.command?.join(" ")
                               : config.url}
                           </p>
@@ -3117,9 +2926,6 @@ export function ApiSettings({
 
       case "browser":
         return <BrowserSettingsPanel />;
-
-      case "codemode":
-        return <CodemodeSettingsPanel />;
 
       default:
         // 导航历史持久化里可能残留已删除页面的 id（如曾短暂存在的

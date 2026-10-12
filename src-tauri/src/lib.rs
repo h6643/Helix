@@ -20,6 +20,7 @@ mod mcp;
 mod memory;
 mod page_fetch;
 mod paths;
+mod pi_advanced;
 mod pi_catalog;
 mod pi_connect;
 mod pi_extensions;
@@ -326,6 +327,7 @@ pub fn run() {
             skills::helix_read_file,
             skills::helix_delete_dir,
             skills::helix_list_skills,
+            skills::helix_set_skill_model_invocation,
             skills::helix_list_subagents,
             skills::helix_set_subagent_enabled,
             skills::helix_set_subagent_model,
@@ -465,6 +467,12 @@ pub fn run() {
             helix::pi_read_custom_providers,
             helix::pi_set_thinking_level_all,
             helix::pi_set_auto_compaction_all,
+            // 高级 pi 设置（retry/compaction/thinking/model cycling/cache/queue）
+            // + 项目信任 spawn 档位
+            pi_advanced::helix_pi_advanced_get,
+            pi_advanced::helix_pi_advanced_set,
+            pi_advanced::helix_project_trust_get,
+            pi_advanced::helix_project_trust_set,
             // 渠道中心：一次性 pi RPC 进程执行 pi-connect 的 /connect 命令
             pi_connect::pi_connect_query,
             helix::pi_search_packages,

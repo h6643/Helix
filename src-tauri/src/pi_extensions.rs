@@ -115,6 +115,7 @@ fn is_rival_entry(entry: &str) -> bool {
 
 /// `packages` 收敛成唯一登记：绝对写法的自身条目归一成规范写法，npm 版等竞争条目清掉。
 fn register_in_settings() -> bool {
+    let _guard = crate::config::config_write_lock();
     let mut settings = read_pi_settings();
     let obj = match settings.as_object_mut() {
         Some(o) => o,
@@ -240,6 +241,7 @@ pub fn remove_legacy_browser_extension() {
 
 /// 从 settings.json 的 `packages` 里剔除指向旧版浏览器扩展的条目。
 fn unregister_legacy_browser_from_settings() -> bool {
+    let _guard = crate::config::config_write_lock();
     let mut settings = read_pi_settings();
     let obj = match settings.as_object_mut() {
         Some(o) => o,

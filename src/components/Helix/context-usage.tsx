@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { captureContextBreakdown } from "@/lib/context-capture";
 import { helixApi } from "@/lib/electron-bridge";
 import { formatTokens, promptCacheHit } from "@/lib/format";
@@ -148,7 +149,8 @@ function ContextUsagePanel({
   categories,
   toolsets,
   cache,
-  onClose,
+  style,
+  contentRef,
 }: {
   used: number;
   total: number;
@@ -159,7 +161,8 @@ function ContextUsagePanel({
     schema_tokens: number;
   }>;
   cache?: { input: number; cacheRead: number; cacheWrite: number };
-  onClose: () => void;
+  style?: React.CSSProperties;
+  contentRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   const [showToolsets, setShowToolsets] = useState(false);
   const cacheHit = promptCacheHit(cache);
@@ -173,8 +176,15 @@ function ContextUsagePanel({
     normalizedCategories.length > 0 &&
     normalizedCategories.every(isAggregateCategory);
 
-  return (
-    <div className="absolute bottom-full right-0 mb-2 w-72 bg-card border border-border/40 rounded-xl shadow-lg p-3 z-50">
+  // Portal 到 body：卡片的 overflow-x: clip（globals.css .helix-chat-input-card）
+  // 会把这个 288px 宽的浮层按卡片左缘切掉——左侧「~16.3K」整段被削平。fixed
+  // 定位由触发按钮的 rect 计算（与 reasoning 选择器同款），完全脱离卡片裁剪链。
+  return createPortal(
+    <div
+      ref={contentRef}
+      style={style}
+      className="w-72 bg-card border border-border/40 rounded-xl shadow-lg p-3 z-50"
+    >
       <ContextUsageBar
         used={used}
         total={total}
@@ -257,44 +267,69 @@ function ContextUsagePanel({
           )}
         </div>
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
 // ---- Main indicator (button + popover combo) ----
 
-export function ContextUsageIndicator() {
+export function ContextUsageIndicator({ sessionId }: { sessionId?: string | null }) {
   const [open, setOpen] = useState(false);
   const [backendData, setBackendData] = useState<ContextUsageData | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({});
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        setOpen(false);
+      const t = e.target as Node;
+      // 浮层已 portal 到 body，不在 panelRef 的 DOM 子树里，必须单独判一次，
+      // 否则点浮层内部（展开工具集明细等）会被当成"点外面"直接关掉。
+      if (panelRef.current?.contains(t) || contentRef.current?.contains(t)) {
+        return;
       }
+      setOpen(false);
     }
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  const toggle = () => {
+    if (!open && triggerRef.current) {
+      const r = triggerRef.current.getBoundingClientRect();
+      const panelWidth = 288; // w-72
+      // 右缘对齐按钮右缘（等价旧的 right-0），再夹回视口内防左侧削边。
+      let left = r.right - panelWidth;
+      left = Math.max(8, Math.min(left, window.innerWidth - panelWidth - 8));
+      setPanelStyle({
+        position: "fixed",
+        left,
+        bottom: window.innerHeight - r.top + 8, // mb-2
+        zIndex: 50,
+      });
+    }
+    setOpen((v) => !v);
+  };
+
   // ── Context breakdown fetch ─────────────────────────────────────────
   // Fetch context breakdown from backend via RPC
   const fetchContextData = useCallback(async () => {
     try {
-      const currentSessionId = useHelixStore.getState().currentSessionId;
+      const currentSessionId = sessionId ?? useHelixStore.getState().currentSessionId;
       // Only the backend sid mapped to THIS conversation — never fall back to
       // the global helixSessionId: that is whichever conversation ran LAST,
       // and querying it would write the GLOBAL session's usage/categories into
       // this conversation's snapshot (contextUsage), making the ring track
       // another conversation. Unmapped → render the persisted local snapshot.
-      const sessionId = await resolveBackendSid(currentSessionId);
-      if (!sessionId) {
+      const resolvedSid = await resolveBackendSid(currentSessionId);
+      if (!resolvedSid) {
         setBackendData(null);
         return;
       }
       const result = await helixApi()?.send("session.context_breakdown", {
-        session_id: sessionId,
+        session_id: resolvedSid,
       });
       if (result && typeof result === "object") {
         const data = result as ContextUsageData;
@@ -315,7 +350,7 @@ export function ContextUsageIndicator() {
     } catch {
       // Backend may not support this — degrade gracefully
     }
-  }, []);
+  }, [sessionId]);
 
   // 打开弹层时查询，并在打开期间每 5s 刷新一次：后端 agent 可能刚构建完成，
   // 分类数据不会在会话创建瞬间就绪，只查一次容易永久停留在"暂无上下文分类数据"。
@@ -391,13 +426,14 @@ export function ContextUsageIndicator() {
   // (No client-side estimation - real saved values.)
   // 快照键可能是 cid（常规）或 sid（历史遗留 / draft 期写入）——两键都查。
   const localCtx = useHelixStore((s) => {
-    const cid = s.currentSessionId;
+    const cid = sessionId ?? s.currentSessionId;
     if (!cid) return backendSid ? s.contextUsage[backendSid] : undefined;
     return s.contextUsage[cid] ?? (backendSid ? s.contextUsage[backendSid] : undefined);
   });
-  const estimatedTokens = useHelixStore((s) =>
-    s.currentSessionId ? s.estimatedTokens[s.currentSessionId] : undefined,
-  );
+  const estimatedTokens = useHelixStore((s) => {
+    const cid = sessionId ?? s.currentSessionId;
+    return cid ? s.estimatedTokens[cid] : undefined;
+  });
   const isChatLoading = useHelixStore((s) => s.isChatLoading);
   // 统一口径：环读数以本地每对话快照为唯一渲染来源（usage_prompt_complete
   // 实测值与 captureContextBreakdown 权威写回——两者同语义，都是
@@ -438,8 +474,9 @@ export function ContextUsageIndicator() {
     <div className="relative" ref={panelRef}>
       <button
         type="button"
-        onClick={() => setOpen(!open)}
-        className="size-10 rounded-lg flex items-center justify-center text-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors"
+        ref={triggerRef}
+        onClick={toggle}
+        className="size-8 rounded-xl flex items-center justify-center text-muted-foreground/60 hover:text-foreground hover:bg-muted/50 transition-colors duration-150"
         data-tip={`上下文使用情况${estimated ? `（${formatTokens(estimated)} 估算）` : ""}`}
       >
         <ContextUsageRing used={used} total={total} />
@@ -453,7 +490,8 @@ export function ContextUsageIndicator() {
           // 缓存命中只读本地快照，与环同一个口径（见上面「统一口径」注释）：
           // 弹窗的 RPC 不直接喂显示，否则开/关弹窗会让这个数字自己跳。
           cache={localCtx?.usageStats}
-          onClose={() => setOpen(false)}
+          style={panelStyle}
+          contentRef={contentRef}
         />
       )}
     </div>

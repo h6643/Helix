@@ -23,7 +23,6 @@ import {
   Hash,
   Loader2,
   RefreshCw,
-  Server,
   User,
   X,
 } from "lucide-react";

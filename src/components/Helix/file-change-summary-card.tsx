@@ -152,7 +152,7 @@ export function FileChangeSummaryCard({
       : "");
     if (rootToAllow) {
       try {
-        await (api as any)?.fs?.allowRoot?.(rootToAllow);
+        await api?.fs?.allowRoot?.(rootToAllow);
       } catch {
         /* best-effort */
       }
@@ -195,7 +195,7 @@ export function FileChangeSummaryCard({
       if (target) {
         st.revealEditorRange(absolutePath, target.start, target.end);
       }
-    } catch (e: any) {
+    } catch (e) {
       // 诊断：把实际尝试读取的绝对路径与 workDir 带出来，便于定位是路径拼错还是编码/权限问题
       console.warn("[Helix] openChange failed:", {
         rawFilePath: change.filePath,
@@ -204,13 +204,13 @@ export function FileChangeSummaryCard({
         error: e,
       });
       // Tauri invoke 对 Result::Err 的 reject 是字符串（没有 .message），需按字符串取
-      const errText =
-        (typeof e === "string" ? e : e?.message) || "读取文件出错";
+      const msg =
+        (e instanceof Error ? e.message : String(e)) || "读取文件出错";
       // 按错误文本分类：ENOENT（文件已被清理/未落盘）→ 友好提示；
       // 沙箱拒绝（safe_path 白名单外）→ 明确说无权读取；其余原样带出。
       const notFound =
-        /os error 2|cannot find|No such file|找不到|不存在/i.test(errText);
-      const outside = /outside working directory/i.test(errText);
+        /os error 2|cannot find|No such file|找不到|不存在/i.test(msg);
+      const outside = /outside working directory/i.test(msg);
       st.showToast({
         type: "error",
         title: "打开失败",
@@ -218,7 +218,7 @@ export function FileChangeSummaryCard({
           ? `文件已不存在（可能已被后端清理）: ${absolutePath}`
           : outside
             ? `文件在工作区外，编辑器无权读取: ${absolutePath}`
-            : `${errText}｜尝试读取: ${absolutePath}`,
+            : `${msg}｜尝试读取: ${absolutePath}`,
       });
       if (createdEmpty) st.closeEditorTab(absolutePath);
     }

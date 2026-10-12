@@ -2,6 +2,7 @@
 
 import { Check, ChevronDown } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
+import { useLockScrollOnOpen } from "./settings-hooks";
 import { Button } from "@/components/ui/button";
 
 // 设置界面基础组件：每个 SettingGroup 渲染为一张卡片，
@@ -212,45 +213,6 @@ interface PopupSelectProps {
   className?: string;
   popupWidth?: number;
   disabled?: boolean;
-}
-
-/**
- * 下拉/弹层打开时锁定最近的背景滚动容器。弹层多为 position:fixed，背景滚动容器
- * （如设置内容卡片）滚动时触发器会移动而弹层留在视口原位，导致两者错位；锁住背景
- * 滚动并补偿滚动条宽度（隐藏滚动条后避免布局横向跳动），关闭时还原。
- */
-export function useLockScrollOnOpen(
-  open: boolean,
-  btnRef: React.RefObject<HTMLElement | null>,
-) {
-  useEffect(() => {
-    if (!open) return;
-    let el: HTMLElement | null = btnRef.current;
-    let scroller: HTMLElement | null = null;
-    while (el && el !== document.body && el !== document.documentElement) {
-      const s = getComputedStyle(el);
-      if (
-        s.overflowY === "auto" ||
-        s.overflowY === "scroll" ||
-        s.overflowY === "overlay"
-      ) {
-        scroller = el;
-        break;
-      }
-      el = el.parentElement;
-    }
-    if (!scroller) return;
-    // 锁定背景滚动，但不动 paddingRight——弹窗是 fixed 定位，本身不受
-    // 滚动容器 padding 影响；加 paddingRight 会让滚动容器内容区变窄，
-    // 其他元素（左侧文字/卡片）整体往左挤，造成可见的布局抖动。
-    // 只需要防止用户滚动背景，不需要补偿滚动条宽度。
-    const prevOverflow = scroller.style.overflowY;
-    scroller.style.overflowY = "hidden";
-    return () => {
-      if (!scroller) return;
-      scroller.style.overflowY = prevOverflow;
-    };
-  }, [open, btnRef]);
 }
 
 /**

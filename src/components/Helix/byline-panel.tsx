@@ -12,19 +12,27 @@ import {
   Plus,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { loadSessionMap } from "@/lib/session-map";
-import { useHelixStore } from "@/stores/helix-store";
-import type { ApprovalMode, PermissionTier } from "@/stores/helix-types";
+import { createPortal } from "react-dom";
 import {
-  APPROVAL_MODE_ITEMS,
-  approvalModeOf,
-} from "@/stores/helix-types";
-import { normalizeAcpContent } from "@/lib/text-utils";
-import { TranscriptMessage, formatDuration } from "./transcript-message";
+  BusyBehaviorSelector,
+  ReasoningEffortControl,
+} from "./agent-flow-panel";
+import { ContextUsageIndicator } from "./context-usage";
 import {
   BUILTIN_SLASH_COMMANDS,
   runCompactCommand,
 } from "./slash-commands";
+import { TranscriptMessage } from "./transcript-message";
+import { formatDuration } from "./transcript-utils";
+import { parseChannelModelLabel } from "@/lib/channel-model";
+import { loadSessionMap } from "@/lib/session-map";
+import { normalizeAcpContent } from "@/lib/text-utils";
+import { useHelixStore } from "@/stores/helix-store";
+import type { ApprovalMode, PermissionTier, ReasoningEffortLevel } from "@/stores/helix-types";
+import {
+  APPROVAL_MODE_ITEMS,
+  approvalModeOf,
+} from "@/stores/helix-types";
 
 /** 档位表里的 icon 是字符串（为了让 helix-types 不依赖 lucide），这里落地成组件。 */
 const MODE_ICONS = {
@@ -33,8 +41,16 @@ const MODE_ICONS = {
   Zap,
   FileText,
 } as const;
-import { ContextUsageIndicator } from "./context-usage";
-import { ReasoningEffortControl } from "./agent-flow-panel";
+
+/** 旁路会话草稿键：还没有真实会话时，模型/推理选择先挂在这个键上，
+    首个问题创建会话后再搬到真实 cid。与主对话的 DRAFT_SESSION_KEY 同一约定。 */
+const BYLINE_DRAFT_KEY = "__byline_draft__";
+
+/** 模型名超长截断：超过 18 字加省略号，与主对话一致。 */
+function truncateModelLabel(name: string): string {
+  if (name.length <= 18) return name;
+  return `${name.slice(0, 18)}…`;
+}
 
 /** 剥掉 user 消息里注入的指令段，只留问题正文（首段，到空行为止）。 */
 function displayUserContent(raw: string): string {
@@ -174,25 +190,102 @@ export function BylinePanel() {
   const apiConfig = useHelixStore((s) => s.apiConfig);
   const activeModel = useHelixStore((s) => s.activeModel);
   const providers = useHelixStore((s) => s.providers);
-  const providerModels = useHelixStore((s) => s.providerModels);
-  const reasoningEffort = useHelixStore((s) => s.reasoningEffort);
-  const setReasoningEffort = useHelixStore((s) => s.setReasoningEffort);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffortLevel>("medium");
   const [showModeDropdown, setShowModeDropdown] = useState(false);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  // 模型下拉 portal 到 body 后不在 toolbarRef 树内——外点关闭要同时检查面板
+  // 自己的 ref，否则点面板内部也算"外部"，一碰就关。
+  const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
+  // 开下拉那一刻量好的 fixed 定位（相对视口）。portal 到 body 是为了逃出
+  // 右栏/面板根那串 overflow-hidden——二级 flyout 向左开，不 portal 会被
+  // 侧栏左缘整个裁掉（表现为二级菜单"被档"）。
+  const [modelDropdownPos, setModelDropdownPos] = useState<{
+    left: number;
+    bottom: number;
+    flyoutLeft: boolean;
+  } | null>(null);
+  const modelDropdownAnchorRef = useRef<HTMLElement | null>(null);
+
+  const toggleModelDropdown = (anchor: HTMLElement | null) => {
+    if (!showModelDropdown) {
+      modelDropdownAnchorRef.current = anchor;
+      if (anchor) {
+        const r = anchor.getBoundingClientRect();
+        const PANEL_W = 224; // w-56
+        const FLYOUT_W = 264; // w-64 + pr-1
+        // 面板右缘对齐按钮右缘，再夹回视口内（按钮贴右栏时防溢出）。
+        const left = Math.round(
+          Math.min(r.right - PANEL_W, window.innerWidth - PANEL_W - 8),
+        );
+        setModelDropdownPos({
+          left,
+          bottom: Math.round(window.innerHeight - r.top + 8),
+          flyoutLeft: left - FLYOUT_W >= 8,
+        });
+      }
+    } else {
+      setModelDropdownPos(null);
+    }
+    setShowModelDropdown(!showModelDropdown);
+    setShowModeDropdown(false);
+  };
 
   // 下拉点外部关闭（与主线输入框工具条同一交互约定）
   useEffect(() => {
     if (!showModeDropdown && !showModelDropdown) return;
     const onDown = (event: MouseEvent) => {
-      if (!toolbarRef.current?.contains(event.target as Node)) {
+      if (
+        !toolbarRef.current?.contains(event.target as Node) &&
+        !modelDropdownPanelRef.current?.contains(event.target as Node)
+      ) {
         setShowModeDropdown(false);
         setShowModelDropdown(false);
+        setModelDropdownPos(null);
       }
     };
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
   }, [showModeDropdown, showModelDropdown]);
+  // 面板是 fixed 定位：开的期间跟着 scroll/resize 重算（旁路对话流滚动时
+  // 输入框会留在原位，但保险起见与主线同一处理）。
+  useEffect(() => {
+    if (!showModelDropdown) return;
+    const update = () => {
+      const anchor = modelDropdownAnchorRef.current;
+      if (!anchor) return;
+      const r = anchor.getBoundingClientRect();
+      const PANEL_W = 224;
+      const FLYOUT_W = 264;
+      const left = Math.round(
+        Math.min(r.right - PANEL_W, window.innerWidth - PANEL_W - 8),
+      );
+      const bottom = Math.round(window.innerHeight - r.top + 8);
+      setModelDropdownPos((prev) => {
+        const next = {
+          left,
+          bottom,
+          flyoutLeft: left - FLYOUT_W >= 8,
+        };
+        if (
+          prev &&
+          prev.left === next.left &&
+          prev.bottom === next.bottom &&
+          prev.flyoutLeft === next.flyoutLeft
+        ) {
+          return prev;
+        }
+        return next;
+      });
+    };
+    update();
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [showModelDropdown]);
   // /compact 需要 live 的 cid→sid 映射；旁路面板没有组件级 ref，发命令前
   // 现拉磁盘映射即可（映射在 agent-flow-panel 侧已按事件持久化）。
   const sessionMapCacheRef = useRef<Map<string, import("@/lib/session-map").SessionMapEntry>>(
@@ -214,9 +307,23 @@ export function BylinePanel() {
   const rec = bylineReplies[mainCid];
   const byCid = rec?.sessionId;
 
-  // 工具条目标：覆盖值挂在旁路会话自己的 cid 上。还没有旁路会话时下拉
-  // 禁用（写入没有落点；首个问题仍用配置默认起会话）。
-  const btwCid = byCid ?? null;
+  // 工具条目标：覆盖值挂在旁路会话自己的 cid 上。还没有旁路会话时用草稿键，
+  // 让模型/推理选择能在发消息前就生效；首个问题创建会话后再搬到真实 cid。
+  const btwCid = byCid ?? BYLINE_DRAFT_KEY;
+
+  // 会话创建后把草稿期选的模型/推理搬到真实 cid，并清掉草稿键。
+  useEffect(() => {
+    if (!byCid) return;
+    const st = useHelixStore.getState();
+    const draftModel = st.modelBySession[BYLINE_DRAFT_KEY];
+    if (draftModel) {
+      st.setModelForSession(byCid, draftModel);
+    }
+    // 清掉草稿键（下次新会话不会误用旧草稿）
+    if (st.modelBySession[BYLINE_DRAFT_KEY]) {
+      st.setModelForSession(BYLINE_DRAFT_KEY, { provider: "", model: "" });
+    }
+  }, [byCid]);
   // 主线这条对话还没建起来时，那次选档还挂在待落盘表上——芯片要跟着它显示，
   // 否则旁路上看到的档位和主输入框上那枚芯片不是同一个值。
   const pendingTier = useHelixStore(
@@ -231,23 +338,53 @@ export function BylinePanel() {
   );
   const modelOverride = btwCid ? modelBySession[btwCid] : undefined;
   const effectiveModel = modelOverride?.model || apiConfig?.model || activeModel;
-  // 候选列表与主线同一来源（provider store 的模型目录），另把当前生效值
-  // 兜底加进去，避免瞬时空列表让按钮显示退化。
-  const modelChoices = useMemo(() => {
-    const set = new Set<string>();
+
+  // 供应商分组（与主对话同一结构）：一级列表按 provider 分组，hover 展开二级飞入菜单
+  const piChannelProviders = useHelixStore((s) => s.piChannelProviders);
+  const providerModelGroups = useMemo(() => {
+    const activeProviderId = apiConfig?.provider;
+    const groups: {
+      id: string;
+      name: string;
+      baseUrl: string;
+      models: string[];
+      labels?: Record<string, string>;
+    }[] = [];
     for (const p of providers) {
-      if (p.id && providerModels[p.id]?.length) {
-        providerModels[p.id].forEach((m) => m && set.add(m));
+      const models = new Set<string>();
+      (p.models || []).forEach((m) => {
+        if (m) models.add(m);
+      });
+      if (
+        apiConfig.model &&
+        !models.has(apiConfig.model) &&
+        (p.id === activeProviderId ||
+          (apiConfig.baseUrl && p.baseUrl === apiConfig.baseUrl))
+      ) {
+        models.add(apiConfig.model);
       }
-      if (p.models?.length) {
-        p.models.forEach((m) => m && set.add(m));
+      if (models.size > 0) {
+        groups.push({
+          id: p.id,
+          name: p.name || p.id,
+          baseUrl: p.baseUrl,
+          models: Array.from(models),
+        });
       }
     }
-    if (apiConfig?.model) set.add(apiConfig.model);
-    if (activeModel) set.add(activeModel);
-    if (modelOverride?.model) set.add(modelOverride.model);
-    return Array.from(set);
-  }, [providers, providerModels, apiConfig?.model, activeModel, modelOverride]);
+    for (const cp of piChannelProviders) {
+      if (cp.models.length > 0) {
+        groups.push({
+          id: `pi:${cp.id}`,
+          name: cp.name,
+          baseUrl: "",
+          models: cp.models.map((x) => x.id),
+          labels: Object.fromEntries(cp.models.map((x) => [x.id, x.label])),
+        });
+      }
+    }
+    return groups;
+  }, [providers, apiConfig, piChannelProviders]);
 
   // 档位表与主输入框共用同一份（helix-types 的 APPROVAL_MODE_ITEMS）——本地
   // 复制一份必然出现「主界面两档、旁路四档」的对不上。
@@ -329,7 +466,6 @@ export function BylinePanel() {
     ) {
       void ensureSessionMap();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slashQuery]);
 
   // 清空草稿后把 textarea 高度压回单行基准（onInput 只在键入时触发，
@@ -412,8 +548,6 @@ export function BylinePanel() {
         showToast({
           type: "warning",
           title: "/btw 请从主对话输入框发送",
-          description:
-            "这里已是旁路问答面板：直接在输入框输入问题（Enter 发送）即可，也可多轮追问。",
         });
         return;
       }
@@ -496,8 +630,6 @@ export function BylinePanel() {
                 />
               ) : (
                 <div className="flex items-center gap-2 text-muted-foreground px-1 py-1">
-                  <Zap className="size-3.5 text-violet-500 shrink-0" />
-                  <span className="ui-text-sm2">正在回答…</span>
                 </div>
               )}
             </div>
@@ -521,15 +653,14 @@ export function BylinePanel() {
             onKeyDown={handleKeyDown}
             onInput={(e) => {
               const target = e.target as HTMLTextAreaElement;
-              const prevHeight = target.style.height || "36px";
               target.style.height = "auto";
               const ch = target.scrollHeight;
               const min = 36;
-              const nextHeight = ch > min ? Math.min(ch, 300) : min;
+              const nextHeight = ch > min ? Math.min(ch, 200) : min;
               target.style.height = nextHeight + "px";
             }}
-            placeholder="随心输入..."
-            className="chat-input w-full min-w-0 resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 text-[length:var(--helix-transcript-size)] min-h-[36px] max-h-[300px] px-2.5 pt-1.5 pb-0.5 leading-[1.45] break-all overflow-x-hidden overflow-y-auto text-foreground outline-none"
+            placeholder="输入问题..."
+            className="chat-input w-full min-w-0 resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/70 text-[length:var(--helix-transcript-size)] min-h-[36px] max-h-[200px] px-3 pt-2 pb-1 leading-[1.45] break-all overflow-x-hidden overflow-y-auto text-foreground outline-none"
             style={{
               overflowX: "hidden",
               overflowY: "auto",
@@ -538,7 +669,7 @@ export function BylinePanel() {
               overflowWrap: "anywhere",
             }}
           />
-          <div className="flex items-center justify-between px-2 pb-1.5 pt-0">
+          <div className="flex items-center justify-between gap-2 px-2 pb-2 pt-2.5 flex-wrap">
             {/* 会话级工具条：plan 与模型只作用于当前旁路会话（写 planModeBySession /
                 modelBySession 的 btw-cid 键，handleRun 每轮经 set_mode / set_model
                 透传到该会话的实例）；权限档写的是主线那条对话在扩展配置里的格子。 */}
@@ -568,44 +699,63 @@ export function BylinePanel() {
                       setShowModeDropdown((v) => !v);
                       setShowModelDropdown(false);
                     }}
-                    data-tip={
+                    data-tip={`${
+                      (MODE_ITEMS.find((m) => m.id === effectiveMode)?.title) ??
+                      "自动审批"
+                    } — ${
                       effectiveMode === "plan"
                         ? "制定计划：只对本旁路会话生效，选一个权限档即退出"
                         : "审批模式：只对本旁路会话所属的那条对话生效（值来自 pi-permission 的配置）"
-                    }
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ui-text-sm2 transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                    }`}
+                    className="flex items-center gap-1.5 px-2.5 h-8 rounded-xl ui-text-sm2 transition-all duration-200 text-muted-foreground hover:text-foreground hover:bg-muted/50"
                   >
-                    {(() => {
-                      const cur = MODE_ITEMS.find(
-                        (m) => m.id === effectiveMode,
-                      );
-                      const Icon = cur?.icon;
-                      return (
-                        <>
-                          {Icon && <Icon className="size-3.5" />}
-                          <span className="whitespace-nowrap">
-                            {cur?.title ?? "自动审批"}
-                          </span>
-                        </>
-                      );
-                    })()}
+                    <ShieldQuestion className="size-3.5" />
                     <ChevronDown className="size-3" />
                   </button>
-                  <ContextUsageIndicator />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowModelDropdown((v) => !v);
-                      setShowModeDropdown(false);
-                    }}
-                    data-tip="模型（仅本旁路会话）"
-                    className="flex items-center justify-between gap-2 min-w-0 max-w-[240px] px-2.5 py-1.5 h-7 bg-muted/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 transition-all duration-200 font-mono border border-border/30 hover:border-border/30"
-                  >
-                    {/* 空间够就显示全名；放不下时随 flex 收缩出省略号（…），与主对话一致 */}
-                    <span className="truncate min-w-0 text-left">
-                      {effectiveModel || "选择模型"}
-                    </span>
-                  </button>
+                  <BusyBehaviorSelector compact />
+                  <ContextUsageIndicator sessionId={btwCid} />
+                  <div className="relative min-w-0 max-w-[140px]">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        toggleModelDropdown(e.currentTarget);
+                      }}
+                      data-tip="模型（仅本旁路会话）"
+                      className="flex w-full items-center justify-between gap-1.5 min-w-0 px-2.5 h-8 rounded-xl ui-text-sm2 transition-all duration-200 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                    >
+                      <span className="truncate min-w-0 text-left">
+                        {effectiveModel
+                          ? effectiveModel.length > 8
+                            ? effectiveModel.slice(0, 8) + "…"
+                            : effectiveModel
+                          : "选择模型"}
+                      </span>
+                    </button>
+                  </div>
+                  <ReasoningEffortControl
+                    value={reasoningEffort}
+                    onChange={(v) => setReasoningEffort(v)}
+                  />
+                  {isRunning ? (
+                    <button
+                      type="button"
+                      onClick={stopByline}
+                      data-tip="停止"
+                      className="flex items-center gap-1.5 px-2.5 h-8 rounded-xl transition-all duration-200 flex items-center justify-center text-foreground border border-border/60 bg-muted/40 hover:bg-muted/70"
+                    >
+                      <Square className="size-3.5 text-foreground fill-foreground shrink-0" />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleSend}
+                      disabled={!draft.trim()}
+                      data-tip="发送"
+                      className="flex items-center gap-1.5 px-2.5 h-8 rounded-xl transition-all duration-200 flex items-center justify-center border border-border/60 bg-muted/40 hover:bg-muted/70 text-foreground/40 disabled:opacity-40"
+                    >
+                      <ArrowUp className="size-3.5 shrink-0" />
+                    </button>
+                  )}
                 </>
               )}
 
@@ -654,81 +804,138 @@ export function BylinePanel() {
                 </div>
               )}
 
-              {showModelDropdown && btwCid && (
-                <div className="absolute bottom-full left-0 mb-2 w-56 max-h-72 overflow-y-auto bg-card/60 rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
-                  {modelChoices.map((m) => {
-                    const active = effectiveModel === m;
-                    return (
-                      <button
-                        key={m}
-                        type="button"
-                        onClick={() => {
-                          // 供应商归属要按所选模型解析（resolveModelProvider
-                          // 已按「当前端点 → 活跃供应商 → 全库」排序），不能
-                          // 直接抄全局 apiConfig.provider——那会把别的端点的
-                          // 模型挂到当前供应商名下。
-                          const owner =
-                            useHelixStore
-                              .getState()
-                              .resolveModelProvider(m)?.name ||
-                            (apiConfig?.provider &&
-                            apiConfig.provider !== "__custom__"
-                              ? apiConfig.provider
-                              : "custom");
-                          setModelForSession(btwCid, {
-                            provider: owner,
-                            model: m,
-                          });
-                          showToast({
-                            type: "success",
-                            title: `本会话模型切换为 ${m}`,
-                          });
-                          setShowModelDropdown(false);
-                        }}
-                        className={`w-full px-3 py-1.5 flex items-center gap-2 text-left ui-text-sm2 hover:bg-muted/60 transition-colors ${
-                          active
-                            ? "text-foreground font-medium"
-                            : "text-muted-foreground"
-                        }`}
+              {showModelDropdown && btwCid && modelDropdownPos &&
+                createPortal(
+                  <div
+                    ref={modelDropdownPanelRef}
+                    style={{
+                      position: "fixed",
+                      left: modelDropdownPos.left,
+                      bottom: modelDropdownPos.bottom,
+                    }}
+                    className="w-56 overflow-visible bg-card rounded-xl border border-border/40 shadow-xl z-50 animate-scale-in"
+                  >
+                  <div className="py-1">
+                    {providerModelGroups.length === 0 && (
+                      <div className="px-3 py-4 text-center text-[length:var(--helix-transcript-size)] text-foreground/40">
+                        暂无可用模型
+                      </div>
+                    )}
+                    {providerModelGroups.map((g) => (
+                      <div
+                        key={g.id}
+                        className="group relative flex items-center gap-1.5 px-2 py-1.5 cursor-default transition-colors rounded-lg hover:bg-muted/70"
                       >
-                        <span className="truncate min-w-0 flex-1">{m}</span>
-                        {active && <Check className="size-3.5 shrink-0" />}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-            {/* 右簇必须 shrink-0：全是刚性按钮（shrink-0），若允许收缩，
-                盒子会被压到比内容小 → 内容向右溢出 → 发送按钮被裁掉。
-                空间不足时由左簇的模型芯片（min-w-0 + truncate）吸收全部压缩。 */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              <ReasoningEffortControl
-                value={reasoningEffort}
-                onChange={(v) => setReasoningEffort(v)}
-              />
-              {isRunning ? (
-                // 运行中 = 显式停止按钮：经 bylineStopSignal 让 AgentFlowPanel
-                // 对旁路会话调 handleStop。Enter 不承担停止（只发送）。
-                <button
-                  type="button"
-                  onClick={stopByline}
-                  data-tip="停止"
-                  className="h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center text-foreground border border-border/60 bg-muted/40 hover:bg-muted/70"
-                >
-                  <Square className="size-3 text-foreground fill-foreground" />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleSend}
-                  disabled={!draft.trim()}
-                  data-tip="发送"
-                  className="h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center border border-border/60 bg-muted/40 hover:bg-muted/70 text-foreground/40 disabled:opacity-40"
-                >
-                  <ArrowUp className="size-4" />
-                </button>
-              )}
+                        <div className="min-w-0 flex-1">
+                          <span className="truncate ui-text-sm2 font-semibold text-foreground">
+                            {g.name}
+                          </span>
+                        </div>
+                        <svg
+                          className="size-4 shrink-0 text-muted-foreground/50"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="m9 18 6-6-6-6" />
+                        </svg>
+                        <div className={`invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute bottom-0 ${
+                          modelDropdownPos?.flyoutLeft
+                            ? "right-full pr-1"
+                            : "left-full pl-1"
+                        }`}>
+                          <div
+                            className={`${g.labels ? "w-64 max-w-[256px]" : "w-52 max-w-[208px]"} max-h-[min(360px,55vh)] overflow-y-auto overscroll-contain rounded-xl border border-border/40 bg-card shadow-xl z-50 py-1`}
+                          >
+                            {g.models.length === 0 ? (
+                              <div className="px-3 py-3 text-center text-[length:var(--helix-transcript-size)*0.8571] text-foreground/40">
+                                该供应商暂无模型
+                              </div>
+                            ) : (
+                              g.models.map((m) => {
+                                const label = g.labels?.[m];
+                                const parts = label
+                                  ? parseChannelModelLabel(label)
+                                  : undefined;
+                                const active = effectiveModel === m;
+                                return (
+                                  <button
+                                    key={m}
+                                    type="button"
+                                    onClick={() => {
+                                      const owner = g.id.startsWith("pi:")
+                                        ? g.id.slice(3)
+                                        : useHelixStore
+                                            .getState()
+                                            .resolveModelProvider(m)?.name ||
+                                            (apiConfig?.provider &&
+                                            apiConfig.provider !== "__custom__"
+                                              ? apiConfig.provider
+                                              : "custom");
+                                      setModelForSession(btwCid, {
+                                        provider: owner,
+                                        model: m,
+                                      });
+                                      showToast({
+                                        type: "success",
+                                        title: `本会话模型切换为 ${m}`,
+                                      });
+                                      setShowModelDropdown(false);
+                                    }}
+                                    className="w-full flex items-center gap-1.5 px-2 py-1.5 text-left transition-colors rounded-lg hover:bg-muted/70"
+                                  >
+                                    {parts ? (
+                                      <>
+                                        <span
+                                          className="flex min-w-0 flex-1 items-baseline gap-1.5"
+                                          data-tip={m}
+                                        >
+                                          <span className="min-w-0 shrink truncate font-mono ui-text text-foreground">
+                                            {parts.name}
+                                          </span>
+                                          {parts.notes.length > 0 && (
+                                            <span className="min-w-0 shrink truncate text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
+                                              {parts.notes.join(" ")}
+                                            </span>
+                                          )}
+                                        </span>
+                                        <span className="w-11 shrink-0 text-right font-mono tabular-nums text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
+                                          {parts.factor}
+                                        </span>
+                                      </>
+                                    ) : (
+                                      <span
+                                        className="min-w-0 flex-1 truncate font-mono ui-text text-foreground"
+                                        data-tip={m}
+                                      >
+                                        {truncateModelLabel(m)}
+                                      </span>
+                                    )}
+                                    <span className="flex w-3.5 shrink-0 items-center justify-center">
+                                      {active && (
+                                        <span
+                                          className="text-foreground/50"
+                                          data-tip="当前模型"
+                                        >
+                                          <Check className="size-3.5" />
+                                        </span>
+                                      )}
+                                    </span>
+                                  </button>
+                                );
+                              })
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  </div>,
+                  document.body,
+                )}
             </div>
           </div>
         </div>

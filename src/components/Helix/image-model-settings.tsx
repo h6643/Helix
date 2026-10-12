@@ -44,7 +44,7 @@ export function ImageModelSettings() {
         return;
       }
       try {
-        const api = (window as any).electron?.image;
+        const api = window.electron?.image;
         if (!api?.getConfig) return;
         const r = await api.getConfig();
         if (r?.ok && r.config) {
@@ -74,7 +74,7 @@ export function ImageModelSettings() {
         apiKey: showApiKey ? apiKey : "",
       };
       if (isElectron()) {
-        const api = (window as any).electron?.image;
+        const api = window.electron?.image;
         if (api?.setConfig) await api.setConfig(config);
       } else {
         localStorage.setItem("helix-image-model", JSON.stringify(config));

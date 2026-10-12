@@ -1,5 +1,5 @@
 import type { HooksConfig } from "@/lib/hooks-config";
-import type { ScheduledTask } from "@/stores/helix-store";
+import type { McpServerConfig, ScheduledTask } from "@/stores/helix-types";
 import type { PermissionScopeId } from "@/stores/helix-types";
 
 /** `helix_get_permission_mode` / set / clear 的作用域身份（不传 = 只看全局格）。 */
@@ -182,6 +182,10 @@ export interface ElectronAPI {
     readFile: (filePath: string) => Promise<string | null>;
     deleteDir: (dirPath: string) => Promise<boolean>;
     listSkills: () => Promise<any>;
+    /** 开关技能「模型自动调用」（翻转 SKILL.md frontmatter 的
+     *  `disable-model-invocation`）。返回值 `disabled` 是修改后的状态。 */
+    setSkillModelInvocation: (skillPath: string, enabled: boolean) =>
+      Promise<{ changed: boolean; disabled: boolean } | null>;
   };
 
   shell: {
@@ -246,27 +250,76 @@ export interface ElectronAPI {
     }>;
   };
 
+  // Delegations（src-tauri/src/delegations.rs）。wire 形状来自 .pi/state/
+  // delegations.json，消费方（agent-work-panel / delegations-panel）各自维护
+  // 本地 `Delegation` 接口并自行 cast —— 所以这里只声明信封字段，不重复建模。
+  delegations: {
+    // 传一个 sid，或传「这个对话历史上用过的全部 sid」——后端
+    // delegations_list 两种都接（session/new、restart 后的 resume 都会换 sid）。
+    list: (sessionId?: string | string[]) => Promise<{
+      ok: boolean;
+      delegations?: unknown[];
+      error?: string;
+    }>;
+    readLog: (path: string, lines?: number) => Promise<{
+      ok: boolean;
+      content?: string;
+      error?: string;
+    }>;
+    // pi-subagents 子代理的 .output 转录时间线。agentId 是扩展自己的子代理 id；
+    // cwd/sessionId 用于直捣转录目录，缺失时后端全盘扫描兜底。
+    timeline: (
+      agentId: string,
+      cwd?: string,
+      sessionId?: string,
+      tail?: number,
+    ) => Promise<{
+      ok: boolean;
+      found: boolean;
+      entries?: unknown[];
+      error?: string;
+    }>;
+  };
+
+  // 父 Agent 工具调用 id → 扩展子代理 id 的映射（+ 当前状态），供侧边栏把
+  // 实时卡片定位到对应的 .output 转录。
+  subagentMap: {
+    list: (sessionId?: string) => Promise<{
+      ok: boolean;
+      agents?: unknown[];
+      error?: string;
+    }>;
+  };
+
   scheduledTasks: {
     list: () => Promise<{
       ok: boolean;
       tasks?: ScheduledTask[];
       error?: string;
     }>;
+    // 字段集合照 scheduled_tasks.rs 的 create()：只读 name / prompt /
+    // cronExpression / nextRunAt / sessionMode。scheduleText 不在其中（后端按
+    // cron 自己渲染展示串），调用点传了也只是随行数据。
     create: (params: {
       name?: string;
       prompt?: string;
       scheduleText?: string;
       cronExpression?: string;
       nextRunAt?: number;
+      /** 缺省 fresh（认不出的值也当 fresh）。 */
+      sessionMode?: "fresh" | "reuse";
     }) => Promise<{
       ok: boolean;
       id?: string;
       nextRunAt?: number | null;
       error?: string;
     }>;
+    // update() 是「显式传了才改」的 partial update：缺省 enabled 不会把任务
+    // 意外暂停。
     update: (params: {
       id: string;
-      enabled: boolean;
+      enabled?: boolean;
+      sessionMode?: "fresh" | "reuse";
     }) => Promise<{ ok: boolean; error?: string }>;
     remove: (params: {
       id: string;
@@ -477,7 +530,12 @@ export interface ElectronAPI {
       baseUrl: string;
       apiKey?: string;
       api?: string;
-      models: Array<{ id: string; contextWindow?: number; reasoning?: boolean }>;
+      models: Array<{
+        id: string;
+        contextWindow?: number;
+        reasoning?: boolean;
+        input?: string[];
+      }>;
     }) => Promise<{ success: boolean; wrote?: boolean }>;
     fetchModels: (params: any) => Promise<any>;
     onEvent: (callback: (method: any, params: any) => void) => () => void;
@@ -544,6 +602,31 @@ export interface ElectronAPI {
       mode?: "on" | "only";
       inlineBudget?: number;
     }) => Promise<{ ok: boolean; error?: string }>;
+    // 高级 pi 设置（settings.json 的 retry / compaction / 思考 / 模型循环 /
+    // 缓存 / 队列 / 工具集）。get 回来的值已按 pi 文档补齐默认值，
+    // __present 标出哪些键是文件里真的写了。
+    piAdvancedConfig: () => Promise<{
+      ok: boolean;
+      settings?: Record<string, unknown>;
+      error?: string;
+    }>;
+    piAdvancedSet: (updates: Record<string, unknown>) => Promise<{
+      ok: boolean;
+      changed?: boolean;
+      written?: number;
+      error?: string;
+      errors?: string[];
+    }>;
+    // 项目信任：Helix 只决定 spawn pi 时加不加 --approve / --no-approve。
+    // 只保留 always/never 两档（RPC 模式无法交互询问，ask 等同 never）。
+    projectTrust: () => Promise<{
+      ok: boolean;
+      mode: "always" | "never";
+      error?: string;
+    }>;
+    setProjectTrust: (
+      mode: "always" | "never",
+    ) => Promise<{ ok: boolean; mode?: string; error?: string }>;
     // Subagent global settings (config.yaml `subagents:` block, read/write;
     // mirrored into the pi-subagents extension's settings.json on save).
     listSubagentSettings: () => Promise<{
@@ -917,6 +1000,13 @@ export interface ElectronAPI {
 
   /** 项目自带的类型检查/lint（`src-tauri/src/diagnostics.rs`）。 */
   diagnostics: {
+    // 运行时自检（app.rs get_status）：版本 / 平台 / 架构 / pid。
+    getStatus: () => Promise<{
+      version: string;
+      platform: string;
+      arch: string;
+      pid: number;
+    }>;
     detect: (cwd?: string | null) => Promise<{
       ok: boolean;
       cwd?: string;
@@ -927,6 +1017,60 @@ export interface ElectronAPI {
       checkId?: string;
       cwd?: string;
     }) => Promise<DiagnosticRunResult>;
+  };
+
+  // ── 窗口控制（标题栏用；bridge 里 api.window = {...}）────────────────
+  window: {
+    minimize: () => Promise<void>;
+    maximize: () => Promise<void>;
+    unmaximize: () => Promise<void>;
+    close: () => Promise<void>;
+    isMaximized: () => Promise<boolean>;
+    toggleDevTools: () => Promise<void>;
+    newWindow: () => Promise<void>;
+    onMaximizedChange: (
+      cb: (maximized: boolean) => void,
+    ) => () => void;
+  };
+
+  // ── 视觉模型（config.yaml `auxiliary.vision` 块）─────────────────────
+  vision: {
+    getConfig: () => Promise<{
+      ok: boolean;
+      config?: {
+        provider: string;
+        model: string;
+        baseUrl: string;
+        apiKey: string;
+      };
+      error?: string;
+    }>;
+    setConfig: (config: {
+      provider: string;
+      model: string;
+      baseUrl: string;
+      apiKey: string;
+    }) => Promise<{ ok: boolean; error?: string }>;
+    describe: (image: string, prompt?: string) => Promise<string>;
+  };
+
+  // ── 网关 MCP servers（config.yaml `mcp_servers:` 块，读写）──────────
+  mcpConfig: {
+    list: (includeEnv?: boolean) => Promise<{
+      ok: boolean;
+      servers?: Record<string, McpServerConfig>;
+      error?: string;
+    }>;
+    save: (
+      servers: Record<string, McpServerConfig>,
+    ) => Promise<{ ok: boolean; error?: string }>;
+  };
+
+  // ── 子 agent 设置（config.yaml `subagents:` 块，存写时同步镜像到扩展
+  //     的 settings.json）───────────────────────────────────────────────
+  subagentsConfig: {
+    list: () => Promise<{ ok: boolean; settings?: SubagentsSettings }>;
+    save: (settings: SubagentsSettings) => Promise<{ ok: boolean; error?: string }>;
   };
 
   platform: string;
@@ -1038,5 +1182,8 @@ declare global {
     electron: ElectronAPI;
   }
 }
+
+/** `subagents:` 块的内容。字段集合由后端定义，前端只原样透传。 */
+export type SubagentsSettings = Record<string, unknown>;
 
 export {};

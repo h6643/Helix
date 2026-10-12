@@ -319,6 +319,7 @@ fn save_mcp_servers(
         }
         merged.insert(name.clone(), renderer_to_adapter(entry));
     }
+    let _guard = crate::config::config_write_lock();
     let path = config_yaml_path();
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let lines: Vec<&str> = existing.lines().collect();
@@ -508,7 +509,7 @@ pub fn mcp_config_save(
     mirror_to_mcp_json(&adapter_map);
     // The adapter reads config.yaml at process start — respawn pi so the change
     // takes effect for the running agent.
-    crate::gateway::restart_gateway_soon(&Arc::clone(&state));
+    crate::gateway::restart_gateway_soon(&Arc::clone(&state), "MCP 服务器配置保存");
     json!({ "ok": true })
 }
 

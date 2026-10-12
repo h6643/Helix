@@ -156,6 +156,32 @@ pub fn model_context_window_for(model: &str, provider: Option<&str>) -> i64 {
     context_window_in(&read_pi_models(), model, provider)
 }
 
+/// pi 认得的模型输入类型。写入 models.json 的 `input` 数组只收这几个值：
+/// pi 运行时只检查 `.includes("image")`（决定是否原生透传图片），其余值它
+/// 当未知忽略，留着是为了向后兼容（pi 后续加了 video/audio 就能直接用）。
+const KNOWN_INPUT_TYPES: &[&str] = &["text", "image", "video", "audio"];
+
+/// 从前端传来的模型条目里取 `input`：返回 None = 调用方没给（保留已有值），
+/// Some(vec) = 显式设定（空数组 = 删掉这个字段）。非数组/非法值一律过滤掉。
+pub fn parse_model_input(v: &serde_json::Value) -> Option<Vec<String>> {
+    let Some(arr) = v.get("input").and_then(serde_json::Value::as_array) else {
+        return None;
+    };
+    // 顺序保留、重复剔除：pi 只检查 includes，数组本身无顺序语义，
+    // 但同值重复写进 models.json 没有意义。
+    let mut out: Vec<String> = Vec::new();
+    for x in arr {
+        let Some(s) = x.as_str() else { continue };
+        if !KNOWN_INPUT_TYPES.contains(&s) {
+            continue;
+        }
+        if !out.iter().any(|y| y == s) {
+            out.push(s.to_string());
+        }
+    }
+    Some(out)
+}
+
 /// 模型条目是否声明支持图片输入（models.json 条目的 `input` 数组含 "image"）。
 /// 供「粘贴图片走 describe_image、由模型按需读」分流使用：多模态主模型原生
 /// 透传 images 即可，不需要转述/路径提示；纯文本模型才需要视觉管道。
@@ -284,6 +310,36 @@ fn is_scalar_bool(v: &serde_json::Value) -> bool {
 /// Port of `setYamlKey` — sets a 2-level dotted key, preserving the file.
 pub fn set_yaml_key(yaml: &str, dotted: &str, value: &serde_json::Value) -> String {
     let parts: Vec<&str> = dotted.split('.').collect();
+    if parts.len() == 1 {
+        // Single top-level key (no sub-key): add or replace `key:` at EOF.
+        let top = parts[0];
+        let value_str = if is_scalar_bool(value) {
+            if value.as_bool().unwrap_or(false) {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        } else {
+            value.to_string()
+        };
+        let mut lines = norm_lines(yaml);
+        let mut found_top = false;
+        for i in (0..lines.len()).rev() {
+            let l = &lines[i];
+            if !l.starts_with(' ') && l.starts_with(top) && l[top.len()..].starts_with(':') {
+                lines[i] = format!("{top}: {value_str}");
+                found_top = true;
+                break;
+            }
+            if !l.is_empty() {
+                break;
+            }
+        }
+        if !found_top {
+            lines.push(format!("{top}: {value_str}"));
+        }
+        return lines.join("\n");
+    }
     if parts.len() != 2 {
         return yaml.to_string();
     }
@@ -438,6 +494,7 @@ fn apply_pi_model_config(
     api_key: Option<&str>,
     context_window: Option<u64>,
 ) -> (bool, bool) {
+    let _guard = crate::config::config_write_lock();
     let old_settings = read_pi_settings();
     let old_provider = old_settings
         .get("defaultProvider")
@@ -581,10 +638,11 @@ pub fn apply_pi_provider_models(
     base_url: &str,
     api_key: Option<&str>,
     api: &str,
-    // (id, context_window, reasoning): reasoning == Some(true) turns the model's
+    // (id, context_window, reasoning, input_types): reasoning == Some(true) turns the model's
     // thinking mode ON in pi's models.json; None leaves any existing flag untouched.
-    models: &[(String, Option<u64>, Option<bool>)],
+    models: &[(String, Option<u64>, Option<bool>, Option<Vec<String>>)],
 ) -> (bool, bool) {
+    let _guard = crate::config::config_write_lock();
     let pi_provider = provider.trim();
     let base = base_url.trim().trim_end_matches('/');
     let api = if api.trim().is_empty() {
@@ -594,8 +652,8 @@ pub fn apply_pi_provider_models(
     };
     let default_model = models
         .iter()
-        .find(|(id, _, _)| !id.trim().is_empty())
-        .map(|(id, _, _)| id.trim().to_string());
+        .find(|(id, _, _, _)| !id.trim().is_empty())
+        .map(|(id, _, _, _)| id.trim().to_string());
     if pi_provider.is_empty() || base.is_empty() || default_model.is_none() {
         return (false, false);
     }
@@ -641,7 +699,7 @@ pub fn apply_pi_provider_models(
         .and_then(|v| v.as_array())
         .map(|arr| arr.clone())
         .unwrap_or_default();
-    for (id, context_window, reasoning) in models {
+    for (id, context_window, reasoning, input_types) in models {
         let id = id.trim().to_string();
         if id.is_empty() {
             continue;
@@ -656,6 +714,16 @@ pub fn apply_pi_provider_models(
         apply_context_window_to_entry(&mut entry, *context_window);
         if *reasoning == Some(true) {
             entry["reasoning"] = serde_json::json!(true);
+        }
+        // input: 模型声明的输入类型。pi 只读 "image" 这一个值来决定图片是否
+        // 原生透传（否则 paste 走视觉转述管道）。不写时保留已有值；写了就覆盖，
+        // 这样从 UI 取消勾选图片能真的关掉原生透传。
+        if let Some(inp) = input_types {
+            if inp.is_empty() {
+                entry.as_object_mut().map(|o| o.remove("input"));
+            } else {
+                entry["input"] = serde_json::json!(inp);
+            }
         }
         if entry.get("maxTokens").and_then(|v| v.as_u64()).is_none() {
             entry["maxTokens"] = serde_json::json!(65536);
@@ -740,10 +808,11 @@ pub fn register_pi_provider_models(
     base_url: &str,
     api_key: Option<&str>,
     api: &str,
-    // (id, context_window, reasoning): reasoning == Some(true) turns the model's
+    // (id, context_window, reasoning, input_types): reasoning == Some(true) turns the model's
     // thinking mode ON in pi's models.json; None leaves any existing flag untouched.
-    models: &[(String, Option<u64>, Option<bool>)],
+    models: &[(String, Option<u64>, Option<bool>, Option<Vec<String>>)],
 ) -> bool {
+    let _guard = crate::config::config_write_lock();
     let pi_provider = provider.trim();
     let base = base_url.trim().trim_end_matches('/');
     if pi_provider.is_empty() || base.is_empty() {
@@ -795,7 +864,7 @@ pub fn register_pi_provider_models(
         .and_then(|v| v.as_array())
         .map(|arr| arr.clone())
         .unwrap_or_default();
-    for (id, context_window, reasoning) in models {
+    for (id, context_window, reasoning, input_types) in models {
         let id = id.trim().to_string();
         if id.is_empty() {
             continue;
@@ -810,6 +879,13 @@ pub fn register_pi_provider_models(
         apply_context_window_to_entry(&mut entry, *context_window);
         if *reasoning == Some(true) {
             entry["reasoning"] = serde_json::json!(true);
+        }
+        if let Some(inp) = input_types {
+            if inp.is_empty() {
+                entry.as_object_mut().map(|o| o.remove("input"));
+            } else {
+                entry["input"] = serde_json::json!(inp);
+            }
         }
         if entry.get("maxTokens").and_then(|v| v.as_u64()).is_none() {
             entry["maxTokens"] = serde_json::json!(65536);
@@ -936,15 +1012,71 @@ pub fn read_yaml_block(yaml: &str, top: &str) -> serde_json::Map<String, serde_j
     out
 }
 
+/// Serializes every read-modify-write cycle on Helix's config files:
+/// `config.yaml` plus pi's `settings.json` / `models.json`.
+///
+/// Each settings command runs on its own Tauri worker thread, and one user
+/// action fires several of them at once — 保存「子智能体」页 pushes 6
+/// concurrent `helix_set_yaml_key` calls. Every one of those writers reads the
+/// whole file, changes one key, and writes it back, so the later write silently
+/// reverts the earlier one and the界面 shows values that never landed on disk.
+///
+/// One lock for all three files, not one per file: a provider save touches
+/// `models.json` and `settings.json` together, and a single lock can never
+/// deadlock. It is also **not reentrant** — take it at the outermost writer and
+/// never inside another holder.
+///
+/// Poison-tolerant by design: these are independent updates, so a panic in one
+/// holder must not wedge every later config write forever.
+static CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold this for the whole read → transform → write of a config file. Take it
+/// **before** reading: a lock acquired only around the write prevents a torn
+/// file but not a lost update.
+pub fn config_write_lock() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Locked single-key write into a yaml file. Separate from
+/// `set_config_yaml_key` only so tests can point it at a temp file — the real
+/// config.yaml is a single shared user resource.
+fn set_yaml_key_in(
+    path: &std::path::Path,
+    key: &str,
+    value: &serde_json::Value,
+) -> std::io::Result<bool> {
+    let _guard = config_write_lock();
+    let yaml = std::fs::read_to_string(path).unwrap_or_default();
+    let updated = set_yaml_key(&yaml, key, value);
+    if updated == yaml {
+        return Ok(false);
+    }
+    atomic_write(path, &updated)?;
+    Ok(true)
+}
+
+/// Locked single-key write into `config.yaml` (see `set_yaml_key_in`).
+pub fn set_config_yaml_key(key: &str, value: &serde_json::Value) -> bool {
+    set_yaml_key_in(&config_yaml_path(), key, value).unwrap_or(false)
+}
+
 /// Atomic file write (tmp + rename) — the same pattern `hooks_save` uses, so
 /// a crash mid-write can never leave a truncated settings.json / config.yaml.
 pub fn atomic_write(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // The scratch name is per-call, not per-path: two writers aimed at the same
+    // target would otherwise share one tmp file, and the loser's `rename` either
+    // fails with ENOENT (the other already moved it) or publishes bytes that
+    // belong to the other writer's payload.
+    static SCRATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SCRATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp")
+        "{}.{}.{}.tmp",
+        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp"),
+        std::process::id(),
+        seq
     ));
     std::fs::write(&tmp, contents)?;
     std::fs::rename(&tmp, path)
@@ -963,6 +1095,199 @@ mod tests {
         assert!(models.ends_with("models.json"));
         assert_eq!(settings.parent(), models.parent());
         assert_eq!(settings.parent().unwrap().file_name().unwrap(), "agent");
+    }
+
+    /// 并发写多个键时一个都不能丢。「子智能体」页的一次保存会并发推 6 个
+    /// `helix_set_yaml_key`，每个都「读整份 → 改一键 → 写回」；没有
+    /// `config_write_lock` 时后写的那份是用最早的读到的内容改出来的，会把先写的键整批抹掉。
+    #[test]
+    fn concurrent_key_writes_all_survive() {
+        let dir = std::env::temp_dir().join(format!(
+            "helix-cfg-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_micros())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "# keep me\nagent:\n  existing: one\n").unwrap();
+
+        let writers: Vec<_> = (0..8)
+            .map(|i| {
+                let p = path.clone();
+                std::thread::spawn(move || {
+                    let value = serde_json::json!(format!("v{i}"));
+                    set_yaml_key_in(&p, &format!("agent.k{i}"), &value).unwrap();
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        let block = read_yaml_block(&yaml, "agent");
+        assert_eq!(
+            block.get("existing").and_then(|v| v.as_str()),
+            Some("one"),
+            "原有键被覆盖掉了"
+        );
+        for i in 0..8 {
+            let expected = format!("v{i}");
+            assert_eq!(
+                block.get(&format!("k{i}")).and_then(|v| v.as_str()),
+                Some(expected.as_str()),
+                "k{i} 被并发写手丢掉了"
+            );
+        }
+        assert!(yaml.contains("# keep me"), "注释没能保住");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 把「子智能体」页那次保存**原样**打一遍：`Promise.all` 里 6 个
+    /// `delegation.*` 单键写（键名抄自 agents-settings.tsx `save()`），紧随其后一个
+    /// `setDelegationIdentities`。多轮重复是为了让竞态有稳定的检出率。注意前端
+    /// 是 await Promise.all([...]) then await setDelegationIdentities，所以块写
+    /// 只在 burst 之后才开始，这里按真实时序调用。
+    #[test]
+    fn subagents_page_save_burst_keeps_every_key() {
+        let dir = std::env::temp_dir().join(format!(
+            "helix-cfg-burst-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+
+        for _round in 0..8 {
+            std::fs::write(
+                &path,
+                "# keep me\nagent:\n  existing: one\nvision:\n  model: old-vision\ndelegation:\n  provider: old\n",
+            )
+            .unwrap();
+
+            let writes = [
+                ("delegation.provider", serde_json::json!("openai")),
+                ("delegation.model", serde_json::json!("gpt-5.1")),
+                ("delegation.base_url", serde_json::json!("https://x.test")),
+                ("delegation.max_iterations", serde_json::json!(12)),
+                (
+                    "delegation.reasoning_effort",
+                    serde_json::json!("medium"),
+                ),
+                (
+                    "delegation.subagent_auto_approve",
+                    serde_json::json!(true),
+                ),
+            ];
+            let mut handles = Vec::new();
+            for (key, value) in writes {
+                let p = path.clone();
+                handles.push(std::thread::spawn(move || {
+                    set_yaml_key_in(&p, key, &value).unwrap();
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+            // 与页面一致：等所有 setKey 完成再调 setDelegationIdentities。
+            {
+                let p = path.clone();
+                let _guard = config_write_lock();
+                let yaml = std::fs::read_to_string(&p).unwrap_or_default();
+                let updated = set_delegation_identities(
+                    &yaml,
+                    &serde_json::json!([{ "name": "reviewer", "system_prompt": "hi" }]),
+                );
+                atomic_write(&p, &updated).unwrap();
+                println!("delegation_identities block written round={_round}");
+            }
+
+            let yaml = std::fs::read_to_string(&path).unwrap();
+            let block = read_yaml_block(&yaml, "delegation");
+            for (key, expected) in [
+                ("provider", "openai"),
+                ("model", "gpt-5.1"),
+                ("base_url", "https://x.test"),
+                ("max_iterations", "12"),
+                ("reasoning_effort", "medium"),
+                ("subagent_auto_approve", "true"),
+            ] {
+                assert_eq!(
+                    block.get(key).and_then(|v| v.as_str()),
+                    Some(expected),
+                    "delegation.{key} 被并发写手丢掉了，落盘内容=\n{yaml}"
+                );
+            }
+            assert!(
+                yaml.contains("delegation_identities:"),
+                "setDelegationIdentities 没生效，落盘内容=\n{yaml}"
+            );
+            assert_eq!(
+                read_yaml_block(&yaml, "vision")
+                    .get("model")
+                    .and_then(|v| v.as_str()),
+                Some("old-vision"),
+                "别的块被抹了，落盘内容=\n{yaml}"
+            );
+            assert!(
+                yaml.contains("  existing: one") && yaml.contains("# keep me"),
+                "原有键/注释丢了，落盘内容=\n{yaml}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `atomic_write` 的草稿名必须**每次调用都不同**：共享 `x.yaml.tmp` 时，
+    /// 两个写手会互相把对方的草稿 rename 走，后到的那个直接 ENOENT 失败。
+    #[test]
+    fn concurrent_atomic_writes_all_succeed() {
+        let dir = std::env::temp_dir().join(format!(
+            "helix-cfg-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("values.yaml");
+
+        let writers: Vec<_> = (0..16)
+            .map(|i| {
+                let p = path.clone();
+                std::thread::spawn(move || atomic_write(&p, &format!("value: {i}\n")).is_ok())
+            })
+            .collect();
+        let ok: Vec<bool> = writers.into_iter().map(|w| w.join().unwrap()).collect();
+
+        assert!(
+            ok.iter().all(|b| *b),
+            "有写手的 rename 失败：{}",
+            ok.iter().filter(|b| !**b).count()
+        );
+        let final_text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            final_text.starts_with("value: "),
+            "落盘的是半截内容: {final_text:?}"
+        );
+        assert_eq!(
+            final_text.lines().count(),
+            1,
+            "落盘内容被拼接了: {final_text:?}"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "残留草稿文件 {:?}", leftovers.len());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -1099,5 +1424,34 @@ mod pi_roundtrip_tests {
         let mut zero = serde_json::json!({ "id": "m" });
         apply_context_window_to_entry(&mut zero, Some(0));
         assert_eq!(zero["contextWindow"], serde_json::json!(256_000));
+    }
+
+    #[test]
+    fn parse_model_input_filters_and_normalizes() {
+        // 没给 input → None（保留 models.json 里的现有值，不覆盖）。
+        assert!(parse_model_input(&serde_json::json!({ "id": "m" })).is_none());
+
+        // 非数组 → None。
+        assert!(parse_model_input(&serde_json::json!({ "input": "image" })).is_none());
+        assert!(parse_model_input(&serde_json::json!({ "input": 5 })).is_none());
+
+        // 白名单过滤 + 去重，保持原始顺序。
+        let v = parse_model_input(
+            &serde_json::json!({ "input": ["image", "image", "text", "bogus", 7] }),
+        )
+        .unwrap();
+        assert_eq!(v, vec!["image".to_string(), "text".to_string()]);
+
+        // 全是非法值 → 空数组（写盘侧把空数组当作删除这个字段）。
+        assert_eq!(
+            parse_model_input(&serde_json::json!({ "input": ["bogus"] })).unwrap(),
+            Vec::<String>::new()
+        );
+
+        // video / audio 在白名单里：pi 现在只读 image，留位不丢数据。
+        assert_eq!(
+            parse_model_input(&serde_json::json!({ "input": ["video"] })).unwrap(),
+            vec!["video".to_string()]
+        );
     }
 }

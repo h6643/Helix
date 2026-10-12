@@ -41,16 +41,12 @@ interface FileTreePanelProps {
    *  the parent can surface the code page (the pages model, not rightSidebarTab,
    *  drives which view is visible). */
   onOpenFile?: () => void;
-  /** Bump this key (e.g. from the parent's refresh button) to reload the tree. */
-  reloadKey?: number;
   /** Explicit root directory to display. When omitted, falls back to the store's
    *  `selectedWorkDir` (so the panel can be reused in the left sidebar to show an
    *  arbitrary project's tree, not just the currently-selected one). */
   rootDir?: string;
   /** Directory-view header: close the explorer and return to the sidebar list. */
   onBack?: () => void;
-  /** Directory-view header: manual refresh of the tree. */
-  onRefresh?: () => void;
 }
 
 function parsePorcelainV2(output: string): Map<string, string> {
@@ -223,14 +219,11 @@ function removeFromTree(nodes: FileTreeItem[], path: string): FileTreeItem[] {
 
 export function FileTreePanel({
   onOpenFile,
-  reloadKey,
   rootDir,
   onBack,
-  onRefresh,
 }: FileTreePanelProps) {
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir);
   const showToast = useHelixStore((s) => s.showToast);
-  const openFileInEditor = useHelixStore((s) => s.openFileInEditor);
   const isTerminalOpen = useHelixStore((s) => s.isTerminalOpen);
   const toggleTerminal = useHelixStore((s) => s.toggleTerminal);
   // 云端对话没有本机终端可开（同标题栏/窗口菜单/命令面板的判定），按钮藏起来。
@@ -281,7 +274,7 @@ export function FileTreePanel({
     } catch { /* empty */}
     // Load directory listing — recursive via scanTree
     try {
-      const api = (window as any).electron;
+      const api = window.electron;
       let tree: FileTreeItem[] = [];
       // 登记当前根目录为合法根：点历史对话等路径会直接改 selectedWorkDir 而不走
       // app:setWorkDir，主进程不知道这个根 → 单根校验判越界。扫描前 ensure 一次最稳。
@@ -294,11 +287,18 @@ export function FileTreePanel({
         // 显式传当前选中的绝对路径扫描。无参 scanTree() 扫的是主进程模块级 workDir，
         // 切项目时若它还没更新（或主进程未重启），safePath 的 startsWith(workDir) 会
         // 判越界 → 扫描被静默吞 → 目录面板“固定”在旧项目。传绝对路径则 safePath 放行。
+        // scanTree 的返回是递归树，深度不定——显式建成递归类型而不是 any[]。
+        type ScanNode = {
+          id?: string;
+          name: string;
+          type: string;
+          children?: ScanNode[];
+        };
         const raw = (await api.fs.scanTree(root)) as Array<{
           id: string;
           name: string;
           type: "file" | "folder";
-          children?: any[];
+          children?: ScanNode[];
         }>;
         // scanTree returns paths RELATIVE to the scanned root (e.g.
         // "src/components/Helix/x.tsx"); readFile/rename/delete/showInFolder all
@@ -307,7 +307,7 @@ export function FileTreePanel({
         // real filesystem path.
         const baseDir = root.replace(/[/\\]+$/, "");
         function convert(
-          rawList: Array<{ name: string; type: string; children?: any[] }>,
+          rawList: Array<ScanNode>,
           prefix: string,
         ): FileTreeItem[] {
           const result: FileTreeItem[] = [];
@@ -337,11 +337,15 @@ export function FileTreePanel({
         tree = convert(raw, "");
       } else {
         // Fallback: load only root
-        const entries = (await api.fs.readdir(selectedWorkDir)) as Array<{
+        const entries = (await api.fs.readdir(root)) as Array<{
           name: string;
           isDirectory: boolean;
         }>;
-        const baseDir = (selectedWorkDir || root || "").replace(/[/\\]+$/, "");
+        // baseDir 必须是被扫描的根（root）本身：左栏复用场景父组件会传 rootDir
+        // （见上方 root 注释），此时 root === rootDir 而 selectedWorkDir 是另一棵树，
+        // 用后者拼出的路径基座是错的（真 bug 修复）。rootDir 缺省时
+        // root === selectedWorkDir，与原行为完全一致。
+        const baseDir = (root || "").replace(/[/\\]+$/, "");
         for (const e of entries) {
           if (e.name.startsWith(".") && !showHidden) continue;
           tree.push({
@@ -356,8 +360,8 @@ export function FileTreePanel({
         });
       }
       setItems(tree);
-    } catch (e: any) {
-      setError(e.message || "Failed to load file tree");
+    } catch (e) {
+      setError((e as { message?: string })?.message || "Failed to load file tree");
     }
     setLoading(false);
   }, [root, showHidden]);
@@ -365,14 +369,6 @@ export function FileTreePanel({
   useEffect(() => {
     loadTree();
   }, [loadTree]);
-
-  // External refresh trigger: when the parent bumps reloadKey, reload the tree.
-  const firstReloadKey = useRef(reloadKey);
-  useEffect(() => {
-    if (reloadKey === firstReloadKey.current) return;
-    firstReloadKey.current = reloadKey;
-    loadTree();
-  }, [reloadKey, loadTree]);
 
   // Close the context menu on outside click / Escape.
   useEffect(() => {
@@ -428,11 +424,11 @@ export function FileTreePanel({
       await electronFS.rename(item.path, newPath);
       setItems((prev) => applyRename(prev, item.path, newName, newPath));
       showToast({ type: "success", title: "已重命名", description: newName });
-    } catch (err: any) {
+    } catch (err) {
       showToast({
         type: "error",
         title: "重命名失败",
-        description: err?.message || "重命名出错",
+        description: (err as { message?: string })?.message || "重命名出错",
       });
     }
   };
@@ -450,11 +446,11 @@ export function FileTreePanel({
         title: "已移动到回收站",
         description: item.name,
       });
-    } catch (err: any) {
+    } catch (err) {
       showToast({
         type: "error",
         title: "删除失败",
-        description: err?.message || "删除出错",
+        description: (err as { message?: string })?.message || "删除出错",
       });
     }
   };
@@ -470,7 +466,7 @@ export function FileTreePanel({
     // If children not loaded (fallback path), load them
     if (!item.children || item.children.length === 0) {
       try {
-        const api = (window as any).electron;
+        const api = window.electron;
         const entries = (await api.fs.readdir(item.path)) as Array<{
           name: string;
           isDirectory: boolean;
@@ -597,11 +593,11 @@ export function FileTreePanel({
       // is left untouched (re-click just activates it, preserving any edits).
       if (createdEmpty)
         useHelixStore.getState().fillEditorTabContent(item.path, content);
-    } catch (e: any) {
+    } catch (e) {
       showToast({
         type: "error",
         title: "打开失败",
-        description: e?.message || "读取文件出错",
+        description: (e as { message?: string })?.message || "读取文件出错",
       });
       if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path);
     }
@@ -619,11 +615,11 @@ export function FileTreePanel({
           description: res.error || "无法在文件夹中显示",
         });
       }
-    } catch (e: any) {
+    } catch (e) {
       showToast({
         type: "error",
         title: "打开失败",
-        description: e?.message || "无法在文件夹中显示",
+        description: (e as { message?: string })?.message || "无法在文件夹中显示",
       });
     }
   };

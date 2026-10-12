@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { AlertTriangle, Check, Loader2, Pencil } from "lucide-react";
+import { Check, Loader2, Pencil } from "lucide-react";
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,8 +47,6 @@ interface ApprovalBarProps {
   request: ApprovalRequest;
   onApprove: (level: ApprovalLevel) => void;
   pendingCount?: number;
-  onApproveAll?: () => void;
-  onRejectAll?: () => void;
 }
 
 /**
@@ -62,8 +60,6 @@ function ApprovalBar({
   request,
   onApprove,
   pendingCount,
-  onApproveAll,
-  onRejectAll,
 }: ApprovalBarProps) {
   const [submitting, setSubmitting] = useState<ApprovalLevel | null>(null);
   const [selected, setSelected] = useState<ApprovalLevel>("once");
@@ -135,7 +131,6 @@ function ApprovalBar({
           {command}
         </pre>
       )}
-      {/* onApproveAll / onRejectAll removed per user request */}
       <div className="flex flex-col gap-1">
         {options.map((o) => {
           const isSel = selected === o.level;
@@ -174,20 +169,17 @@ function ApprovalBar({
   );
 }
 
-// Keep the old dialog for backwards compatibility — now renders the inline ApprovalBar
-// as a bottom-anchored, non-blocking card (can switch conversations while open).
-interface LegacyProps {
+// ApprovalDialog — bottom-anchored, non-blocking wrapper around ApprovalBar
+// (no modal overlay, so conversations can still be switched while it is open).
+interface ApprovalDialogProps {
   request: ApprovalRequest;
   pendingCount?: number;
   // level 直接透传（once/session/always/deny），由父组件映射为 approval.respond 的
   // choice；不再折成 cache?: boolean（那会丢失 session/deny 语义，2026-08-17）。
   onApprove: (id: string, level: ApprovalLevel) => void;
-  onReject: (id: string) => void;
-  onApproveAll?: () => void;
-  onRejectAll?: () => void;
 }
-export function ApprovalDialog(props: LegacyProps) {
-  const { request, onApprove, onReject } = props;
+export function ApprovalDialog(props: ApprovalDialogProps) {
+  const { request, onApprove } = props;
   const handleApprove = useCallback(
     (level: ApprovalLevel) => {
       if (!request) return;
@@ -207,8 +199,6 @@ export function ApprovalDialog(props: LegacyProps) {
           request={request}
           onApprove={handleApprove}
           pendingCount={props.pendingCount}
-          onApproveAll={props.onApproveAll}
-          onRejectAll={props.onRejectAll}
         />
       </div>
     </div>

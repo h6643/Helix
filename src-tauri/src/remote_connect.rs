@@ -250,6 +250,7 @@ fn write_remote_config(
     remote_cwd: &str,
 ) -> Result<(), String> {
     let path = crate::config::config_yaml_path();
+    let _guard = crate::config::config_write_lock();
     let yaml = std::fs::read_to_string(&path).unwrap_or_default();
     let mut updated =
         crate::config::set_yaml_key(&yaml, "pi.remote_rpc", &Value::String(format!("127.0.0.1:{local_port}")));
@@ -258,7 +259,8 @@ fn write_remote_config(
         crate::config::atomic_write(&path, &updated)
             .map_err(|e| format!("写 config.yaml 失败: {e}"))?;
     }
-    crate::gateway::restart_gateway_soon(state);
+    drop(_guard);
+    crate::gateway::restart_gateway_soon(state, "远程连接（写 pi.remote_rpc / pi.remote_cwd）");
     Ok(())
 }
 
@@ -314,6 +316,7 @@ pub fn remote_connect(
 #[tauri::command]
 pub fn remote_disconnect(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let path = crate::config::config_yaml_path();
+    let _guard = crate::config::config_write_lock();
     let yaml = std::fs::read_to_string(&path).unwrap_or_default();
     let mut updated = crate::config::set_yaml_key(&yaml, "pi.remote_rpc", &Value::String(String::new()));
     updated = crate::config::set_yaml_key(&updated, "pi.remote_cwd", &Value::String(String::new()));
@@ -321,9 +324,10 @@ pub fn remote_disconnect(state: State<'_, Arc<AppState>>) -> Result<Value, Strin
         crate::config::atomic_write(&path, &updated)
             .map_err(|e| format!("写 config.yaml 失败: {e}"))?;
     }
+    drop(_guard);
     kill_tunnel();
     let arc: Arc<AppState> = Arc::clone(&state);
-    crate::gateway::restart_gateway_soon(&arc);
+    crate::gateway::restart_gateway_soon(&arc, "远程断开（清 pi.remote_rpc / pi.remote_cwd）");
     Ok(json!({ "ok": true }))
 }
 

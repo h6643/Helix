@@ -1,4 +1,4 @@
-﻿import { create } from "zustand";
+import { create } from "zustand";
 
 // 未选择项目目录时的默认工作目录：~/.pi/agent/sessions（pi agent 的会话目录）。
 // 由后端 Tauri 命令 get_sessions_dir 返回（~/.pi/agent/sessions）。
@@ -12,6 +12,7 @@ async function getDefaultSessionsDir(): Promise<string> {
   }
 }
 import type {
+  ReasoningEffortLevel,
   FileNode,
   ImageAttachment,
   FileAttachment,
@@ -45,8 +46,6 @@ import {
   DEFAULT_SHORTCUTS,
   permissionScopeInfoFrom,
 } from "./helix-types";
-import { helixApi } from "@/lib/electron-bridge";
-import { normalizeAcpContent } from "@/lib/text-utils";
 
 /**
  * 两份作用域视图是否等价（逐格比，不比对象身份）。
@@ -126,16 +125,23 @@ import {
   createCompressionRecordsSlice,
   type CompressionRecordsSlice,
 } from "./slices/compression-records-slice";
-import { createEditorSlice, type EditorSlice } from "./slices/editor-slice";
 import { createDiagnosticsSlice, type DiagnosticsSlice } from "./slices/diagnostics-slice";
+import { createEditorSlice, type EditorSlice, swapEditorSession } from "./slices/editor-slice";
 import { createGitSlice, type GitSlice } from "./slices/git-slice";
 import { createPanelSlice, type PanelSlice } from "./slices/panel-slice";
+import {
+  createSidebarSessionSlice,
+  type SidebarSessionSlice,
+  type SidebarPage,
+  swapSidebarSession,
+} from "./slices/sidebar-session-slice";
 import { createSkillSlice, type SkillSlice } from "./slices/skill-slice";
 import {
   createTerminalSlice,
   type TerminalSlice,
 } from "./slices/terminal-slice";
 import { createToastSlice, type ToastSlice } from "./slices/toast-slice";
+import { helixApi } from "@/lib/electron-bridge";
 import {
   isElectron,
   getElectronAPI,
@@ -144,7 +150,7 @@ import {
 } from "@/lib/electron-bridge";
 import { generateId, truncateString } from "@/lib/format";
 import { debug, warn, error as logError } from "@/lib/logger";
-import type { PersistedChatMessage } from "@/lib/persist";
+import type { PersistedChatMessage, PersistedOpenTab } from "@/lib/persist";
 import { defaultFiles } from "@/lib/seed-data";
 import { applyHelixPalette } from "@/lib/themes";
 import { cleanUrl } from "@/lib/url-utils";
@@ -176,6 +182,7 @@ export type RightSidebarTab =
   | "byline"
   | "terminal"
   | "more"
+  | "tree"
   | null;
 
 /**
@@ -202,6 +209,8 @@ function rightSidebarTabEffects(
       return { rightSidebarTab: "byline", showPreviewRail: false, editorOpen: false };
     case "terminal":
       return { rightSidebarTab: "terminal", showPreviewRail: false, editorOpen: false };
+    case "tree":
+      return { rightSidebarTab: "tree", showPreviewRail: false, editorOpen: false };
     case "more":
       return { rightSidebarTab: "more", showPreviewRail: false, editorOpen: false };
     default:
@@ -242,6 +251,40 @@ function swapRightSidebarTab(
   };
 }
 
+/**
+ * 合并三个 swap 函数（tab / sidebar pages / editor tabs）的结果，并在合并后
+ * 检查：如果目标会话的侧边栏可见（tab 非 null）但没有任何内容（无页面、无
+ * 编辑器标签），就自动收起侧边栏（tab = null），避免切换到一个空会话后
+ * 右侧栏留着空白面板。
+ */
+function mergeSwaps(
+  state: HelixState,
+  id: string | null,
+): Partial<HelixState> {
+  const merged: Record<string, unknown> = {
+    ...swapRightSidebarTab(state, id),
+    ...swapSidebarSession(state, id),
+    ...swapEditorSession(state, id),
+  };
+  const tab = merged.rightSidebarTab as RightSidebarTab | null | undefined;
+  const pages = merged.rightSidebarPages as SidebarPage[] | undefined;
+  const editorTabs = merged.editorTabs as unknown[] | undefined;
+  // 「更多」菜单页不算"有内容"——它是一页卡片菜单，用户关掉所有真实页签后
+  // 只剩它，视觉上等于空白。这里排除后判断是否真正为空。
+  const hasRealPages = (pages ?? []).some((p) => p.kind !== "more");
+  if (
+    tab !== null &&
+    tab !== undefined &&
+    !hasRealPages &&
+    (editorTabs?.length ?? 0) === 0
+  ) {
+    merged.rightSidebarTab = null;
+    merged.showPreviewRail = false;
+    merged.editorOpen = false;
+  }
+  return merged as Partial<HelixState>;
+}
+
 interface HelixState
   extends
     GitSlice,
@@ -251,6 +294,7 @@ interface HelixState
     CompressionRecordsSlice,
     TerminalSlice,
     EditorSlice,
+    SidebarSessionSlice,
     AgentSettingsSlice,
     PanelSlice,
     ApiConfigSlice,
@@ -617,6 +661,19 @@ interface HelixState
     sessionId: string,
     notice: SessionRetryInfo | null,
   ) => void;
+  /** 每个会话排队中的消息数（pi 的 queue_update 事件推送，不靠轮询）。
+   *  steer / follow_up 队列里有多少条待执行。 */
+  pendingQueues: Record<string, { steering: number; followUp: number }>;
+  setPendingQueue: (sessionId: string, q: { steering: number; followUp: number }) => void;
+  /**
+   * 忙时行为（pi 的 prompt.streamingBehavior）：
+   *  - abort（默认）= 先停当前轮再发，旧任务被替换
+   *  - steer = 插话：等当前工具调用结束、下一次 LLM 调用前注入
+   *  - followUp = 排队：当前轮完全跑完后才投递
+   * 存 localStorage，跨会话不变。
+   */
+  busyBehavior: "abort" | "steer" | "followUp";
+  setBusyBehavior: (b: "abort" | "steer" | "followUp") => void;
   agentExecutionSteps: Array<{
     type: string;
     toolName?: string;
@@ -653,6 +710,8 @@ interface HelixState
   setNoActiveConversation: (v: boolean) => void;
   activeSessionWorkDir: string | null;
   setCurrentSessionId: (id: string | null) => void;
+  /** Remove all per-session sidebar/editor state for a deleted session. */
+  clearSessionSidebarState: (sessionId: string) => void;
   /**
    * 已标记失效的会话。只有 Resume 返回 SESSION_NOT_FOUND 才能写入这里
    * （判定统一走 session-resume 的 isSessionGone）——restore 失败/内部错误
@@ -685,14 +744,6 @@ interface HelixState
   removeSelectedFile: (filePath: string) => void;
   clearSelectedFiles: () => void;
   clearExecutionFlow: () => void;
-  modelUsage: Record<
-    string,
-    { prompt: number; completion: number; total: number; cost: number }
-  >;
-  addModelUsage: (
-    model: string,
-    usage: { prompt: number; completion: number; total: number; cost: number },
-  ) => void;
   contextUsage: Record<
     string,
     {
@@ -954,9 +1005,6 @@ interface HelixState
   ) => Promise<void>;
   removeExternalService: (id: string) => void;
   setExternalServiceConnected: (id: string, connected: boolean) => void;
-
-  // Actions - Artifacts
-  // (removed — unused)
 
   // Actions - Custom Shortcuts
   addCustomShortcut: (
@@ -1576,6 +1624,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   ...createCompressionRecordsSlice(set, get, store),
   ...createTerminalSlice(set, get, store),
   ...createEditorSlice(set, get, store),
+  ...createSidebarSessionSlice(set, get, store),
   ...createAgentSettingsSlice(set, get, store),
   ...createPanelSlice(set, get, store),
   ...createApiConfigSlice(set, get, store),
@@ -1764,6 +1813,35 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       delete rest[sessionId];
       return { sessionRetryNotices: rest };
     }),
+  pendingQueues: {},
+  setPendingQueue: (sessionId, q) =>
+    set((state) => {
+      if (q.steering === 0 && q.followUp === 0) {
+        const rest = { ...state.pendingQueues };
+        delete rest[sessionId];
+        return { pendingQueues: rest };
+      }
+      return {
+        pendingQueues: {
+          ...state.pendingQueues,
+          [sessionId]: q,
+        },
+      };
+    }),
+  busyBehavior:
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem("helix-busy-behavior") === "steer"
+        ? "steer"
+        : localStorage.getItem("helix-busy-behavior") === "followUp"
+          ? "followUp"
+          : "abort"
+      : "abort",
+  setBusyBehavior: (b) => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("helix-busy-behavior", b);
+    }
+    set({ busyBehavior: b });
+  },
   setStreamingDraft: (sessionId, draft) =>
     set((state) => {
       const existing = state.streamingDrafts[sessionId] || {
@@ -1803,7 +1881,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   sessionHistory: [],
   sessionHistoryIndex: -1,
   // Panel state — in slices/panel-slice.ts
-  modelUsage: {},
   contextUsage: {},
   estimatedTokens: {},
   sessionUsageStats: {
@@ -2165,13 +2242,17 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }),
   setRightSidebarOpen: (open) => set({ rightSidebarOpen: open }),
   openAgentView: (agent) =>
-    set(() => ({
-      activeAgentView: agent,
-      rightSidebarTab: "agent",
-      rightSidebarOpen: true,
-      showPreviewRail: false,
-      editorOpen: false,
-    })),
+    set((s) => {
+      const cid = s.currentSessionId ?? "__draft__";
+      return {
+        activeAgentView: agent,
+        activeAgentViewBySession: { ...s.activeAgentViewBySession, [cid]: agent },
+        rightSidebarTab: "agent",
+        rightSidebarOpen: true,
+        showPreviewRail: false,
+        editorOpen: false,
+      };
+    }),
   toggleDirectoryProject: (dir) =>
     set((s) => ({
       directoryProjectDir: s.directoryProjectDir === dir ? null : dir,
@@ -2364,7 +2445,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }
       return { sessionPendingApproval: next };
     }),
-  setStartupGreeting: (v: string) => set((s) => ({ startupGreeting: v })),
+  setStartupGreeting: (v: string) => set(() => ({ startupGreeting: v })),
 
   toggleRuntimePanel: () =>
     set((s) => ({ showRuntimePanel: !s.showRuntimePanel })),
@@ -2376,13 +2457,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // Truncate any single message's text/content to 128 KB — larger payloads
       // (e.g. a tool_result carrying a full file) can blow the heap in long
       // conversations. Keep a head + tail window so the message is still useful.
-      const msg: Record<string, any> = { ...message };
+      const msg: Omit<ChatMessage, "id" | "timestamp"> & {
+        // 截断循环按字符串 key 索引（见下），宽松索引只在函数内使用。
+        [key: string]: unknown;
+      } = { ...message };
       const truncKeys = ["content", "text", "reasoning", "html"];
       for (const k of truncKeys) {
         const v = msg[k];
         if (typeof v === "string") msg[k] = truncateString(v, 128_000);
       }
-      const newState: Record<string, any> = {
+      const newState: { chatMessages: ChatMessage[] } = {
         chatMessages: [
           ...state.chatMessages,
           {
@@ -2501,8 +2585,15 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           tasks: snapshot.tasks,
           notes: snapshot.notes,
           checkpoints: snapshot.checkpoints,
-          files: snapshot.files as any,
-          openTabs: snapshot.openTabs as any,
+          files: snapshot.files.map((n) => ({
+            id: n.id,
+            name: n.name,
+            type: n.type,
+            content: n.content,
+            language: n.language,
+            children: n.children,
+          })),
+          openTabs: snapshot.openTabs as PersistedOpenTab[],
           workDir: snapshot.activeSessionWorkDir,
         });
         useHelixStore.setState((st) => ({
@@ -2847,7 +2938,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         // 显式传目录扫描（与非运行分支一致），失败要看得见而不是静默吞掉。
         try {
           try {
-            await (getElectronAPI() as any)?.fs?.allowRoot?.(absDir);
+            await getElectronAPI()?.fs?.allowRoot?.(absDir);
           } catch {
             /* best-effort */
           }
@@ -2892,7 +2983,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // 文件树扫描降级为尽力而为：scanTree 不可用时不影响工作目录切换。
       try {
         try {
-          await (getElectronAPI() as any)?.fs?.allowRoot?.(absDir);
+          await getElectronAPI()?.fs?.allowRoot?.(absDir);
         } catch {
           /* best-effort */
         }
@@ -2908,26 +2999,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   },
   clearExecutionFlow: () =>
     set({ agentExecutionSteps: [], accessedDirectories: [] }),
-  addModelUsage: (model, usage) =>
-    set((state) => {
-      const existing = state.modelUsage[model] || {
-        prompt: 0,
-        completion: 0,
-        total: 0,
-        cost: 0,
-      };
-      return {
-        modelUsage: {
-          ...state.modelUsage,
-          [model]: {
-            prompt: existing.prompt + usage.prompt,
-            completion: existing.completion + usage.completion,
-            total: existing.total + usage.total,
-            cost: existing.cost + usage.cost,
-          },
-        },
-      };
-    }),
   setContextUsage: (
     sessionId,
     size,
@@ -3142,7 +3213,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           ...(hadDraftTier ? { pendingPermissionTier } : {}),
           // 新建对话：把离开的那条会话停在哪一面记下来（切回去时原地恢复），
           // 当前这一面保持原样——原来新建对话就不收起侧栏。
-          ...swapRightSidebarTab(state, null),
+          ...mergeSwaps(state, null),
         };
       }
       // Skip if clicking the same session that's already loaded
@@ -3163,7 +3234,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         return {
           currentSessionId: id,
           planModeBySession,
-          ...swapRightSidebarTab(state, id),
+          ...mergeSwaps(state, id),
         };
       }
       // Remove any forward history when navigating to a new session
@@ -3176,7 +3247,33 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         sessionHistory: newHistory,
         sessionHistoryIndex: newHistory.length - 1,
         planModeBySession,
-        ...swapRightSidebarTab(state, id),
+        ...mergeSwaps(state, id),
+      };
+    }),
+  clearSessionSidebarState: (sessionId) =>
+    set((s) => {
+      // Clean up per-session sidebar pages, active page, and agent view
+      const pages = { ...s.rightSidebarPagesBySession };
+      delete pages[sessionId];
+      const pageIds = { ...s.activePageIdBySession };
+      delete pageIds[sessionId];
+      const agentViews = { ...s.activeAgentViewBySession };
+      delete agentViews[sessionId];
+      // Clean up per-session editor tabs and active tab
+      const editorTabs = { ...s.editorTabsBySession };
+      delete editorTabs[sessionId];
+      const activeEditorTabIds = { ...s.activeEditorTabIdBySession };
+      delete activeEditorTabIds[sessionId];
+      // Clean up rightSidebarTab
+      const tabBySession = { ...s.rightSidebarTabBySession };
+      delete tabBySession[sessionId];
+      return {
+        rightSidebarPagesBySession: pages,
+        activePageIdBySession: pageIds,
+        activeAgentViewBySession: agentViews,
+        editorTabsBySession: editorTabs,
+        activeEditorTabIdBySession: activeEditorTabIds,
+        rightSidebarTabBySession: tabBySession,
       };
     }),
   navigateSession: async (direction, targetId) => {
@@ -3950,8 +4047,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   bumpRemoteStatusVersion: () =>
     set((state) => ({ remoteStatusVersion: state.remoteStatusVersion + 1 })),
 
-  // Actions - Webhooks/Artifacts — removed (unused features)
-
   // Actions - Custom Shortcuts
   addCustomShortcut: (id, shortcut) =>
     set((state) => ({
@@ -3971,8 +4066,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         customizedShortcutIds: customizedIds,
       };
     }),
-
-  // Actions - Webhooks/Artifacts — removed (unused features)
 
   // API Config — in slices/api-config-slice.ts
 
@@ -4268,10 +4361,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // 注入「当前打开的会话」取数钩子：saveSession 据此给 lastViewedAt 盖章，
       // 自动归档拿它判「结果有没有人看过」。不注入时退化成不盖章（少归档），不写坏数据。
       setPersistCurrentSessionGetter(() => get().currentSessionId);
-      const sessionId = "current-session";
 
-      // MCP config is now managed by Helix
-      const fileMcpConfig: Record<string, any> = {};
+      // MCP 配置现在由 Helix 后端管理，这里留空对象只为兼容下面的合并写法。
+      const fileMcpConfig: Record<string, McpServerConfig> = {};
 
       // 本次恢复里读失败的设置键名：只用来区分「读失败」和「真的没数据」。
       const failedLoads = new Set<string>();
@@ -4308,7 +4400,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // Try loading the latest saved session first (full state)
       const sessions =
         (await safeLoad(persistence.loadSessions(), "sessions")) || [];
-      const archivedSessions = sessions.filter((s) => s.isArchived);
       const latestSession =
         sessions.filter((s) => !s.isArchived).length > 0
           ? sessions
@@ -4318,11 +4409,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
       // Load individual pieces for settings and non-session state
       const [
-        memories,
         tasks,
         checkpoints,
         notes,
-        chatMessages,
         goal,
         apiConfig,
         apiHistory,
@@ -4366,20 +4455,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         activeProviderId,
         savedSessionHistory,
         savedSessionHistoryIndex,
-        savedSelectedWorkDir,
         contextUsage,
         externalServices,
         compressionRecordsBySession,
         tabAttachments,
       ] = await Promise.all([
-        safeLoad(persistence.loadMemories(), "memories"),
         safeLoad(persistence.loadTasks(), "tasks"),
         safeLoad(persistence.loadCheckpoints(), "checkpoints"),
         safeLoad(persistence.loadNotes(), "notes"),
-        safeLoad(
-          persistence.loadChatMessagesBySession(sessionId),
-          "chatMessages",
-        ),
         safeLoad(persistence.loadSetting<string | null>("goal"), "goal"),
         safeLoad(persistence.loadSetting<ApiConfig>("apiConfig"), "apiConfig"),
         safeLoad(
@@ -4420,7 +4503,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           "dailyUsage",
         ),
         safeLoad(
-          persistence.loadSetting<any[]>("scheduledTasks"),
+          persistence.loadSetting<unknown[]>("scheduledTasks"),
           "scheduledTasks",
         ),
         safeLoad(
@@ -4548,10 +4631,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(
           persistence.loadSetting<number>("sessionHistoryIndex"),
           "sessionHistoryIndex",
-        ),
-        safeLoad(
-          persistence.loadSetting<string | null>("selectedWorkDir"),
-          "selectedWorkDir",
         ),
         safeLoad(
           persistence.loadSetting<{ size: number; used: number } | null>(
@@ -4984,7 +5063,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         // 没选项目时默认使用 Helix sessions 目录；恢复会话时跟随会话自己的目录。
         selectedWorkDir: latestSession?.workDir ?? defaultSessionsDir,
         apiConfig: (() => {
-          const resolve = (cfg: any) => {
+          const resolve = (cfg: Partial<ApiConfig> | null | undefined) => {
             // Validation gate: reject stale/bad profiles so a poisoned IndexedDB
             // entry can never re-enter the store and get pushed to Helix.
             if (!cfg || !cfg.baseUrl) {
@@ -5195,7 +5274,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         autoArchiveOldTasks: autoArchiveOldTasks ?? get().autoArchiveOldTasks,
         autoArchiveRetentionDays:
           autoArchiveRetentionDays ?? get().autoArchiveRetentionDays,
-        reasoningEffort: (reasoningEffort as any) || get().reasoningEffort,
+        reasoningEffort:
+          (reasoningEffort as ReasoningEffortLevel | undefined) ||
+          get().reasoningEffort,
         personality: personality || get().personality,
         fastMode: fastMode ?? get().fastMode,
         terminalShell:
@@ -5547,5 +5628,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
 // TEMP DEBUG: expose store for runtime diagnosis (remove after debugging)
 if (typeof window !== "undefined") {
-  (window as any).__helixStore = useHelixStore;
+  (window as Window & { __helixStore?: typeof useHelixStore }).__helixStore =
+    useHelixStore;
 }
