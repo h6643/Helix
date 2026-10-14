@@ -464,18 +464,30 @@ export function RightSidebar() {
     else doRetract();
   };
 
-  // When the last open file is closed while a browser/diff page was the active
-  // view, fall back to another page so we don't render a blank panel. (Retracting
-  // the whole sidebar when everything is closed is handled separately below.)
+  // 关掉最后一个文件后，若还留着其它面板页（尤其「更改」），退位过去。
+  // 只挪内容（activePageId）不够：`openChange` 打开文件时把 tab 切到了
+  // "code"，关完最后一个文件后 tab 仍停在已消失的 code 面（editorTabs 空
+  // → code chip 已从 panelKinds 消失），而旧版这里只 setActivePageId(pages[0])
+  // 不同步 tab → chips 高亮与实际内容对不上、pages[0] 也不一定是 diff，表现为
+  // 「标签里还有更改但不跳过去，只显示一个空的右侧边栏」。这里把 activePageId
+  // 与 tab 一起退位到真正落地的那一面，优先「更改」（动线就是 更改→开文件→关
+  // 文件→应回到更改）。只在当前确实无激活页（activePageId 指向不存在的页 =
+  // code 空面）时才动，不干扰用户主动浏览其他页。关光所有面后由下方 retract
+  // effect 接手。
   useEffect(() => {
-    if (
-      editorTabs.length === 0 &&
-      pages.length > 0 &&
-      !pages.some((p) => p.id === activePageId)
-    ) {
-      setActivePageId(pages[0].id);
-    }
-  }, [editorTabs.length, pages, activePageId, setActivePageId]);
+    if (editorTabs.length > 0 || pages.length === 0) return;
+    if (pages.some((p) => p.id === activePageId)) return; // 已落在真实页上，不动
+    // 只在还有「真实面」时退位；只剩「更多(more)」这一伪页时不退位（more 不在
+    // panelKinds 的 chip 里，退过去反而落在一个不渲染的面），收起交给下方
+    // retract effect。
+    const landed =
+      pages.find((p) => p.kind === "diff") ??
+      pages.find((p) => p.kind !== "more");
+    if (!landed) return;
+    activePageIdRef.current = landed.id;
+    setActivePageId(landed.id);
+    setTab(landed.kind);
+  }, [editorTabs.length, pages, activePageId, setActivePageId, setTab]);
 
   // Track whether the panel has EVER shown content in this session. We use this
   // to distinguish "the user closed the last tab" (→ retract) from "the code view
