@@ -268,13 +268,6 @@ export function BootOverlay() {
       >
         <X className="size-4" />
       </button>
-
-      {/* 底部标识 */}
-      <div className="absolute bottom-7 left-0 right-0 z-10 text-center">
-        <span className="text-[11px] tracking-[0.4em] text-foreground/30 font-medium uppercase">
-          Helix Agent Runtime
-        </span>
-      </div>
     </div>
   );
 }

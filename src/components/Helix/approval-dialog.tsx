@@ -117,8 +117,8 @@ function ApprovalBar({
         <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
           {getApprovalTitle(request.toolName)}
           {typeof pendingCount === "number" && pendingCount > 1 && (
-            <span className="ml-2 text-[calc(var(--helix-transcript-size)*0.7857)] font-normal text-foreground/50">
-              还有 {pendingCount - 1} 个待确认
+            <span className="ml-2 text-[calc(var(--helix-transcript-size)*0.7857)] font-normal text-foreground/50 tabular-nums">
+              1/{pendingCount}
             </span>
           )}
         </h3>
@@ -229,6 +229,11 @@ interface ClarifyBarProps {
   onRespond: (requestId: string, answer: string) => void;
   /** 审批卡「本会话始终允许」：父组件代答 Approve (session)，放行表归扩展所有。 */
   onApproveAlways?: (requestId: string) => void;
+  /**
+   * 本对话名下还在排队的反问/审批卡总数（含当前这张）。>1 时标题旁显示
+   * `1/n` —— 与 ApprovalBar 同款口径：一次只出队最旧一条，n 是含当前的剩余数。
+   */
+  pendingCount?: number;
 }
 
 /** 统一的选项行：普通 clarify 是 choices 原文；审批卡是 once/always/reject。 */
@@ -243,6 +248,7 @@ export function ClarifyBar({
   request,
   onRespond,
   onApproveAlways,
+  pendingCount,
 }: ClarifyBarProps) {
   const [freeText, setFreeText] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -358,6 +364,11 @@ export function ClarifyBar({
         <div className="flex items-center justify-between gap-3 mb-2">
           <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
             需要你的确认
+            {typeof pendingCount === "number" && pendingCount > 1 && (
+              <span className="ml-2 text-[calc(var(--helix-transcript-size)*0.7857)] font-normal text-foreground/50 tabular-nums">
+                1/{pendingCount}
+              </span>
+            )}
           </h3>
           <div className="flex items-center gap-2 shrink-0">
             {countdown !== null && (

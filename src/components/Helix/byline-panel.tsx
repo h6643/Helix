@@ -741,9 +741,9 @@ export function BylinePanel() {
                       type="button"
                       onClick={stopByline}
                       data-tip="停止"
-                      className="flex items-center gap-1.5 px-2.5 h-8 rounded-xl transition-all duration-200 flex items-center justify-center text-foreground border border-border/60 bg-muted/40 hover:bg-muted/70"
+                      className="flex items-center gap-1.5 px-2.5 h-8 rounded-xl ui-text-sm2 transition-colors duration-150 bg-muted/40 text-muted-foreground hover:text-foreground hover:bg-muted/60"
                     >
-                      <Square className="size-3.5 text-foreground fill-foreground shrink-0" />
+                      <Square className="size-3.5 shrink-0 fill-current" />
                     </button>
                   ) : (
                     <button
@@ -751,7 +751,7 @@ export function BylinePanel() {
                       onClick={handleSend}
                       disabled={!draft.trim()}
                       data-tip="发送"
-                      className="flex items-center gap-1.5 px-2.5 h-8 rounded-xl transition-all duration-200 flex items-center justify-center border border-border/60 bg-muted/40 hover:bg-muted/70 text-foreground/40 disabled:opacity-40"
+                      className="flex items-center gap-1.5 px-2.5 h-8 rounded-xl ui-text-sm2 transition-colors duration-150 bg-muted/40 text-muted-foreground hover:text-foreground hover:bg-muted/60"
                     >
                       <ArrowUp className="size-3.5 shrink-0" />
                     </button>

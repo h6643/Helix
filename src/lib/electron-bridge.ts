@@ -96,6 +96,16 @@ export const electronFS = {
     throw new Error("File system not available in browser mode");
   },
 
+  /** 按字节读文件 → base64。侧栏预览 PPT/DOCX/PDF/图片/音视频走这条
+   *  （`fs.readFile` 是 read_to_string，OOXML zip 与媒体文件会直接报错）。 */
+  async readBinary(filePath: string): Promise<string> {
+    const api = getElectronAPI();
+    if (api) {
+      return api.fs.readBinary(filePath);
+    }
+    throw new Error("File system not available in browser mode");
+  },
+
   async writeFile(filePath: string, content: string): Promise<void> {
     const api = getElectronAPI();
     if (api) {
@@ -556,9 +566,10 @@ export const electronGit = {
 
   async diffHead(
     filePath?: string,
+    context?: number,
   ): Promise<{ ok: boolean; diff?: string; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.diffHead(filePath);
+    if (api?.git) return api.git.diffHead(filePath, context);
     return { ok: false, error: "Git not available in browser mode" };
   },
 

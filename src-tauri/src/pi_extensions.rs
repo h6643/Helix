@@ -25,7 +25,10 @@ use crate::paths::pi_agent_dir;
 const EXT_DIR_NAME: &str = "pi-aux-vision";
 
 /// `include_str!` 让扩展源随二进制编译进包：dev 和打包后都能写出，不依赖资源路径。
-const AUX_VISION_FILES: [(&str, &str); 8] = [
+/// 不含 footer.ts / footer-controller.ts —— Helix 分支已删除 TUI footer 展示（describe_image
+/// 工具本身通过工具调用卡片自述所用模型，footer 冗余且会话内无法清除）。
+/// 不含 test-image.ts —— `/vision test` 不再造默认测试图，只接受显式路径（见 index.ts）。
+const AUX_VISION_FILES: [(&str, &str); 5] = [
     (
         "index.ts",
         include_str!("../vendor/pi-aux-vision/index.ts"),
@@ -37,15 +40,6 @@ const AUX_VISION_FILES: [(&str, &str); 8] = [
     (
         "vision.ts",
         include_str!("../vendor/pi-aux-vision/vision.ts"),
-    ),
-    ("footer.ts", include_str!("../vendor/pi-aux-vision/footer.ts")),
-    (
-        "footer-controller.ts",
-        include_str!("../vendor/pi-aux-vision/footer-controller.ts"),
-    ),
-    (
-        "test-image.ts",
-        include_str!("../vendor/pi-aux-vision/test-image.ts"),
     ),
     (
         "package.json",

@@ -155,6 +155,8 @@ function buildTauriAPI(): ElectronAPI {
   // ── fs ──────────────────────────────────────────────────────────────────
   api.fs = {
     read: (filePath: string) => invoke("read", { filePath }),
+    // 二进制预览通道（侧栏 PPT/DOCX/PDF/图片/音视频）
+    readBinary: (filePath: string) => invoke("read_binary", { filePath }),
     write: (filePath: string, content: string) =>
       invoke("write", { filePath, content }),
     edit: (filePath: string, oldString: string, newString: string) =>
@@ -174,6 +176,10 @@ function buildTauriAPI(): ElectronAPI {
       invoke("snapshot_save", { runId, sessionId, files }),
     snapshotRestore: (runId: string) => invoke("snapshot_restore", { runId }),
     snapshotDiscard: (runId: string) => invoke("snapshot_discard", { runId }),
+    // 本机 PowerPoint COM 逐页导出 PNG（侧栏 PPTX 原生渲染）。非 Windows /
+    // 没装 Office / 导出失败会 reject，调用方必须降级而不是让它抛到界面。
+    exportSlidesPng: (filePath: string) =>
+      invoke<{ slides: string[] }>("export_slides_png", { filePath }),
   };
 
   // ── helixSkills ────────────────────────────────────────────────────────
@@ -185,6 +191,8 @@ function buildTauriAPI(): ElectronAPI {
     listSkills: () => invoke("helix_list_skills"),
     setSkillModelInvocation: (skillPath: string, enabled: boolean) =>
       invoke("helix_set_skill_model_invocation", { skillDir: skillPath, enabled }),
+    setSkillEnabled: (skillPath: string, enabled: boolean) =>
+      invoke("helix_set_skill_enabled", { skillDir: skillPath, enabled }),
   };
 
   // ── shell ───────────────────────────────────────────────────────────────
@@ -469,8 +477,11 @@ function buildTauriAPI(): ElectronAPI {
       invoke("status", { targetCwd: cwd ?? null }),
     diff: (filePath?: string, staged?: boolean) =>
       invoke("diff", { filePath: filePath ?? null, staged: staged ?? null }),
-    diffHead: (filePath?: string) =>
-      invoke("diff_head", { filePath: filePath ?? null }),
+    diffHead: (filePath?: string, context?: number) =>
+      invoke("diff_head", {
+        filePath: filePath ?? null,
+        context: context ?? null,
+      }),
     diffNumstat: (cwd?: string | null) =>
       invoke("diff_numstat", { targetCwd: cwd ?? null }),
     diffNumstatFull: (cwd?: string | null) =>

@@ -93,6 +93,32 @@ pub fn read(state: State<'_, Arc<AppState>>, file_path: String) -> Result<String
     std::fs::read_to_string(&resolved).map_err(|e| e.to_string())
 }
 
+/// 读二进制文件为 base64 —— 侧栏文档预览（PPT/DOCX/XLSX/PDF/图片/音视频）要用。
+/// `fs:read` 是 `read_to_string`：OOXML 这类 zip 容器读到非 UTF-8 就报错，
+/// 图片/音视频同理，所以预览必须有一条按字节读的通道。
+///
+/// 安全边界与 `fs:read` 完全一致（`safe_path` 的根校验），只是返回值从文本换成
+/// base64：调用方按扩展名自己判 MIME，不信任文件内容猜测。体积上限 32MB ——
+/// 侧栏预览会一次性把整个 base64 塞进 DOM（图片 src / video src），再大就先卡渲染。
+#[tauri::command]
+pub fn read_binary(state: State<'_, Arc<AppState>>, file_path: String) -> Result<String, String> {
+    use base64::Engine;
+    const MAX_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
+    let resolved = safe_path(&state, &file_path).ok_or_else(outside_err)?;
+    let m = std::fs::metadata(&resolved).map_err(|e| e.to_string())?;
+    if !m.is_file() {
+        return Err("不是文件".to_string());
+    }
+    if m.len() > MAX_PREVIEW_BYTES {
+        return Err(format!(
+            "文件 {:.1} MB，超过 32 MB 预览上限",
+            m.len() as f64 / 1_048_576.0
+        ));
+    }
+    let bytes = std::fs::read(&resolved).map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
 #[tauri::command]
 pub fn write(
     state: State<'_, Arc<AppState>>,

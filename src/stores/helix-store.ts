@@ -393,6 +393,14 @@ interface HelixState
   // every click opens a NEW browser tab instead of reusing the existing one.
   browserAddSeq: number;
   requestAddBrowserPage: () => void;
+  /** 「更改」面板的「提交或推送」按钮：递增请求打开右上角统一工作面板
+   *  （workPanelOpen 是 helix-layout 的局部 state，只能靠信号递进去）。 */
+  workPanelOpenSeq: number;
+  requestWorkPanelOpen: () => void;
+
+  // 文档预览（侧栏 PPT/DOCX/XLSX/PDF/图片/音视频）：文件树点开这类文件时调用。
+  // 与文本文件同属「文件」面 —— 建一条 doc 编辑器页签，不另起一面。
+  openDocument: (path: string) => void;
 
   // 浏览器工具栏「截图」拍好的 PNG，等聊天面板收件。拍照的一方在右侧栏，收图的一方
   // 在聊天面板（`pendingImages` 的所有权在它那儿 —— 粘贴、拖拽写的都是那份 state），
@@ -637,6 +645,8 @@ interface HelixState
   >;
   pendingUpdate: string | null;
   setPendingUpdate: (version: string | null) => void;
+  pendingAppUpdate: string | null;
+  setPendingAppUpdate: (version: string | null) => void;
   setTabInput: (sessionId: string, text: string) => void;
   clearTabInput: (sessionId: string) => void;
   setTabAttachments: (
@@ -1696,6 +1706,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   streamingDrafts: {},
   tabInputs: {} as Record<string, string>,
   pendingUpdate: null as string | null,
+  pendingAppUpdate: null as string | null,
   setTabInput: (sessionId: string, text: string) =>
     set((state) => ({
       tabInputs: { ...state.tabInputs, [sessionId]: text },
@@ -1796,6 +1807,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       return { tabAttachments: rest };
     }),
   setPendingUpdate: (version) => set({ pendingUpdate: version }),
+  setPendingAppUpdate: (version) => set({ pendingAppUpdate: version }),
   connectionNotice: null,
   setConnectionNotice: (notice) => set({ connectionNotice: notice }),
   sessionRetryNotices: {},
@@ -1936,6 +1948,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   browserHandoff: null as BrowserHandoff | null,
   setBrowserHandoff: (h) => set({ browserHandoff: h }),
   browserAddSeq: 0,
+  workPanelOpenSeq: 0,
   composerImageRequest: null as { dataUrl: string; name: string } | null,
   requestComposerImage: (req) => set({ composerImageRequest: req }),
   clearComposerImageRequest: () => set({ composerImageRequest: null }),
@@ -2222,6 +2235,15 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       editorOpen: false,
       browserAddSeq: s.browserAddSeq + 1,
     })),
+  requestWorkPanelOpen: () =>
+    set((s) => ({ workPanelOpenSeq: s.workPanelOpenSeq + 1 })),
+  // 打开文档预览：与文本文件同属「文件」面，建/激活一条 doc 编辑器页签。
+  // 同一文件重复点击 = 定位（ensureEditorTab 命中已有页签只激活）。
+  openDocument: (path) => {
+    const name = path.split(/[/\\]/).pop() || path;
+    get().ensureEditorTab(path, name, true);
+    set(() => ({ ...rightSidebarTabEffects("code"), rightSidebarOpen: true }));
+  },
   bumpGitChangeRevision: () =>
     set((s) => ({ gitChangeRevision: s.gitChangeRevision + 1 })),
   setBrowserHomeUrl: (url: string) => {

@@ -10,13 +10,7 @@
  *
  * 主对话专属的交互（搜索高亮）通过 props 传 boolean；旁路面板传全 false 即可。
  */
-import {
-  Check,
-  Copy,
-  GitFork,
-  FileText,
-  Undo2,
-} from "lucide-react";
+import { Check, Copy, GitFork, FileText, Pencil } from "lucide-react";
 import React from "react";
 import { useState, useMemo, useEffect } from "react";
 import { FileChangeSummary } from "./file-change-summary";
@@ -34,17 +28,15 @@ import {
   segmentizeProcessBlocks,
   thinkingSegmentDurationS,
 } from "./transcript-utils";
-import { formatDurationSeconds, formatTokens } from "@/lib/format";
+import { formatDurationSeconds } from "@/lib/format";
+import { copyImage, copyTextAndImages } from "@/lib/image-utils";
 import {
   normalizeAcpContent,
   normalizeAcpContentRaw,
   extractKaomojiStatus,
 } from "@/lib/text-utils";
 import { formatMergedSummary, isSubAgentTool } from "@/lib/tool-merge";
-import {
-  type ChatMessage,
-  type ExecutionStep,
-} from "@/stores/helix-types";
+import { type ChatMessage, type ExecutionStep } from "@/stores/helix-types";
 
 const ThinkGlyph = ({ active = false }: { active?: boolean }) => (
   <span
@@ -146,7 +138,10 @@ export const ThinkingFold = React.memo(function ThinkingFold({
                 : "思考"}
         </span>
         {active && summary && (
-          <span className="text-foreground/30 truncate max-w-[60%]" style={{ fontSize }}>
+          <span
+            className="text-foreground/30 truncate max-w-[60%]"
+            style={{ fontSize }}
+          >
             {summary}
           </span>
         )}
@@ -362,9 +357,13 @@ export const FoldTitle = ({
 
 function CopyButton({
   text,
+  images,
   className = "",
 }: {
   text: string;
+  /** 消息里附带的图片（data URL）。传了就会跟文字一起写进剪贴板，
+   *  粘到微信/Word/邮件这类吃富文本的目标时图文同现。 */
+  images?: string[];
   className?: string;
 }) {
   const [copied, setCopied] = useState(false);
@@ -383,12 +382,26 @@ function CopyButton({
           .replace(/\[(.+?)\]\(.+?\)/g, "$1")
           .replace(/^---+$/gm, "")
           .trim();
+        const done = () => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        };
+        // 有图片时走富文本通道（text/plain + text/html 内联 <img>）；
+        // 编码/写入失败再退回原来的纯文字路径，至少不把复制整个弄坏。
+        if (images && images.length > 0) {
+          copyTextAndImages(cleanText, images)
+            .then(done)
+            .catch(() => {
+              navigator.clipboard
+                .writeText(cleanText)
+                .then(done)
+                .catch(() => {});
+            });
+          return;
+        }
         navigator.clipboard
           .writeText(cleanText)
-          .then(() => {
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          })
+          .then(done)
           .catch(() => {});
       }}
       className={`p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors ${className}`}
@@ -396,6 +409,51 @@ function CopyButton({
     >
       {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
     </button>
+  );
+}
+
+/**
+ * 消息里的一张图 + 悬停「复制图片」。
+ *
+ * 为什么要自带这个按钮：Helix 把全局 contextmenu 给 `preventDefault()` 掉了
+ * （见 context-menu.tsx 的 ContextMenuProvider），WebView 自带的右键「复制图片」
+ * 也就跟着没了，而转录区的复制按钮只能拿到文字。这里直接写 `image/png` 到
+ * 剪贴板（不是 data URL 文本），粘到微信/画图/聊天框才是一张真实的图。
+ */
+function MessageImage({ dataUrl, name }: { dataUrl: string; name?: string }) {
+  const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
+  return (
+    <div className="relative group/img">
+      <img
+        src={dataUrl}
+        alt={name || "pasted image"}
+        className="rounded-lg max-h-[300px] max-w-full object-contain"
+      />
+      <button
+        onClick={() => {
+          copyImage(dataUrl)
+            .then(() => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            })
+            .catch(() => {
+              setFailed(true);
+              setTimeout(() => setFailed(false), 1500);
+            });
+        }}
+        className="absolute top-1.5 right-1.5 p-1.5 rounded-md bg-background/80 backdrop-blur border border-border/40 text-foreground/70 hover:text-foreground opacity-0 group-hover/img:opacity-100 transition-opacity"
+        data-tip={failed ? "复制失败" : "复制图片"}
+      >
+        {copied ? (
+          <Check className="size-3.5" />
+        ) : failed ? (
+          <Copy className="size-3.5 text-destructive" />
+        ) : (
+          <Copy className="size-3.5" />
+        )}
+      </button>
+    </div>
   );
 }
 
@@ -449,7 +507,7 @@ export function HighlightText({
 
 /**
  * 单条消息行（与主对话逐字同源）：
- *  - user：右对齐、圆角描边框（无背景填充）、图片/文件附件、复制/撤回按钮
+ *  - user：右对齐、圆角描边框（无背景填充）、图片/文件附件、复制/编辑按钮
  *  - assistant：左对齐全宽，过程折叠卡（已完成 → 思考 / N 个操作）+ 总结正文
  *    （HelixMarkdown）；有 blocks 走折叠卡路径，无 blocks 直接渲染整段 md
  *  - 搜索高亮（searchOpen）由调用方传 boolean，旁路面板传全 false
@@ -462,7 +520,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
   isSearchMatch = false,
   isSearchActive = false,
   onFork,
-  onUndo,
+  onEdit,
 }: {
   msg: ChatMessage;
   fontSize: number;
@@ -471,7 +529,8 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
   isSearchMatch?: boolean;
   isSearchActive?: boolean;
   onFork?: (_id: string) => void;
-  onUndo?: () => void;
+  /** 编辑这条用户消息（撤回该轮并把原文回填输入框），仅模型尚未回复时提供。 */
+  onEdit?: () => void;
 }) {
   const content = useMemo(
     () => normalizeAcpContent(msg.content),
@@ -487,15 +546,6 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
   );
   const messageDuration = msg.duration ?? msg.thinkingTime;
   const isStreaming = msg.isStreaming === true;
-  // 本轮 token 用量（网关 usage:prompt-complete 的 final 事件按轮累加而来）：
-  // totalTokens = input + output + 缓存命中 + 缓存写入，即真实计费量；
-  // outputTokens 是其中模型实际生成的部分。网关未上报 usage 时为 0 → 不渲染。
-  const totalTokens = msg.totalTokens ?? 0;
-  const outputTokens = msg.outputTokens ?? 0;
-  const tokenTip =
-    totalTokens > 0
-      ? `本轮 token：${totalTokens.toLocaleString()}（模型生成 ${outputTokens.toLocaleString()}）`
-      : "";
   return (
     <div
       data-message-id={msg.id}
@@ -573,8 +623,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                 // 会让思考卡一直冒充「思考中」。
                 const lastProcessBlock =
                   processBlocks[processBlocks.length - 1];
-                const thinkingActiveNow =
-                  lastProcessBlock?.type === "thinking";
+                const thinkingActiveNow = lastProcessBlock?.type === "thinking";
                 // 本轮总耗时：运行中由流式区顶部的「工作中 Ns」实时显示，完成后
                 // 这张卡不再常驻数字（一排历史轮次各挂一个耗时只是噪声），鼠标
                 // 移到卡上时才浮现。
@@ -711,10 +760,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                                       {toolBlocks
                                         .filter(
                                           (tb) =>
-                                            !(
-                                              tb.steps ??
-                                              []
-                                            ).every(
+                                            !(tb.steps ?? []).every(
                                               (s) =>
                                                 s.type !== "tool_call" ||
                                                 isSubAgentTool(s.toolName),
@@ -761,10 +807,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                           }
                           if (b.type === "file_change") {
                             return (
-                              <FileChangeSummary
-                                key={i}
-                                changes={b.changes}
-                              />
+                              <FileChangeSummary key={i} changes={b.changes} />
                             );
                           }
                           return null;
@@ -796,7 +839,9 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                                   content={c}
                                   fontSize={fontSize}
                                   active={
-                                    isStreaming && thinkingActiveNow && isLastTrail
+                                    isStreaming &&
+                                    thinkingActiveNow &&
+                                    isLastTrail
                                   }
                                   streaming={isStreaming && isLastTrail}
                                   durationS={thinkingSegmentDurationS(
@@ -988,18 +1033,6 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                 </button>
               )}
             </div>
-            {/* 本轮 token 用量：常驻显示。与「已完成」折叠卡里的耗时正相反——
-                耗时在长历史里只是噪声所以 hover 才浮现；token 是用户点名的成本
-                数字所以常驻，但字号与对比都压到最低，完整数值留给悬停。 */}
-            {!isStreaming && totalTokens > 0 && (
-              <div
-                className="flex items-center gap-1 px-1 pt-0.5 tabular-nums text-muted-foreground/40"
-                style={{ fontSize: "calc(var(--helix-transcript-size)*0.7143)" }}
-                data-tip={tokenTip}
-              >
-                <span>{formatTokens(totalTokens)} tokens</span>
-              </div>
-            )}
           </div>
         </div>
       ) : (
@@ -1008,11 +1041,10 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
             {msg.images && msg.images.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-2">
                 {msg.images.map((img) => (
-                  <img
+                  <MessageImage
                     key={img.id}
-                    src={img.dataUrl}
-                    alt={img.name || "pasted image"}
-                    className="rounded-lg max-h-[300px] max-w-full object-contain"
+                    dataUrl={img.dataUrl}
+                    name={img.name}
                   />
                 ))}
               </div>
@@ -1056,23 +1088,33 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                     />
                   </div>
                 ) : (
-                  <div className="whitespace-pre-wrap break-words">{content}</div>
+                  <div className="whitespace-pre-wrap break-words">
+                    {content}
+                  </div>
                 )}
               </div>
             )}
           </div>
           {/* Action buttons below user message */}
           <div className="flex justify-end items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
-            {onUndo && (
+            {onEdit && (
               <button
-                onClick={() => onUndo()}
-                className="p-1 rounded-lg text-muted-foreground/40 hover:text-amber-500 hover:bg-amber-500/10 transition-colors"
-                data-tip="撤回本轮对话"
+                onClick={() => onEdit()}
+                className="p-1 rounded-lg text-muted-foreground/40 hover:text-blue-500 hover:bg-blue-500/10 transition-colors"
+                data-tip="编辑消息"
               >
-                <Undo2 className="size-3" />
+                <Pencil className="size-3" />
               </button>
             )}
-            <CopyButton text={content} />
+            <CopyButton
+              text={content}
+              images={[
+                ...(msg.images?.map((i) => i.dataUrl) ?? []),
+                ...(msg.files
+                  ?.filter((f) => f.kind === "image" && f.dataUrl)
+                  .map((f) => f.dataUrl as string) ?? []),
+              ]}
+            />
           </div>
         </div>
       )}

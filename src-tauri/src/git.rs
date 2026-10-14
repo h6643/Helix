@@ -108,8 +108,17 @@ pub fn diff(
 }
 
 #[tauri::command]
-pub fn diff_head(state: State<'_, Arc<AppState>>, file_path: Option<String>) -> Value {
+pub fn diff_head(
+    state: State<'_, Arc<AppState>>,
+    file_path: Option<String>,
+    context: Option<u32>,
+) -> Value {
     let mut args: Vec<String> = vec!["diff".to_string(), "HEAD".to_string()];
+    // context：「更改」面板要一次拿全文件上下文，自己折叠「N 行未改动」并支持
+    // 点开（git 默认只给 3 行，缺口两端的内容不在 diff 文本里就展不开）。
+    if let Some(n) = context {
+        args.push(format!("-U{}", n.clamp(3, 100000)));
+    }
     if let Some(fp) = file_path {
         args.push("--".to_string());
         args.push(fp);

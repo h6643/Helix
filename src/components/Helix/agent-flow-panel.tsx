@@ -95,13 +95,14 @@ import {
   helixApi,
   sendRpc,
 } from "@/lib/electron-bridge";
-import { generateId, formatTokens } from "@/lib/format";
+import { generateId } from "@/lib/format";
 import {
   processClipboardImage,
   canAddMoreImages,
   dataUrlToBlob,
   blobToDataUrl,
   compressImage,
+  extractImageDataUrls,
 } from "@/lib/image-utils";
 import { debug, traceCard } from "@/lib/logger";
 import { buildAcpMcpServers } from "@/lib/mcp";
@@ -1614,6 +1615,11 @@ export function AgentFlowPanel() {
   ).length;
   const clarifyRequest =
     clarifyQueue.find((c) => isPendingHere(c.sessionId)) || null;
+  // 与 pendingApprovalCount 同口径：本对话名下（含旁路）还排队的反问卡总数，
+  // 含队首这张 —— ClarifyBar 标题旁的 `1/n` 直接用它。
+  const pendingClarifyCount = clarifyQueue.filter((c) =>
+    isPendingHere(c.sessionId),
+  ).length;
   // 「卡片在队列里、但这个视图看不见」落盘。归属判错时卡片会一直躺着没人点，而
   // pi 那边挂满 approvalTimeoutSec 自己 fail-closed 拒掉工具 —— 网关日志只剩
   // 「转发了、没人答」，分不清是挂给了别的对话、还是被清空。每个 id 只报一次。
@@ -2230,6 +2236,38 @@ export function AgentFlowPanel() {
     currentSessionId,
     liveStateOwnerRef,
   ]);
+
+  // 模型是否已开始回复（已有可见产出）。编辑按钮用这个做门禁，而不是直接用
+  // streamingActive：run 刚起来、还没吐出任何内容时"开始回复"还不成立——那正是
+  // 用户改错字的窗口；一旦有正文/思考/工具调用，继续编辑就得先停一轮，而停一轮
+  // 会把已流出的部分内容合成一条 assistant 消息（见 abort listener 的 hasPartial
+  // 分支）落在截断点之后变成孤儿回复。所以有产出时干脆不给编辑。
+  const assistantStarted = !!(
+    streamingActive &&
+    (displayResponseBlocks.length > 0 ||
+      displayStreamThinking ||
+      (streamingDrafts[currentSessionId || ""]?.steps ?? []).length > 0 ||
+      streamingDrafts[currentSessionId || ""]?.textBuffer ||
+      streamingDrafts[currentSessionId || ""]?.thoughtBuffer)
+  );
+
+  // 「编辑」按钮挂在最后一条**尚未回复**的用户消息上：从末尾往前扫，先碰到用户
+  // 消息就是它，先碰到 assistant 说明最后一条用户消息已经回复过。两条约束各有
+  // 理由：① 必须是最后一条——handleUndoChat 的截断点固定在这里，挂到更早的消息会
+  // 把它与末尾之间的内容一起撤掉，而回填进输入框的却是最后一条，用户会看到中间
+  // 的消息凭空消失；② 后面不能有 assistant 消息——模型一旦回复过，编辑重发就是
+  // 重复提问。（顺带把原来每条消息各做一次 reduce 的 O(n²) 门控收敛成一次扫描。）
+  const lastEditableUserIndex = assistantStarted
+    ? -1
+    : (() => {
+        for (let i = displayMessages.length - 1; i >= 0; i--) {
+          const m = displayMessages[i];
+          if (m.kind !== "message") continue;
+          if (m.msg.role === "user") return i;
+          if (m.msg.role === "assistant") return -1;
+        }
+        return -1;
+      })();
 
   // Extract kaomoji status line from thinking content
   const { status: thinkingStatus, body: thinkingBody } = useMemo(
@@ -3189,8 +3227,14 @@ export function AgentFlowPanel() {
       .then((list: unknown) => {
         if (Array.isArray(list)) {
           setFileSkills(
-            (list as Array<{ name?: unknown; description?: unknown }>).map(
-              (s) => ({
+            (list as Array<{
+              name?: unknown;
+              description?: unknown;
+              isActive?: unknown;
+            }>)
+              // 禁用的技能（SKILL.md.disabled）pi 不会加载，也不该出现在 / 菜单。
+              .filter((s) => s.isActive !== false)
+              .map((s) => ({
                 name: typeof s.name === "string" ? s.name : String(s.name),
                 description:
                   typeof s.description === "string" && s.description
@@ -3847,6 +3891,21 @@ export function AgentFlowPanel() {
       });
     }
   }, [currentSessionId, storeActions, setInputSynced]);
+
+  // 「编辑」= 撤回最后一轮**尚未回复**的用户消息 + 原文回填输入框。截断逻辑与
+  // /undo 共用 handleUndoChat（同一套后端 session.undo + 前端本地删除），唯一
+  // 区别是这里先停掉还在跑的这一轮——此时必然还没产出内容（见 assistantStarted
+  // 的注释），所以停掉不会留下合成回复；如果不先停，这一轮的 done 会以"孤儿
+  // 回复"的身份落定在截断点之后。
+  const handleEditChat = useCallback(() => {
+    if (
+      runningSessionIdRef.current &&
+      runningSessionIdRef.current === currentSessionId
+    ) {
+      handleStop();
+    }
+    void handleUndoChat();
+  }, [currentSessionId, handleStop, handleUndoChat]);
 
   // File picker handler
   const handleFileSelect = useCallback(
@@ -8327,8 +8386,9 @@ export function AgentFlowPanel() {
                     // 累加而非覆盖：一次 run（工具循环）会产生多条 assistant 消息，
                     // 每条 final usage 只是**那一次** LLM 调用的量。覆盖会只留下最后
                     // 一条调用的数字——一轮改二十个文件的任务往往跑了十几条调用，
-                    // 显示出来的用量能差一个量级。draft 的 totalTokens（4738）与本处
-                    // 同语义，所以流式实时计数与落定后的数字是对得上的。
+                    // 落定在消息上的用量会差一个量级。
+                    // 会话/日/月的用量统计走上面的 addSessionUsageStats（同样逐条
+                    // 累加），与这三个 ref 互不干扰。
                     thoughtTokensRef.current += Number(u.thoughtTokens) || 0;
                     outputTokensRef.current += Number(u.outputTokens) || 0;
                     totalTokensRef.current += Number(u.totalTokens) || 0;
@@ -8437,9 +8497,6 @@ export function AgentFlowPanel() {
                       compressions,
                     );
                   }
-                  // token refs 刚变 → 立刻刷一次 draft，流式状态栏的实时计数才跟手
-                  //（否则要等到下一次正文事件才会带出来）。rAF 节流，重复调用免费。
-                  syncDraft();
                 }
               } else if (parsed.type === "available_commands") {
                 useHelixStore.getState().setAvailableCommands(parsed.commands);
@@ -9103,7 +9160,40 @@ export function AgentFlowPanel() {
       const items = Array.from(e.clipboardData.items);
       const imageItems = items.filter((item) => item.type.startsWith("image/"));
 
-      if (imageItems.length === 0) return; // Let normal text paste happen
+      // 没有原生位图时，再看剪贴板里的 text/html / text/plain：从 Helix
+      // 自己的「复制」按钮拷回来的图文消息走的是 text/html（图片以
+      // data URL 内联），粘回本输入框时 image/* 为空、但 html 里其实带着图。
+      // 以前这种直接 `return`（当普通文字粘贴）→ 图片就丢了。现在把 html/text
+      // 里的 data URL 扫出来进附件，同时**不** preventDefault（纯文本照常进
+      // textarea，图文都保住）。
+      if (imageItems.length === 0) {
+        const html = e.clipboardData.getData("text/html");
+        const plain = e.clipboardData.getData("text/plain");
+        const dataUrls = extractImageDataUrls(html || plain);
+        if (dataUrls.length === 0) return; // 确实只有文字，走默认粘贴
+
+        const room = canAddMoreImages(pendingImages.length, dataUrls.length);
+        if (!room) {
+          storeActions.showToast({ type: "warning", title: `最多粘贴 5 张图片` });
+          // 图放不下但文字该照进去，不 preventDefault
+          return;
+        }
+        const newImages: ImageAttachment[] = [];
+        for (const dataUrl of dataUrls) {
+          try {
+            const att = await processClipboardImage(dataUrlToBlob(dataUrl));
+            if (att) newImages.push(att);
+          } catch {
+            /* 单张解码失败不影响其余与文字 */
+          }
+        }
+        if (newImages.length > 0) {
+          const next = [...pendingImages, ...newImages];
+          setPendingImages(next);
+          persistPendingAttachments(next, pendingFiles);
+        }
+        return; // 文字仍由默认行为进 textarea
+      }
 
       e.preventDefault();
 
@@ -10483,16 +10573,10 @@ export function AgentFlowPanel() {
                         item.msg.id === conversationSearchActiveId
                       }
                       onFork={(id) => void storeActions.forkConversation(id)}
-                      onUndo={
+                      onEdit={
                         item.msg.role === "user" &&
-                        displayMessages.reduce(
-                          (acc, m, i) =>
-                            m.kind === "message" && m.msg.role === "user"
-                              ? i
-                              : acc,
-                          -1,
-                        ) === index
-                          ? handleUndoChat
+                        lastEditableUserIndex === index
+                          ? handleEditChat
                           : undefined
                       }
                     />
@@ -10525,22 +10609,6 @@ export function AgentFlowPanel() {
                             {formatDuration(elapsedSeconds)}
                           </span>
                         )}
-                        {/* 本轮已用 token（draft.totalTokens 由 rAF 刷入，与落定后
-                            消息上的 totalTokens 同一口径），跑完就在提交消息下方常驻。 */}
-                        {(() => {
-                          const draftTokens = currentSessionId
-                            ? (streamingDrafts[currentSessionId]?.totalTokens ?? 0)
-                            : 0;
-                          if (draftTokens <= 0) return null;
-                          return (
-                            <span
-                              className="tabular-nums text-foreground/35"
-                              data-tip={`本轮已用 ${draftTokens.toLocaleString()} tokens`}
-                            >
-                              · {formatTokens(draftTokens)} tokens
-                            </span>
-                          );
-                        })()}
                       </div>
                     )}
 
@@ -11254,6 +11322,7 @@ export function AgentFlowPanel() {
           // 残留 UI 挡在第二条上面（ApprovalBar 的 pendingCount 同样依赖重建）。
           key={clarifyRequest.id}
           request={clarifyRequest}
+          pendingCount={pendingClarifyCount}
           onRespond={(id, answer) =>
             handleClarifyRespond(
               id,

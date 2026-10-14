@@ -18,6 +18,7 @@ mod helix;
 mod hooks;
 mod mcp;
 mod memory;
+mod office_preview;
 mod page_fetch;
 mod paths;
 mod pi_advanced;
@@ -98,6 +99,12 @@ pub fn run() {
             // One-time migration: legacy ~/.helix → ~/.pi/agent/helix
             // (rename/copy, best effort, only when no override is configured).
             crate::paths::migrate_legacy_data_dir();
+
+            // 把用户禁用的包内置技能重新改名回 SKILL.md：npm 重装/升级会
+            // 覆盖 node_modules，把 `SKILL.md.disabled` 变回 `SKILL.md`，
+            // 等于禁用默默失效。必须在 gateway 拉起前跑完，否则 pi 这次启动
+            // 仍然会加载到那些本该关掉的技能。
+            let _ = crate::skills::helix_reapply_disabled_skills();
 
             // Re-assert the Helix model selection into Pi's own config so a
             // gateway respawn picks up the intended defaults (heals drift
@@ -308,6 +315,8 @@ pub fn run() {
             // Plugin installation
             // fs
             fs::read,
+            // 二进制预览通道（侧栏 PPT/PDF/图片/音视频）
+            fs::read_binary,
             fs::write,
             fs::edit,
             fs::readdir,
@@ -321,6 +330,8 @@ pub fn run() {
             fs::snapshot_save,
             fs::snapshot_restore,
             fs::snapshot_discard,
+            // 侧栏 PPTX 原生渲染：驱动本机 PowerPoint COM 逐页导出 PNG
+            office_preview::export_slides_png,
             // file-based skills (slash-command picker / skill panel)
             skills::helix_get_skills_dir,
             skills::helix_read_dir,
@@ -328,6 +339,8 @@ pub fn run() {
             skills::helix_delete_dir,
             skills::helix_list_skills,
             skills::helix_set_skill_model_invocation,
+            skills::helix_set_skill_enabled,
+            skills::helix_reapply_disabled_skills,
             skills::helix_list_subagents,
             skills::helix_set_subagent_enabled,
             skills::helix_set_subagent_model,

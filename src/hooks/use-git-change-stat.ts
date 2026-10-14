@@ -12,6 +12,8 @@ interface GitChangeFile {
   added: number;
   removed: number;
   binary: boolean;
+  /** 未跟踪新文件（diffNumstatFull 补的那部分）——「更改」面板标 U。 */
+  untracked: boolean;
 }
 
 interface GitChangeStat {
@@ -101,6 +103,7 @@ export function useGitChangeStat(
             added: f.added ?? 0,
             removed: f.removed ?? 0,
             binary: !!f.binary,
+            untracked: !!f.untracked,
           }));
         if (!files.length) {
           // 仓库里确实没有未提交改动 —— 与「统计不了」是两种状态。

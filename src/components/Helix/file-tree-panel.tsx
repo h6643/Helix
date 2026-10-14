@@ -10,6 +10,7 @@ import {
   X,
   ArrowLeft,
   Terminal,
+  ExternalLink,
 } from "lucide-react";
 import React, {
   useState,
@@ -19,6 +20,7 @@ import React, {
   useMemo,
 } from "react";
 import { createPortal } from "react-dom";
+import { previewKindOf } from "@/lib/doc-preview";
 import {
   isElectron,
   electronGit,
@@ -499,6 +501,7 @@ export function FileTreePanel({
     // visible response — the read/checks below run async and may fail, but the
     // panel must not stay hidden (previously onOpenFile ran only after a
     // successful read, so any read error left the sidebar closed = "no response").
+    // 文档预览也走这一面（openDocument 建 doc 页签），不再分「代码/文档」两块。
     onOpenFile?.();
     openFileInEditorAction(item);
   };
@@ -551,6 +554,13 @@ export function FileTreePanel({
     const ext = item.name.includes(".")
       ? item.name.split(".").pop()!.toLowerCase()
       : "";
+    // 侧栏能内嵌预览的类型（PPT/DOCX/XLSX/PDF/图片/音视频）走文档面板，不进
+    // 代码编辑器 —— OOXML 是 zip、图片/媒体是二进制，当文本读只会得到乱码或
+    // 被空字节检查拦下报「不是文本文件」。
+    if (previewKindOf(item.name)) {
+      useHelixStore.getState().openDocument(item.path);
+      return;
+    }
     if (BINARY_EXT.has(ext)) {
       showToast({
         type: "error",
@@ -600,6 +610,20 @@ export function FileTreePanel({
         description: (e as { message?: string })?.message || "读取文件出错",
       });
       if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path);
+    }
+  };
+
+  const handleOpenExternal = async (item: FileTreeItem) => {
+    try {
+      await electronShell.openPath(item.path);
+    } catch (e) {
+      showToast({
+        type: "error",
+        title: "打开失败",
+        description:
+          (e as { message?: string })?.message ||
+          "系统里没有关联这个格式的程序",
+      });
     }
   };
 
@@ -812,6 +836,20 @@ export function FileTreePanel({
               <span className="flex-1 text-left">删除</span>
             </button>
             <div className="h-px my-1 bg-border/60" />
+            {/* 预览类文件（PPT/PDF/图片…）额外给一条「用系统程序打开」：侧栏
+                预览是轻量文本提取，真要编辑/放映还得靠外部程序。 */}
+            {previewKindOf(menu.item.name) && (
+              <button
+                onClick={() => {
+                  handleOpenExternal(menu.item);
+                  setMenu(null);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
+              >
+                <ExternalLink className="size-3.5" />
+                <span className="flex-1 text-left">用系统程序打开</span>
+              </button>
+            )}
             <button
               onClick={() => {
                 handleOpenInFolder(menu.item);

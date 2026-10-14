@@ -107,6 +107,46 @@ pub fn restart_gateway_soon(state: &Arc<AppState>, reason: &str) {
     schedule_restart(state, reason, true);
 }
 
+/// 上一次 `restart_gateway_when_idle` 是否已有一个 waiter 线程在轮询。
+/// 忙时的连续多次启停只需一个 waiter——它触发的那次重启会重读磁盘，
+/// 把期间所有变更一并生效。
+static RESTART_WHEN_IDLE_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 延后重启直到**没有任何会话在跑回合**，用于不该打断对话的用户动作（技能
+/// 启停）。当下空闲就立即重启（走 `restart_gateway_soon`）；忙则轮询
+/// `any_turn_running`，一旦空闲就触发一次。忙时的重复调用合并到同一个 waiter。
+pub fn restart_gateway_when_idle(state: &Arc<AppState>, reason: &str) {
+    use std::sync::atomic::Ordering::SeqCst;
+    if !crate::pi_gateway::any_turn_running() {
+        restart_gateway_soon(state, reason);
+        return;
+    }
+    if RESTART_WHEN_IDLE_ARMED.swap(true, SeqCst) {
+        crate::pi_gateway::log_spawn_diag(&format!(
+            "idle-restart already armed, coalesced: {reason}"
+        ));
+        return;
+    }
+    let state = Arc::clone(state);
+    let reason = reason.to_string();
+    std::thread::spawn(move || {
+        // 500ms 粒度轮询，直到没有任何未结算回合。重启会重读磁盘，所以
+        // 期间新发生的启停都会被这次重启覆盖。
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if !crate::pi_gateway::any_turn_running() {
+                break;
+            }
+        }
+        RESTART_WHEN_IDLE_ARMED.store(false, SeqCst);
+        crate::pi_gateway::log_spawn_diag(&format!(
+            "restart deferred until idle: {reason}"
+        ));
+        restart_gateway_soon(&state, &reason);
+    });
+}
+
 /// Restart for a one-shot user action (work-dir switch) whose change must take
 /// effect immediately, so it skips the settle window. It still coalesces into an
 /// in-flight restart instead of chaining a second full handover behind it: the

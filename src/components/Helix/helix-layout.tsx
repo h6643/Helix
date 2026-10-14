@@ -784,6 +784,15 @@ export function HelixLayout() {
   const [commitMessage, setCommitMessage] = useState("");
   // 右上角统一工作面板（更改 / 计划 / 子 Agent 共用的下拉）。
   const [workPanelOpen, setWorkPanelOpen] = useState(false);
+  // 右侧栏「更改」面板的「提交或推送」按钮 → 信号打开本面板。
+  const workPanelOpenSeq = useHelixStore((s) => s.workPanelOpenSeq);
+  const lastWorkPanelOpenSeqRef = useRef(workPanelOpenSeq);
+  useEffect(() => {
+    if (workPanelOpenSeq > lastWorkPanelOpenSeqRef.current) {
+      lastWorkPanelOpenSeqRef.current = workPanelOpenSeq;
+      setWorkPanelOpen(true);
+    }
+  }, [workPanelOpenSeq]);
   // 工作面板里「子 Agent」区块的折叠态：默认展开，点标题行收起/展开列表。
   const [subAgentsCollapsed, setSubAgentsCollapsed] = useState(false);
   const workPanelRef = useRef<HTMLDivElement>(null);
@@ -2095,7 +2104,7 @@ export function HelixLayout() {
                     <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
                       计划
                     </span>
-                    <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-px rounded-full bg-primary/10 text-primary">
+                    <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-px rounded-full bg-muted text-foreground/70">
                       待批准
                     </span>
                   </>
@@ -2105,9 +2114,9 @@ export function HelixLayout() {
                     <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
                       计划
                     </span>
-                    <span className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-px rounded-full bg-primary/10 text-primary">
+                    <span className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-px rounded-full bg-muted text-foreground/70">
                       {activePlan.some((s) => s.status === "in_progress") && (
-                        <span className="size-1.5 rounded-full bg-primary animate-pulse" />
+                        <span className="size-1.5 rounded-full bg-foreground/50 animate-pulse" />
                       )}
                       执行中
                     </span>
@@ -2170,11 +2179,11 @@ export function HelixLayout() {
                           storeActions.setRightSidebarTab("diff");
                           setWorkPanelOpen(false);
                         }}
-                        className="w-full flex items-center gap-2.5 min-w-0 px-3 py-2 text-left rounded-xl bg-muted hover:bg-accent/60 transition-colors"
+                        className="w-full flex items-center gap-2.5 min-w-0 px-3 py-2 text-left rounded-xl hover:bg-muted/60 transition-colors"
                         data-tip="查看更改明细"
                       >
                         <FilePlus className="size-4 shrink-0 text-foreground/50" />
-                        <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
+                        <span className="min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
                           更改
                         </span>
                         <span className="shrink-0 flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums font-medium">
@@ -2196,7 +2205,7 @@ export function HelixLayout() {
                           setCommitDialogOpen(true);
                         }}
                         disabled={isCommitting}
-                        className="mt-1 w-full inline-flex items-center justify-center gap-1.5 h-8 rounded-xl bg-muted text-primary text-[calc(var(--helix-transcript-size)*0.8571)] font-medium hover:bg-accent/60 disabled:opacity-50 transition-colors"
+                        className="mt-1 w-full inline-flex items-center justify-start gap-1.5 h-8 px-3 rounded-xl text-foreground/80 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium hover:bg-muted/60 disabled:opacity-50 transition-colors"
                       >
                         <Send className="size-3.5" />
                         提交并推送
@@ -2210,7 +2219,7 @@ export function HelixLayout() {
                         <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
                           计划 · 待批准
                         </span>
-                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
+                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full bg-muted text-foreground/70 border border-border/60">
                           计划模式
                         </span>
                       </div>
@@ -2261,7 +2270,7 @@ export function HelixLayout() {
                                   {step.status === "completed" ? (
                                     <CheckCircle2 className="size-4 text-emerald-500 shrink-0 mt-0.5" />
                                   ) : step.status === "in_progress" ? (
-                                    <Loader2 className="size-4 text-primary shrink-0 mt-0.5 animate-spin" />
+                                    <Loader2 className="size-4 text-foreground/60 shrink-0 mt-0.5 animate-spin" />
                                   ) : (
                                     <Circle className="size-4 text-foreground/40 shrink-0 mt-0.5" />
                                   )}
@@ -2313,8 +2322,8 @@ export function HelixLayout() {
                               子 Agent
                             </span>
                             {running > 0 ? (
-                              <span className="shrink-0 flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-primary">
-                                <span className="size-1.5 rounded-full bg-primary animate-pulse" />
+                              <span className="shrink-0 flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70">
+                                <span className="size-1.5 rounded-full bg-foreground/50 animate-pulse" />
                                 {running} 运行
                                 <span className="text-foreground/40">/</span>
                                 <span className="tabular-nums text-foreground/50">
@@ -2357,7 +2366,7 @@ export function HelixLayout() {
                               className="w-full flex items-start gap-2 text-left"
                             >
                               {sa.status === "running" ? (
-                                <Loader2 className="size-3.5 text-primary shrink-0 animate-spin mt-0.5" />
+                                <Loader2 className="size-3.5 text-foreground/60 shrink-0 animate-spin mt-0.5" />
                               ) : sa.status === "failed" ? (
                                 <XCircle className="size-3.5 text-destructive shrink-0 mt-0.5" />
                               ) : (
@@ -2398,7 +2407,7 @@ export function HelixLayout() {
                             data-tip="在右侧栏查看工作内容"
                           >
                             <div className="flex items-center gap-2">
-                              <Terminal className="size-3.5 text-primary/60 shrink-0" />
+                              <Terminal className="size-3.5 text-foreground/50 shrink-0" />
                               <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70">
                                 {del.id}
                               </span>

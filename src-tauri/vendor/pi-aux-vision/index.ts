@@ -14,8 +14,6 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { describeConfigSource, isConfigured, readVisionConfig } from "./config";
 import { describeImage, errorResult, isErrorResult, structuredOutputSchema, type DescribeImageResult } from "./vision";
-import { generateTestImage } from "./test-image";
-import { createFooterController } from "./footer-controller";
 
 const TOOL_NAME = "describe_image";
 
@@ -30,9 +28,6 @@ const STATUS_DIVIDER = "─".repeat(60);
 
 export default function (pi: ExtensionAPI) {
   let toolRegistered = false;
-
-  // footer controller:状态与 footer key 收在闭包,事件点一行转发
-  const footer = createFooterController();
 
   // 加载期只做注册:动作方法(getActiveTools/setActiveTools)在扩展加载阶段被 pi 禁止,
   // 可见性完全由门控在 session_start/model_select 中决定(ADR-0004)
@@ -75,15 +70,12 @@ export default function (pi: ExtensionAPI) {
       }),
       outputSchema: structuredOutputSchema,
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-        const result = await runDescribe(params, ctx, signal);
-        // 任何调用(含失败)都算触发:footer 显示模型并保持到会话结束
-        footer.on({ type: "call", ok: !isErrorResult(result) }, ctx.ui);
-        return result;
+        return runDescribe(params, ctx, signal);
       },
     });
   }
 
-  /** describe_image 主体:读 config.yaml 的视觉端点并直连调用;供 execute 触发 footer 事件。 */
+  /** describe_image 主体:读 config.yaml 的视觉端点并直连调用。 */
   async function runDescribe(
     params: { image_path: string; question: string },
     ctx: ExtensionContext,
@@ -122,8 +114,6 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", (_event, ctx) => {
-    // 新会话:footer 回到未触发(不显示)
-    footer.on({ type: "reset" }, ctx.ui);
     syncToolVisibility(ctx);
   });
 
@@ -165,12 +155,16 @@ export default function (pi: ExtensionAPI) {
             );
             return;
           }
-          const imagePath = parts.slice(1).join(" ") || (await generateTestImage());
+          // 不再自动生成默认测试图（test-image.ts 已随 Helix 分支删除）：
+          // 显式给路径才能测，缺路径直接报用法，而不是悄悄造一张图去测。
+          const imagePath = parts.slice(1).join(" ");
+          if (!imagePath) {
+            ctx.ui.notify("aux-vision: /vision test needs an image path — usage: /vision test <path>", "warning");
+            return;
+          }
           ctx.ui.notify(`aux-vision: analyzing ${imagePath} with ${cfg.provider}/${cfg.model} ...`, "info");
           const result = await describeImage({ image_path: imagePath, question: TEST_QUESTION }, ctx, cfg, ctx.signal);
-          // /vision test 也是本会话内实际调用视觉模型:与 execute 一致,成功/失败都算触发
           const testFailed = isErrorResult(result);
-          footer.on({ type: "call", ok: !testFailed }, ctx.ui);
           if (testFailed) {
             ctx.ui.notify(`aux-vision test failed: ${result.content[0].text}`, "error");
             return;
@@ -185,7 +179,7 @@ export default function (pi: ExtensionAPI) {
         }
         default: {
           ctx.ui.notify(
-            `Usage: /vision status | test [path]\n${STATUS_DIVIDER}\n${describeConfigSource(cfg)}\n${gatingNote(ctx, configured)}`,
+            `Usage: /vision status | test <path>\n${STATUS_DIVIDER}\n${describeConfigSource(cfg)}\n${gatingNote(ctx, configured)}`,
             configured ? "info" : "warning",
           );
           return;

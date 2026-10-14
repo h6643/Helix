@@ -248,7 +248,7 @@ export function BackgroundTasksPanel({
           <span
             className={`shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] ${
               viewing.status === "running"
-                ? "text-primary"
+                ? "text-foreground/70"
                 : viewing.status === "completed"
                   ? "text-emerald-500"
                   : "text-red-500"
@@ -288,7 +288,7 @@ export function BackgroundTasksPanel({
           >
             <button
               onClick={() => openOutput(viewing)}
-              className="flex items-center gap-1 px-2 py-1 rounded text-[calc(var(--helix-transcript-size)*0.7143)] text-primary hover:bg-primary/10 transition-colors"
+              className="flex items-center gap-1 px-2 py-1 rounded text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/70 hover:bg-muted transition-colors"
             >
               <ScrollText className="size-3" />
               刷新输出
@@ -318,7 +318,7 @@ export function BackgroundTasksPanel({
     return (
       <div key={`${keyPrefix}${task.id}`} className={itemCls}>
         {isRunning ? (
-          <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
+          <Loader2 className="size-3.5 text-foreground/60 shrink-0 animate-spin" />
         ) : task.status === "completed" ? (
           <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
         ) : (
@@ -361,7 +361,7 @@ export function BackgroundTasksPanel({
           {inline && <Terminal className="size-4 text-foreground/50 shrink-0" />}
           后台任务
           {!inline && runningAll.length > 0 && (
-            <span className="ml-1.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-primary font-normal">
+            <span className="ml-1.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/70 font-normal">
               {runningAll.length} 运行中
             </span>
           )}
@@ -370,8 +370,8 @@ export function BackgroundTasksPanel({
             独立浮层模式统计全部任务（含其他对话）。 */}
         {inline &&
           (running.length > 0 ? (
-            <span className="shrink-0 flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-primary">
-              <span className="size-1.5 rounded-full bg-primary animate-pulse" />
+            <span className="shrink-0 flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70">
+              <span className="size-1.5 rounded-full bg-foreground/50 animate-pulse" />
               {running.length} 运行中
             </span>
           ) : myTasks.length > 0 ? (
@@ -428,8 +428,8 @@ export function BackgroundTasksPanel({
                       {g.label}
                     </span>
                     {runN > 0 ? (
-                      <span className="shrink-0 flex items-center gap-1.5 text-primary">
-                        <span className="size-1.5 rounded-full bg-primary animate-pulse" />
+                      <span className="shrink-0 flex items-center gap-1.5 text-foreground/70">
+                        <span className="size-1.5 rounded-full bg-foreground/50 animate-pulse" />
                         {runN} 运行中
                       </span>
                     ) : (

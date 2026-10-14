@@ -163,7 +163,6 @@ export interface ChatMessage {
   isStreaming?: boolean;
   duration?: number;
   thinkingTime?: number;
-  tokenCount?: number;
   thoughtTokens?: number;
   outputTokens?: number;
   totalTokens?: number;

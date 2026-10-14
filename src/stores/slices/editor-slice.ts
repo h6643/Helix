@@ -27,6 +27,9 @@ interface EditorTab {
   /** Content as last loaded from / saved to disk — used to compute dirty. */
   originalContent: string;
   dirty: boolean;
+  /** 文档预览页签（PPT/DOCX/XLSX/PDF/图片/音视频）：与文本页签同列一条
+   *  页签带（「文件」面），但渲染走 DocPreviewPanel，content/dirty 恒不用。 */
+  doc?: boolean;
 }
 
 interface EditorRevealRequest {
@@ -58,8 +61,9 @@ export interface EditorSlice {
   /** Synchronously create / activate a tab carrying only the file NAME (empty
    *  content) so the right-sidebar page strip can show the name immediately,
    *  before the (async) disk read finishes. Returns true if a new empty tab was
-   *  created (so the caller can close it again on a read failure). */
-  ensureEditorTab: (path: string, name: string) => boolean;
+   *  created (so the caller can close it again on a read failure).
+   *  `doc=true` 建的是文档预览页签（不读文本内容）。 */
+  ensureEditorTab: (path: string, name: string, doc?: boolean) => boolean;
   /** Fill the content of a previously-created empty (optimistic) tab. */
   fillEditorTabContent: (path: string, content: string) => void;
   closeEditorTab: (id: string) => void;
@@ -167,7 +171,7 @@ export const createEditorSlice: StateCreator<
     clearStaleReveal(get, set, path);
   },
 
-  ensureEditorTab: (path, name) => {
+  ensureEditorTab: (path, name, doc) => {
     const existing = get().editorTabs.find((t) => t.id === path);
     if (existing) {
       set((s) => ({
@@ -184,6 +188,7 @@ export const createEditorSlice: StateCreator<
       content: "",
       originalContent: "",
       dirty: false,
+      doc,
     };
     set((s) => ({
       editorOpen: true,

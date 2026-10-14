@@ -1644,6 +1644,17 @@ pub fn set_auto_compaction_all(enabled: bool) {
     }
 }
 
+/// 当前是否有**任意**会话还有未结算的回合在跑。以实例的 `streaming` 标志为
+/// 事实源（与 idle-reaper / 重启交接闸门同一判据）：只要有一个为真，就不应
+/// 做会打断对话的网关 respawn。供技能启停等用户动作判断“能不能立刻重启”。
+pub fn any_turn_running() -> bool {
+    INSTANCES
+        .lock()
+        .unwrap()
+        .values()
+        .any(|inst| inst.streaming.load(Ordering::SeqCst))
+}
+
 /// Broadcast a thinking level to every live pi instance. Used when the user
 /// changes the reasoning-effort slider so the change takes effect across all
 /// open conversations immediately (Pi has no global/persistent thinking level).
@@ -4100,7 +4111,30 @@ async fn instance_for_session(
                 return Ok(Arc::clone(instance));
             }
         }
-        restore_session_instance(&sid, &state2)
+        match restore_session_instance(&sid, &state2) {
+            Ok(instance) => Ok(instance),
+            // 网关交接的清场扫帚杀掉了在飞的恢复（switch_session / get_state 的
+            // pending 被 kill() 清掉 → `killed by Helix`）。这条失败**必然**发生在
+            // 杀完之后，此刻交接已经收尾：重跑一次会按新配置重生实例，
+            // await_handover_window 会先等掉残余的交接窗口（连续多次重启的
+            // follow-up restart 也一并等到）。比把一次纯瞬时故障抛给前端、让它
+            // 重走整条 resume 阶梯便宜得多，而且 session/set_mode 这类只
+            // console.warn 的调用点根本不会重试（后端 plan/权限档就此漏同步）。
+            //
+            // 只重试一次：真正的坏会话（文件损坏、pi 拒绝切换）第二次照样失败，
+            // 不会退化成循环。退出中不重试 —— 那会在 stop_all 的杀光之后又拉起
+            // 一个 pi 子进程。
+            Err(e)
+                if e.contains("killed by Helix")
+                    && !state2.gateway.app_quitting.load(Ordering::SeqCst) =>
+            {
+                log_spawn_diag(&format!(
+                    "restore: sid={sid} killed mid-restore by Helix — retrying once ({e})"
+                ));
+                restore_session_instance(&sid, &state2)
+            }
+            Err(e) => Err(e),
+        }
     })
     .await
     .map_err(|e| format!("session restore task failed: {e}"))?;
@@ -4114,6 +4148,58 @@ async fn instance_for_session(
     restored
 }
 
+/// 恢复前等掉在飞的网关交接窗口。拿不到 `LIFECYCLE_LOCK`（试锁失败）说明
+/// `restart_overlapping` / `spawn` / `stop_all` 正持有它 —— 交接的**清场扫帚**
+/// 在整段窗口的末尾，`restore` 里那条几秒到几十秒的 `switch_session` 撞进去
+/// 必死：`kill()` 清 pending 让在飞请求以
+/// `killed by Helix (no response channel)` 断开（helix-recover.log 2026-10-13
+/// 实测：切会话撞上「技能启用状态变更」重启，`waited 7731ms` 后被杀，
+/// session/set_mode 报 session_restore_failed）。
+///
+/// 拿到锁**立刻放** —— 这把锁在这里只用来证明"这一刻没有清场在跑"，真正要紧
+/// 的顺序是：交接收尾（含 rearm_warm_spares）→ 再恢复。这样恢复到的实例生在
+/// 新配置下，也不会正好落在扫帚下面。预算内拿不到（冷启动交接实测 17-27s，
+/// 卡死的 get_state 最长 150s）就继续走：后面还有一道 killed-by-Helix 重试
+/// 兜底，而重试时交接早已结束，这把锁会立刻到手。
+///
+/// 退出中直接失败：`stop_all` 持锁杀光全部实例，此刻再重生一个 pi 子进程
+/// 比报错更糟（classify_session_error 把它归为 internal，不影响会话生命周期）。
+fn await_handover_window(state: &Arc<AppState>) -> Result<(), String> {
+    const BUDGET: Duration = Duration::from_secs(20);
+    let start = std::time::Instant::now();
+    let mut waited = false;
+    loop {
+        if state.gateway.app_quitting.load(Ordering::SeqCst) {
+            return Err("gateway is quitting".into());
+        }
+        match LIFECYCLE_LOCK.try_lock() {
+            Ok(guard) => {
+                drop(guard);
+                if waited {
+                    log_spawn_diag(&format!(
+                        "restore: waited {}ms for the in-flight handover",
+                        start.elapsed().as_millis()
+                    ));
+                }
+                return Ok(());
+            }
+            // 持锁方 panic 了：锁已毒化，继续等只会空耗预算 —— 照常往下走。
+            Err(std::sync::TryLockError::Poisoned(_)) => return Ok(()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if start.elapsed() >= BUDGET {
+                    log_spawn_diag(&format!(
+                        "restore: gave up waiting for the handover after {}ms — proceeding (killed-by-Helix retry will cover it)",
+                        start.elapsed().as_millis()
+                    ));
+                    return Ok(());
+                }
+                waited = true;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
 /// Spawn (or warm-spare-claim) the instance for a not-live session and
 /// switch it onto the persisted session file. Caller holds the session's
 /// resume lock. Sync — runs on a blocking thread (see instance_for_session).
@@ -4121,6 +4207,10 @@ fn restore_session_instance(
     session_id: &str,
     state: &Arc<AppState>,
 ) -> Result<Arc<PiInstance>, String> {
+    // 先等掉在飞的网关交接（见 await_handover_window）：交接窗口里启动的
+    // switch_session 会在收尾清场时被自己人杀掉，那次失败是纯瞬时的、且必然
+    // 发生在新配置生效之后 —— 等它结束既避开扫帚，也让恢复落在新配置上。
+    await_handover_window(state)?;
     // Not live (reaped / crashed / never spawned): respawn and restore the
     // conversation from its persisted session file. The existing map entry
     // (if any) keeps its stored cwd, so the respawn lands in the same project.

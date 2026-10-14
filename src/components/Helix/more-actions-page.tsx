@@ -2,12 +2,14 @@
 
 import {
   FileDiff,
+  FileText,
   Globe,
   ListTree,
   MessagesSquare,
   TerminalSquare,
   type LucideIcon,
 } from "lucide-react";
+import { electronDialog } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
 interface MoreActionsCard {

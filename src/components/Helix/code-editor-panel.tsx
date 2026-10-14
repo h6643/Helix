@@ -19,6 +19,7 @@ import CodeMirror from "@uiw/react-codemirror";
 import { FileCode2, AlertTriangle } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { DiffBody } from "./file-change-summary";
+import { DocPreviewPanel } from "./doc-preview-panel";
 import { electronFS } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -319,6 +320,18 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-background/50">
       {/* Editor — the file name / close live in the unified right-sidebar tab
           strip (one row), so there is no duplicate per-file tab bar here. */}
+      {active.doc ? (
+        /* 文档预览页签（PPT/DOCX/XLSX/PDF/图片/音视频）：与文本共用「文件」面
+           的同一条页签带，只是渲染区换成 DocPreviewPanel。 */
+        <div className="flex-1 min-h-0 flex flex-col">
+          <DocPreviewPanel
+            path={active.path}
+            name={active.name}
+            onClose={() => closeEditorTab(active.id)}
+          />
+        </div>
+      ) : (
+        <>
       <div className="flex-1 min-h-0 overflow-hidden">
         {showDiff && activeChange ? (
           <div className="h-full overflow-y-auto px-2 py-2">
@@ -368,6 +381,8 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
             {showDiff ? "代码" : "差异"}
           </button>
         </div>
+      )}
+        </>
       )}
 
       {pendingClose && (

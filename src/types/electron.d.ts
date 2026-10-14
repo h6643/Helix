@@ -127,6 +127,8 @@ export interface DiagnosticRunResult {
 export interface ElectronAPI {
   fs: {
     read: (filePath: string) => Promise<string>;
+    /** 按字节读文件，返回 base64（侧栏文档/媒体预览用，走 `fs:read_binary`）。 */
+    readBinary: (filePath: string) => Promise<string>;
     write: (filePath: string, content: string) => Promise<{ success: boolean }>;
     edit: (
       filePath: string,
@@ -154,6 +156,9 @@ export interface ElectronAPI {
       }>
     >;
     allowRoot: (dirPath: string) => Promise<{ success: boolean }>;
+    /** 本机 PowerPoint COM 导出 PPTX 逐页 PNG（base64）。可选：旧 preload /
+     *  非 Windows 没有这条通道，调用方需降级。 */
+    exportSlidesPng?: (filePath: string) => Promise<{ slides: string[] }>;
     /** 会话级文件快照：run 前存「改动前」内容，供卡片「撤销本轮」整体还原 */
     snapshotSave: (
       runId: string,
@@ -186,6 +191,10 @@ export interface ElectronAPI {
      *  `disable-model-invocation`）。返回值 `disabled` 是修改后的状态。 */
     setSkillModelInvocation: (skillPath: string, enabled: boolean) =>
       Promise<{ changed: boolean; disabled: boolean } | null>;
+    /** 开关技能「启用 / 禁用」（正文文件在 SKILL.md ↔ SKILL.md.disabled
+     *  之间改名，禁用后 pi 根本不加载）。返回值 `enabled` 是修改后的状态。 */
+    setSkillEnabled: (skillPath: string, enabled: boolean) =>
+      Promise<{ changed: boolean; enabled: boolean; deferred: boolean } | null>;
   };
 
   shell: {
@@ -837,6 +846,7 @@ export interface ElectronAPI {
     ) => Promise<{ ok: boolean; diff?: string; error?: string }>;
     diffHead: (
       filePath?: string,
+      context?: number,
     ) => Promise<{ ok: boolean; diff?: string; error?: string }>;
     diffNumstat: (
       cwd?: string | null,

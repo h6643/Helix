@@ -67,6 +67,15 @@ pub struct SkillEntry {
     /// 显式 `/skill:<name>` 触发。
     #[serde(rename = "modelInvocationDisabled", default)]
     pub model_invocation_disabled: bool,
+    /// 技能是否启用。false = SKILL.md 已改名为 `SKILL.md.disabled`，pi 根本
+    /// 不会加载它（连显式 `/skill:name` 也不触发）。禁用态仍然列出来，
+    /// 才能让用户重新开启。
+    #[serde(rename = "isActive")]
+    pub is_active: bool,
+    /// 面板上能否给这个技能开关「启用/禁用」（正文文件在本地可改名）。
+    /// 点目录开头的内置技能（如 `.system`）为 false。
+    #[serde(rename = "disableable")]
+    pub disableable: bool,
 }
 
 #[tauri::command]
@@ -154,16 +163,244 @@ pub struct SkillInvocationResult {
     pub disabled: bool,
 }
 
-/// `SKILL.md`（或 pi 同样接受的 `README.md`）的完整路径。
-fn skill_markdown_path(skill_dir: &str) -> Option<PathBuf> {
+/// 技能正文文件名与其禁用态对应文件名。
+const SKILL_FILENAMES: &[&str] = &["SKILL.md", "README.md"];
+const DISABLED_SUFFIX: &str = ".disabled";
+
+/// 一个技能目录里找到的正文文件。
+struct SkillFile {
+    path: PathBuf,
+    /// true = `SKILL.md`（启用态）；false = `SKILL.md.disabled`（禁用态）。
+    active: bool,
+}
+
+/// `SKILL.md`（或 pi 同样接受的 `README.md`）的完整路径；目录里只有禁用态
+/// 文件（`SKILL.md.disabled`）时也算找到，`active` 为 false —— pi 的加载器只认
+/// 那两个精确文件名，改名后必然加载不到，这就是「真正关掉一个技能」的机制。
+fn skill_markdown_path(skill_dir: &str) -> Option<SkillFile> {
     let dir = Path::new(skill_dir);
-    for cand in ["SKILL.md", "README.md"] {
+    for cand in SKILL_FILENAMES {
         let p = dir.join(cand);
         if p.is_file() {
-            return Some(p);
+            return Some(SkillFile { path: p, active: true });
+        }
+    }
+    for cand in SKILL_FILENAMES {
+        let p = dir.join(format!("{cand}{DISABLED_SUFFIX}"));
+        if p.is_file() {
+            return Some(SkillFile { path: p, active: false });
         }
     }
     None
+}
+
+/// 只取启用态正文文件路径（写 frontmatter 用：禁用态的文件改它没意义）。
+fn skill_active_md(skill_dir: &str) -> Option<PathBuf> {
+    skill_markdown_path(skill_dir).filter(|f| f.active).map(|f| f.path)
+}
+
+/// Helix 自己维护的禁用清单（落在用户技能根下，内容是被禁用技能的目录路径，
+/// 每行一个）。只用来让 npm 包内置技能的禁用态在包被重装/升级覆盖后能重新
+/// 生效（`helix_reapply_disabled_skills`）。pi 的扫描会跳过 `.` 开头的目录，
+/// 也不读根下的普通文件，所以这个清单对 pi 完全不可见。
+fn disabled_manifest_path() -> PathBuf {
+    pi_user_skills_dir().join(".helix-disabled-skills")
+}
+
+fn read_disabled_manifest() -> Vec<String> {
+    std::fs::read_to_string(disabled_manifest_path())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn write_disabled_manifest(list: &[String]) {
+    let root = pi_user_skills_dir();
+    if std::fs::create_dir_all(&root).is_err() {
+        return;
+    }
+    let mut body: Vec<String> = list.to_vec();
+    body.sort();
+    body.dedup();
+    let _ = std::fs::write(
+        disabled_manifest_path(),
+        format!("{}\n", body.join("\n")),
+    );
+}
+
+/// 校验目录路径落在某个技能根内（用户根 / settings 根 / npm 包目录），
+/// 拒绝越界写入。
+fn ensure_skill_dir_allowed(skill_dir: &Path) -> Result<(), String> {
+    let real = skill_dir
+        .canonicalize()
+        .map_err(|e| format!("技能目录不可访问: {e}"))?;
+    let npm = pi_npm_dir().join("node_modules");
+    let mut roots: Vec<PathBuf> = vec![pi_user_skills_dir(), npm];
+    if let Some(settings_path) = pi_settings_path() {
+        if let Ok(raw) = std::fs::read_to_string(settings_path) {
+            if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(arr) = settings.get("skills").and_then(serde_json::Value::as_array) {
+                    for root in arr.iter().filter_map(serde_json::Value::as_str) {
+                        if let Ok(p) = Path::new(root).canonicalize() {
+                            roots.push(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if roots
+        .iter()
+        .filter_map(|r| r.canonicalize().ok())
+        .any(|r| real.starts_with(&r))
+    {
+        Ok(())
+    } else {
+        Err("只能修改 pi 技能目录下的文件".to_string())
+    }
+}
+
+/// 开关技能的「启用 / 禁用」：把正文文件在 `SKILL.md` 与 `SKILL.md.disabled`
+/// 之间改名。禁用后 pi 的发现器（只认 `SKILL.md` / `README.md`）根本看不到
+/// 这个技能，因此不会进 prompt、也不能被 `/skill:name` 显式触发 —— 比「仅手
+/// 动」更彻底，也比删目录温和（随时可开回来，正文一字未动）。
+///
+/// 禁用 npm 包内置技能时，额外在技能根下记一条 `.helix-disabled-skills`，让
+/// 禁用态能在包被重装/升级覆盖后重新生效（见 `helix_reapply_disabled_skills`）。
+///
+/// 真的改了名后会 `restart_gateway_soon`，让当前会话重新加载技能（pi 只在
+/// 进程启动时快照技能列表）。
+#[tauri::command]
+pub fn helix_set_skill_enabled(
+    skill_dir: String,
+    enabled: bool,
+) -> Result<SkillEnabledResult, String> {
+    let dir = Path::new(&skill_dir);
+    ensure_skill_dir_allowed(dir)?;
+    let found = skill_markdown_path(&skill_dir)
+        .ok_or_else(|| "目录下找不到 SKILL.md / README.md".to_string())?;
+    if found.active == enabled {
+        return Ok(SkillEnabledResult {
+            changed: false,
+            enabled,
+            deferred: false,
+        });
+    }
+    let (from, to) = if enabled {
+        let stem = found
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(DISABLED_SUFFIX))
+            .ok_or_else(|| "禁用文件名异常".to_string())?;
+        (found.path.clone(), found.path.with_file_name(stem))
+    } else {
+        (
+            found.path.clone(),
+            found.path.with_file_name(format!(
+                "{}{DISABLED_SUFFIX}",
+                found
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| "技能文件名异常".to_string())?
+            )),
+        )
+    };
+    std::fs::rename(&from, &to).map_err(|e| format!("改名失败: {e}"))?;
+
+    // pi 在进程启动时快照技能列表，改了磁盘不 respawn 就还得等下个会话。
+    // 但重启会打断正在跑的对话，所以走 idle-aware：没对话在跑就立即重启（当前
+    // 会话马上生效），有对话在跑则等它结算完再重启。deferred 告诉前端是不是
+    // 需要等。
+    let deferred = crate::pi_gateway::any_turn_running();
+    if let Some(state) = crate::state::app_state() {
+        crate::gateway::restart_gateway_when_idle(
+            &state,
+            &format!("技能启用状态变更 → {enabled}"),
+        );
+    }
+
+    // 包内置技能（node_modules 里的）重装会被覆盖 → 记进禁用清单。
+    let in_packages = dir.canonicalize().ok().map(|r| {
+        pi_npm_dir()
+            .join("node_modules")
+            .canonicalize()
+            .map(|npm| r.starts_with(npm))
+            .unwrap_or(false)
+    });
+    if in_packages == Some(true) {
+        let mut list = read_disabled_manifest();
+        let key = to
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| skill_dir.clone());
+        if enabled {
+            list.retain(|p| p != &key);
+        } else {
+            if !list.iter().any(|p| p == &key) {
+                list.push(key);
+            }
+        }
+        write_disabled_manifest(&list);
+    }
+
+    Ok(SkillEnabledResult {
+        changed: true,
+        enabled,
+        deferred,
+    })
+}
+
+/// 把禁用清单里记着的技能重新改名回禁用态（`SKILL.md` → `SKILL.md.disabled`）。
+///
+/// npm 重装 / 包升级会重写 node_modules，把 `SKILL.md.disabled` 变回
+/// `SKILL.md`，等于用户的禁用默默失效。Helix 启动时在拉起 gateway 之前调一次，
+/// 把禁用重新贴回去。返回重新禁用的技能数。
+#[tauri::command]
+pub fn helix_reapply_disabled_skills() -> usize {
+    let list = read_disabled_manifest();
+    let mut reapplied = 0;
+    let mut kept: Vec<String> = Vec::new();
+    for entry in list {
+        let dir = Path::new(&entry);
+        // 目录已不存在（技能被卸载）→ 丢弃条目，不再纠缠。
+        if !dir.is_dir() {
+            continue;
+        }
+        match skill_markdown_path(&entry) {
+            // 正文文件都没了（包拆了一半）→ 保留条目等下次。
+            None => kept.push(entry),
+            // 已是禁用态：正常情况，继续记账。
+            Some(f) if !f.active => kept.push(entry),
+            // 启用态 = 重装把文件覆盖回来了 → 重新改名成禁用态。
+            Some(f) => {
+                if let Some(name) = f.path.file_name().and_then(|n| n.to_str()) {
+                    let to = f.path.with_file_name(format!("{name}{DISABLED_SUFFIX}"));
+                    if std::fs::rename(&f.path, &to).is_ok() {
+                        reapplied += 1;
+                    }
+                }
+                kept.push(entry);
+            }
+        }
+    }
+    write_disabled_manifest(&kept);
+    reapplied
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillEnabledResult {
+    /// 真的改了名（否则已是目标状态）。
+    pub changed: bool,
+    /// 修改后技能是否处于启用态。
+    pub enabled: bool,
+    /// 重启是否被延后（当前有对话在跑，等它结算完才重启生效）。
+    pub deferred: bool,
 }
 
 #[tauri::command]
@@ -175,8 +412,8 @@ pub fn helix_set_skill_model_invocation(
     skill_dir: String,
     enabled: bool,
 ) -> Result<SkillInvocationResult, String> {
-    let path = skill_markdown_path(&skill_dir)
-        .ok_or_else(|| "目录下找不到 SKILL.md / README.md".to_string())?;
+    let path = skill_active_md(&skill_dir)
+        .ok_or_else(|| "目录下找不到启用的 SKILL.md / README.md".to_string())?;
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let disable_key = "disable-model-invocation";
     let new_content = if enabled {
@@ -205,6 +442,7 @@ fn pi_settings_path() -> Option<PathBuf> {
 
 /// Scan each directory listed in settings.json's `skills` array, mirroring
 /// pi's own loading rule. Missing/unreadable roots are skipped silently.
+/// 这些技能同样允许禁用（改名 + 不记清单：重装不涉及），故 builtin=false。
 fn collect_settings_skills(out: &mut Vec<SkillEntry>) {
     let Some(settings_path) = pi_settings_path() else {
         return;
@@ -292,10 +530,12 @@ fn collect_skills_from_dir(
             continue;
         }
         let dir_name = entry.file_name().to_string_lossy().into_owned();
-        let builtin = builtin || dir_name.starts_with('.');
+        // 点目录 = pi/Helix 自己的内置技能，面板不删也不关。
+        let dot = dir_name.starts_with('.');
+        let builtin = builtin || dot;
         // Depth 1: <skills>/<skill>/SKILL.md
         if let Some(skill) =
-            read_skill_dir(&entry.path(), &dir_name, &dir_name, builtin, source)
+            read_skill_dir(&entry.path(), &dir_name, &dir_name, builtin, source, !dot)
         {
             out.push(skill);
             continue;
@@ -310,30 +550,38 @@ fn collect_skills_from_dir(
             }
             let child_name = child.file_name().to_string_lossy().into_owned();
             let id = format!("{dir_name}/{child_name}");
-            if let Some(skill) =
-                read_skill_dir(&child.path(), &id, &child_name, builtin, source)
-            {
+            let child_dot = child_name.starts_with('.');
+            if let Some(skill) = read_skill_dir(
+                &child.path(),
+                &id,
+                &child_name,
+                builtin || child_dot,
+                source,
+                !(dot || child_dot),
+            ) {
                 out.push(skill);
             }
         }
     }
 }
 
-/// Build a SkillEntry if `dir` contains a SKILL.md (or README.md — pi 接受两个)。
+/// Build a SkillEntry if `dir` contains a SKILL.md (or README.md — pi 接受两个，
+/// 或其禁用态 `*.disabled`)。
 /// `id` — stable identifier (relative path); `fallback_name` — dir name used
 /// when frontmatter has no `name:`; `builtin` — non-user-managed flag (dot
-/// directory, or package-bundled).
+/// directory, or package-bundled); `disableable` — 面板可给此技能开关启用/禁用。
 fn read_skill_dir(
     dir: &Path,
     id: &str,
     fallback_name: &str,
     builtin: bool,
     source: &str,
+    disableable: bool,
 ) -> Option<SkillEntry> {
-    let Some(path) = skill_markdown_path(dir.to_str().unwrap_or("")) else {
+    let Some(found) = skill_markdown_path(dir.to_str().unwrap_or("")) else {
         return None;
     };
-    let content = std::fs::read_to_string(&path).ok()?;
+    let content = std::fs::read_to_string(&found.path).ok()?;
     let (name, description) = parse_skill_frontmatter(&content);
     let name = name.unwrap_or_else(|| fallback_name.to_string());
     Some(SkillEntry {
@@ -349,6 +597,8 @@ fn read_skill_dir(
         model_invocation_disabled:
             frontmatter_has_true(&content, "disable-model-invocation")
                 .unwrap_or(false),
+        is_active: found.active,
+        disableable,
     })
 }
 
@@ -1096,7 +1346,25 @@ mod tests {
     fn list_skills_matches_pi_load_roots() {
         let skills = helix_list_skills();
         for s in &skills {
-            assert!(std::path::Path::new(&s.path).join("SKILL.md").exists());
+            // 启用态：目录里有 SKILL.md；禁用态：只有 SKILL.md.disabled。
+            let dir = std::path::Path::new(&s.path);
+            let active_md = dir.join("SKILL.md").is_file()
+                || dir.join("README.md").is_file();
+            let disabled_md = dir.join("SKILL.md.disabled").is_file()
+                || dir.join("README.md.disabled").is_file();
+            if s.is_active {
+                assert!(
+                    active_md,
+                    "启用的技能 {} 目录里找不到 SKILL.md",
+                    s.name
+                );
+            } else {
+                assert!(
+                    disabled_md,
+                    "禁用的技能 {} 目录里找不到 SKILL.md.disabled",
+                    s.name
+                );
+            }
         }
         // The pi user root (~/.pi/agent/skills) is machine-specific — only
         // assert on it when the reference skill actually exists on disk,
@@ -1137,6 +1405,39 @@ mod tests {
                 .map(|s| (s.name.as_str(), s.source.as_str()))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// 禁用态发现：只有 `SKILL.md` 算启用，改名成 `SKILL.md.disabled` 后
+    /// 仍能被找到但 `active=false`（pi 的加载器只认前者，等于真关掉）。
+    #[test]
+    fn skill_markdown_path_detects_disabled_rename() {
+        let dir = std::env::temp_dir().join(format!(
+            "helix-skill-disable-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sp = dir.join("SKILL.md");
+        std::fs::write(&sp, "---\nname: x\ndescription: y\n---\n").unwrap();
+        let s = dir.to_str().unwrap();
+
+        // 启用态
+        let f = skill_markdown_path(s).unwrap();
+        assert!(f.active);
+        assert!(skill_active_md(s).is_some());
+
+        // 改名为禁用态
+        std::fs::rename(&sp, dir.join("SKILL.md.disabled")).unwrap();
+        let f = skill_markdown_path(s).unwrap();
+        assert!(!f.active);
+        // 禁用态下 `skill_active_md`（写 frontmatter 用）拿不到路径。
+        assert!(skill_active_md(s).is_none());
+
+        // 改名回启用态
+        std::fs::rename(dir.join("SKILL.md.disabled"), &sp).unwrap();
+        assert!(skill_markdown_path(s).unwrap().active);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 开关前/后 frontmatter 标记的正确性：插入、删除、幂等。

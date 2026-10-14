@@ -565,7 +565,7 @@ export function RightSidebar() {
               ? "终端"
               : k === "tree"
                 ? "会话树"
-                : "代码";
+                : "文件";
   const openKind = (k: PageKind) => {
     if (k === "code") {
       setActivePageId("");

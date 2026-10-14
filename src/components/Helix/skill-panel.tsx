@@ -54,9 +54,10 @@ interface HelixSkill {
    * or the bundling npm package name. */
   source?: string;
   path: string;
-  /** pi 的 `disable-model-invocation: true`：模型不主动读它，只能靠
-   *  显式 `/skill:<name>` 触发。 */
-  modelInvocationDisabled?: boolean;
+  /** 技能是否启用。false = SKILL.md 已改名 SKILL.md.disabled，pi 不加载。 */
+  isActive?: boolean;
+  /** 面板能否给此技能开关启用/禁用（内置点目录为 false）。 */
+  disableable?: boolean;
 }
 
 interface PackageResult {
@@ -193,7 +194,9 @@ export function SkillPanel({}: SkillPanelProps) {
       }
       setLatestMap(map);
       const showToast = useHelixStore.getState().showToast;
-      if (outdated.length > 0) {
+      // 自动检查（后台填充「更新」按钮数据）一律不弹 toast；
+      // 结果类/失败类反馈只在手动检查时给。
+      if (manual && outdated.length > 0) {
         showToast({
           type: "info",
           title: `${outdated.length} 个插件可更新`,
@@ -203,7 +206,6 @@ export function SkillPanel({}: SkillPanelProps) {
           duration: 10000,
         });
       } else if (manual) {
-        // 手动检查才给「结果类」反馈；自动检查只在有更新时打扰用户。
         if (failed > 0) {
           showToast({
             type: "error",
@@ -223,13 +225,6 @@ export function SkillPanel({}: SkillPanelProps) {
             description: "仅本地扩展不走 npm，无法检查更新",
           });
         }
-      } else if (failed > 0 && packages.length === failed) {
-        // 自动检查全军覆没时也提醒一次，避免「更新按钮从不出现」无从诊断。
-        showToast({
-          type: "error",
-          title: "插件更新检查失败",
-          description: "无法连接 npm registry，可点右上角刷新按钮重试",
-        });
       }
     } catch (e) {
       if (manual) {
@@ -515,43 +510,61 @@ export function SkillPanel({}: SkillPanelProps) {
     return () => window.removeEventListener("focus", handleFocus);
   }, [activeTab]);
 
-  // 开关「模型自动调用」：改 SKILL.md frontmatter 的 disable-model-invocation。
-  // 关闭后模型不会主动读它，只能显式 /skill:<name> 触发——比删技能轻得多。
-  const onToggleSkillAuto = async (skill: HelixSkill) => {
+  // 开关技能「启用 / 禁用」：把正文文件在 SKILL.md ↔ SKILL.md.disabled 之间
+  // 改名。禁用后 pi 根本不加载这个技能（不进 prompt、也不能 /skill:name 触发），
+  // 随时可开回来，正文一字未动。
+  // 改名后后端触发网关 respawn，当前会话也会重新加载技能；有对话在跑时重启
+  // 会被延后到对话结算完，不打断在飞的 run。
+  const [togglingSkillId, setTogglingSkillId] = useState<string | null>(null);
+  const onToggleSkillEnabled = async (skill: HelixSkill) => {
+    const next = !(skill.isActive !== false);
+    setTogglingSkillId(skill.id);
+    // 乐观更新：先切 UI，失败再回滚
+    setSkills((prev) =>
+      prev.map((s) => (s.id === skill.id ? { ...s, isActive: next } : s)),
+    );
     try {
-      const r = await window.electron?.helixSkills?.setSkillModelInvocation(
+      const r = await window.electron?.helixSkills?.setSkillEnabled(
         skill.path,
-        !skill.modelInvocationDisabled,
+        next,
       );
       if (!r) {
         useHelixStore.getState().showToast({
           type: "error",
           title: "当前环境不支持",
-          description: "本地后端未提供技能开关命令",
+          description: "本地后端未提供技能启停命令",
         });
+        setSkills((prev) =>
+          prev.map((s) =>
+            s.id === skill.id ? { ...s, isActive: !next } : s,
+          ),
+        );
         return;
       }
       setSkills((prev) =>
         prev.map((s) =>
-          s.id === skill.id
-            ? { ...s, modelInvocationDisabled: r.disabled }
-            : s,
+          s.id === skill.id ? { ...s, isActive: r.enabled } : s,
         ),
       );
       useHelixStore.getState().showToast({
         type: "success",
-        title: r.disabled ? "已关闭模型自动调用" : "已开启模型自动调用",
-        description: r.disabled
-          ? `${skill.name} 只能靠 /skill:${skill.name} 显式触发`
-          : `${skill.name} 会被模型按描述主动读取`,
+        title: r.enabled ? "已启用技能" : "已禁用技能",
+        description: r.deferred
+          ? "有对话正在运行，等它结束后自动重启生效"
+          : "正在重启网关生效",
       });
     } catch (e) {
-      console.error("toggleSkillAuto error:", e);
+      setSkills((prev) =>
+        prev.map((s) => (s.id === skill.id ? { ...s, isActive: !next } : s)),
+      );
+      console.error("toggleSkillEnabled error:", e);
       useHelixStore.getState().showToast({
         type: "error",
         title: "修改失败",
         description: e instanceof Error ? e.message : String(e),
       });
+    } finally {
+      setTogglingSkillId(null);
     }
   };
 
@@ -820,14 +833,15 @@ export function SkillPanel({}: SkillPanelProps) {
 
   return (
     <div className="h-full w-full flex flex-col bg-transparent">
-      {/* Header — big title + action, search below (same layout as the
-          scheduled tasks panel). 40px top padding clears the window controls. */}
+      {/* Header — big title + action, tab switcher, then search below
+          (same layout as the scheduled tasks panel). 40px top padding
+          clears the window controls. */}
       <div className="px-8 pt-10 pb-4 shrink-0 border-b border-border/40">
         <div className="flex items-center justify-between">
           <h1 className="ui-title font-semibold text-foreground tracking-tight">
             插件中心
           </h1>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2">
             {activeTab === "plugins" && !showBrowse && (
               <button
                 onClick={() => void checkUpdates(true)}
@@ -902,6 +916,39 @@ export function SkillPanel({}: SkillPanelProps) {
           </div>
         </div>
 
+        {/* Tab switcher — 插件中心 / 技能中心.
+            Skills 面板之前只有渲染分支、没有任何入口：现在通过这两个 tab
+            暴露出来。默认停在「插件」，与老行为一致。 */}
+        <div className="flex items-center justify-center gap-1 mt-3">
+          <button
+            onClick={() => {
+              setActiveTab("plugins");
+              setShowBrowse(false);
+            }}
+            className={`flex items-center gap-1.5 px-3.5 h-8 rounded-lg text-[length:var(--helix-transcript-size)] transition-colors ${
+              activeTab === "plugins"
+                ? "bg-primary/10 text-primary font-medium"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
+            }`}
+            data-tip="管理扩展类插件"
+          >
+            <Puzzle className="size-4" />
+            插件
+          </button>
+          <button
+            onClick={() => setActiveTab("skills")}
+            className={`flex items-center gap-1.5 px-3.5 h-8 rounded-lg text-[length:var(--helix-transcript-size)] transition-colors ${
+              activeTab === "skills"
+                ? "bg-primary/10 text-primary font-medium"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
+            }`}
+            data-tip="管理 SKILL.md 技能"
+          >
+            <Zap className="size-4" />
+            技能
+          </button>
+        </div>
+
         {!showBrowse && (
           <div className="relative mt-3 flex justify-center">
             <Search className="absolute left-[calc(2.5%+12px)] top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
@@ -909,7 +956,11 @@ export function SkillPanel({}: SkillPanelProps) {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索插件..."
+              placeholder={
+                activeTab === "skills"
+                  ? "搜索技能..."
+                  : "搜索插件..."
+              }
               className="w-[95%] h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
             />
           </div>
@@ -1047,16 +1098,24 @@ export function SkillPanel({}: SkillPanelProps) {
                 </p>
               ) : (
                 <div className="space-y-2">
-                  {filteredSkills.map((skill) => (
+                  {filteredSkills.map((skill) => {
+                    const isActive = skill.isActive !== false;
+                    const isSkillToggling = togglingSkillId === skill.id;
+                    return (
                     <div
                       key={skill.id}
-                      className="flex items-center gap-3 p-3 rounded-xl border border-border/50 bg-card/50 hover:bg-accent/30 hover:border-border transition-colors"
+                      className={`flex items-center gap-3 p-3 rounded-xl border border-border/50 bg-card/50 hover:bg-accent/30 hover:border-border transition-colors ${!isActive ? "opacity-50" : ""}`}
                     >
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground truncate">
                             {skill.name}
                           </p>
+                          {!isActive && (
+                            <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground/70">
+                              已禁用
+                            </span>
+                          )}
                           {skill.source && (
                             <span
                               className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-primary/10 text-primary/80 font-mono"
@@ -1072,22 +1131,26 @@ export function SkillPanel({}: SkillPanelProps) {
                           </p>
                         )}
                       </div>
-                      <button
-                        onClick={() => void onToggleSkillAuto(skill)}
-                        className={`shrink-0 flex items-center gap-1 px-1.5 h-7 rounded text-[calc(var(--helix-transcript-size)*0.786)] border transition-colors ${
-                          skill.modelInvocationDisabled
-                            ? "border-border/50 bg-muted/30 text-muted-foreground/60 hover:text-muted-foreground"
-                            : "border-primary/40 bg-primary/10 text-primary hover:bg-primary/20"
-                        }`}
-                        data-tip={
-                          skill.modelInvocationDisabled
-                            ? "模型不会主动读这个技能，只能显式 /skill:name 触发。点击开启"
-                            : "模型会按描述主动读这个技能。点击关闭后只能显式 /skill:name 触发"
-                        }
-                      >
-                        <Zap className="size-3" />
-                        {skill.modelInvocationDisabled ? "仅手动" : "自动"}
-                      </button>
+                      {skill.disableable !== false && (
+                        <button
+                          onClick={() => void onToggleSkillEnabled(skill)}
+                          disabled={isSkillToggling}
+                          className={`shrink-0 relative w-10 h-6 rounded-full transition-colors duration-200 disabled:opacity-50 ${
+                            isActive ? "bg-primary" : "bg-muted-foreground/20"
+                          }`}
+                          data-tip={
+                            isActive
+                              ? "禁用：pi 不再加载这个技能（立即重启网关生效）。"
+                              : "启用：恢复加载这个技能（立即重启网关生效）。"
+                          }
+                        >
+                          <span
+                            className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform duration-200 ${
+                              isActive ? "translate-x-4" : ""
+                            }`}
+                          />
+                        </button>
+                      )}
                       {!skill.isBuiltin && (
                         <button
                           onClick={() => void onDeleteSkill(skill)}
@@ -1098,7 +1161,8 @@ export function SkillPanel({}: SkillPanelProps) {
                         </button>
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </>
