@@ -558,18 +558,20 @@ export const electronGit = {
   async diff(
     filePath?: string,
     staged?: boolean,
+    cwd?: string | null,
   ): Promise<{ ok: boolean; diff?: string; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.diff(filePath, staged);
+    if (api?.git) return api.git.diff(filePath, staged, cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
   async diffHead(
     filePath?: string,
     context?: number,
+    cwd?: string | null,
   ): Promise<{ ok: boolean; diff?: string; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.diffHead(filePath, context);
+    if (api?.git) return api.git.diffHead(filePath, context, cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
@@ -613,29 +615,39 @@ export const electronGit = {
     };
   },
 
-  async revert(filePath?: string): Promise<{ ok: boolean; error?: string }> {
+  async revert(
+    filePath?: string,
+    cwd?: string | null,
+  ): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.revert(filePath);
+    if (api?.git) return api.git.revert(filePath, cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async stage(filePath?: string): Promise<{ ok: boolean; error?: string }> {
+  async stage(
+    filePath?: string,
+    cwd?: string | null,
+  ): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.stage(filePath);
+    if (api?.git) return api.git.stage(filePath, cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async unstage(filePath?: string): Promise<{ ok: boolean; error?: string }> {
+  async unstage(
+    filePath?: string,
+    cwd?: string | null,
+  ): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.unstage(filePath);
+    if (api?.git) return api.git.unstage(filePath, cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
   async commit(
     message?: string,
+    cwd?: string | null,
   ): Promise<{ ok: boolean; output?: string; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.commit(message);
+    if (api?.git) return api.git.commit(message, cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
@@ -675,14 +687,15 @@ export const electronGit = {
 
   async log(
     count?: number,
+    cwd?: string | null,
   ): Promise<{ ok: boolean; output?: string; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.log(count);
+    if (api?.git) return api.git.log(count, cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
   // Worktree operations
-  async worktreeList(): Promise<{
+  async worktreeList(cwd?: string | null): Promise<{
     ok: boolean;
     worktrees?: Array<{
       path: string;
@@ -697,7 +710,7 @@ export const electronGit = {
     error?: string;
   }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.worktreeList();
+    if (api?.git) return api.git.worktreeList(cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
@@ -705,6 +718,7 @@ export const electronGit = {
     path: string;
     branch?: string;
     newBranch?: string;
+    cwd?: string | null;
   }): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI();
     if (api?.git) return api.git.worktreeAdd(opts);
@@ -713,29 +727,34 @@ export const electronGit = {
 
   async worktreeRemove(
     wtPath: string,
+    cwd?: string | null,
   ): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.worktreeRemove(wtPath);
+    if (api?.git) return api.git.worktreeRemove(wtPath, cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async worktreeLock(wtPath: string): Promise<{ ok: boolean; error?: string }> {
+  async worktreeLock(
+    wtPath: string,
+    cwd?: string | null,
+  ): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.worktreeLock(wtPath);
+    if (api?.git) return api.git.worktreeLock(wtPath, cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
   async worktreeUnlock(
     wtPath: string,
+    cwd?: string | null,
   ): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.worktreeUnlock(wtPath);
+    if (api?.git) return api.git.worktreeUnlock(wtPath, cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async worktreePrune(): Promise<{ ok: boolean; error?: string }> {
+  async worktreePrune(cwd?: string | null): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI();
-    if (api?.git) return api.git.worktreePrune();
+    if (api?.git) return api.git.worktreePrune(cwd);
     return { ok: false, error: "Git not available in browser mode" };
   },
 
@@ -744,6 +763,7 @@ export const electronGit = {
     remote?: string;
     branch?: string;
     force?: boolean;
+    cwd?: string | null;
   }): Promise<{ ok: boolean; output?: string; error?: string }> {
     const api = getElectronAPI();
     if (api?.git) return api.git.push(opts);
@@ -753,6 +773,7 @@ export const electronGit = {
   async pull(opts?: {
     remote?: string;
     branch?: string;
+    cwd?: string | null;
   }): Promise<{ ok: boolean; output?: string; error?: string }> {
     const api = getElectronAPI();
     if (api?.git) return api.git.pull(opts);
@@ -761,6 +782,7 @@ export const electronGit = {
 
   async fetch(opts?: {
     remote?: string;
+    cwd?: string | null;
   }): Promise<{ ok: boolean; output?: string; error?: string }> {
     const api = getElectronAPI();
     if (api?.git) return api.git.fetch(opts);

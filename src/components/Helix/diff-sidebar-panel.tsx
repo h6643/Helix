@@ -15,7 +15,7 @@ import {
   type GitStatUnavailable,
 } from "@/hooks/use-git-change-stat";
 import { previewKindOf } from "@/lib/doc-preview";
-import { electronFS, electronGit } from "@/lib/electron-bridge";
+import { electronFS, electronGit, getElectronAPI } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
 /* ── brand icons (inline SVG) ─────────────────────────────────────────── */
@@ -167,9 +167,8 @@ function joinWorkPath(base: string, rel: string): string {
 }
 
 /**
- * Right-sidebar "更改" tab：整栏就是选中文件的内联 diff（行号 + 增删着色 +
- * 「N 行未改动」折叠条，点折叠条展开真实上下文 —— 后端 diff_head 带 context
- * 参数一次拿全文）。文件切换走文件头右侧的 ‹ i/n ›。
+ * Right-sidebar "更改" tab：单栏 = 选中文件的内联 diff（双行号 + 增删着色 +
+ * 连续未改动行收成「N unmodified lines」条）。文件切换走文件头右侧的 ‹ i/n ›。
  * 顶部一行：未提交 + 总 +N/-M + 「提交或推送」（打开右上角统一工作面板）。
  * 点文件头的打开按钮 = 在「文件」面打开并跳到第一处改动。
  */
@@ -187,7 +186,11 @@ export function DiffSidebarPanel() {
   const files = useMemo(() => gitStat?.files ?? [], [gitStat]);
 
   const [selected, setSelected] = useState<string | null>(null);
-  const [diffText, setDiffText] = useState<string | null>(null);
+  // diff 带所属文件路径：切换文件的瞬间旧内容不算数（渲染时按 path 校验），
+  // 空 diff（纯模式变更）也能和「还在加载」区分开。
+  const [diff, setDiff] = useState<{ path: string; text: string } | null>(
+    null,
+  );
   const [diffError, setDiffError] = useState<string | null>(null);
 
   // 自动选中第一个文件；选中的文件从列表消失（提交/撤销掉）就跟丢
@@ -201,37 +204,51 @@ export function DiffSidebarPanel() {
     }
   }, [files, selected]);
 
-  // 选中文件的 diff。context=100000 一次拿全上下文，「N 行未改动」折叠条
-  // 展开时不需要再请求。未跟踪文件对 HEAD 没有 diff：读内容伪造成全增。
+  // 选中文件的 diff。context=100000 一次拿全文，「N unmodified lines」的条数
+  // 才是真数（否则后端只给 3 行上下文，收起的行数会撒谎）。
+  // 未跟踪文件对 HEAD 没有 diff：读内容伪造成全增。
   useEffect(() => {
     if (!selected || !gitWorkDir) {
-      setDiffText(null);
+      setDiff(null);
       setDiffError(null);
       return;
     }
     const f = files.find((x) => x.path === selected);
     if (!f) return;
     let cancelled = false;
+    const path = selected;
     setDiffError(null);
     if (f.binary) {
-      setDiffText(null);
+      setDiff(null);
       return;
     }
     const abs = joinWorkPath(gitWorkDir, selected);
     void (async () => {
+      // 未跟踪文件走读文件伪造全增 diff，而 `fs.read` 在后端要过 safe_path 的根
+      // 校验（state.work_dir + allowed_roots）。主进程 work_dir 是 workdir.json
+      // 里那个项目（经常与当前对话的项目不是同一个），不先把 gitWorkDir 登记成
+      // 合法根，读 Helix 仓库里的新文件就会报 "Path is outside working
+      // directory" —— 文件列表明明列出来了，点开却只有这一句。
+      // 与 file-tree-panel / file-change-summary-card 的 allowRoot 口径一致。
+      try {
+        await getElectronAPI()?.fs?.allowRoot?.(gitWorkDir);
+      } catch {
+        /* best-effort */
+      }
       try {
         if (f.untracked) {
           const content = await electronFS.readFile(abs);
           if (cancelled) return;
           const ls = content.replace(/\r\n?/g, "\n").split("\n");
-          setDiffText(
-            `@@ -0,0 +1,${ls.length} @@\n${ls.map((l) => `+${l}`).join("\n")}`,
-          );
+          setDiff({
+            path,
+            text: `@@ -0,0 +1,${ls.length} @@\n${ls.map((l) => `+${l}`).join("\n")}`,
+          });
           return;
         }
-        const res = await electronGit.diffHead(abs, 100000);
+        const res = await electronGit.diffHead(abs, 100000, gitWorkDir);
         if (cancelled) return;
-        if (res.ok) setDiffText(res.diff ?? "");
+        if (res.ok) setDiff({ path, text: res.diff ?? "" });
         else setDiffError(res.error ?? "git diff 失败");
       } catch (e) {
         if (!cancelled)
@@ -258,6 +275,13 @@ export function DiffSidebarPanel() {
       return;
     }
     const createdEmpty = st.ensureEditorTab(abs, name);
+    // 同上面的 diff effect：先把项目根登记成合法根再读文件，否则主进程
+    // work_dir 是别的项目时 fs.read 直接判越界。
+    try {
+      await getElectronAPI()?.fs?.allowRoot?.(gitWorkDir);
+    } catch {
+      /* best-effort */
+    }
     try {
       const content = await electronFS.readFile(abs);
       if (content == null) throw new Error("读取为空");
@@ -272,7 +296,7 @@ export function DiffSidebarPanel() {
       return;
     }
     try {
-      const res = await electronGit.diffHead(abs);
+      const res = await electronGit.diffHead(abs, undefined, gitWorkDir);
       const hunk = res.ok && res.diff ? firstHunk(res.diff) : null;
       if (hunk) st.revealEditorRange(abs, hunk.start, hunk.end);
     } catch {
@@ -378,8 +402,14 @@ export function DiffSidebarPanel() {
                 <div className="h-full flex items-center justify-center px-4 text-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
                   {diffError}
                 </div>
-              ) : diffText ? (
-                <GitDiffView key={selected ?? ""} text={diffText} />
+              ) : diff && diff.path === selected ? (
+                diff.text ? (
+                  <GitDiffView key={selected} text={diff.text} />
+                ) : (
+                  <div className="h-full flex items-center justify-center px-4 text-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
+                    该文件没有可比对的文本差异
+                  </div>
+                )
               ) : (
                 <div className="h-full flex items-center justify-center px-4 text-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50">
                   {files.length ? "加载中…" : "没有未提交的更改"}
@@ -445,7 +475,7 @@ function parseDiff(text: string): DiffLine[] {
   return out;
 }
 
-/** 连续未改动行 ≥ 这个数默认收成「N unmodified lines」折叠条（对齐截图行为）。 */
+/** 连续未改动行 ≥ 这个数收成一条「N unmodified lines」，不平铺。 */
 const UNCHANGED_COLLAPSE_MIN = 7;
 
 function GitDiffView({ text }: { text: string }) {
@@ -478,9 +508,7 @@ function GitDiffView({ text }: { text: string }) {
   return (
     <div className="font-mono text-[calc(var(--helix-transcript-size)*0.7857)] leading-[1.5] py-1">
       {segs.map((seg) => {
-        // 连续未改动行足够长 → 收成一条「N unmodified lines」折叠占位。
-        // 按设计它**不可展开**（纯展示），故不用 button/onClick，也不参与
-        // hover 高亮；点击无任何副作用。
+        // 纯展示占位：不可点开，所以是 div 而不是 button。
         if (seg.run) {
           return (
             <div

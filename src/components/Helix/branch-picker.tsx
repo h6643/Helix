@@ -169,6 +169,7 @@ export function BranchPicker({
     setConfirmDialog((prev) => ({ ...prev, committing: true }));
     const commitRes = await electronGit.commit(
       `chore: 切换前自动提交 (${new Date().toLocaleString("zh-CN")})`,
+      workDir,
     );
     if (!commitRes.ok) {
       storeActions.showToast({

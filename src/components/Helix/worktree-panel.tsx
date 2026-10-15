@@ -54,7 +54,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
     setLoading(true);
     setError(null);
     try {
-      const result = await electronGit.worktreeList();
+      const result = await electronGit.worktreeList(selectedWorkDir);
       if (result.ok) {
         setWorktrees(result.worktrees || []);
       } else {
@@ -84,6 +84,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
         path: newPath.trim(),
         branch: newBranch.trim() || undefined,
         newBranch: createFromBranch.trim() || undefined,
+        cwd: selectedWorkDir,
       });
       if (result.ok) {
         setShowAddForm(false);
@@ -112,7 +113,10 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
     }
     setActionLoading(wt.path);
     try {
-      const result = await electronGit.worktreeRemove(wt.path);
+      const result = await electronGit.worktreeRemove(
+        wt.path,
+        selectedWorkDir,
+      );
       if (result.ok) {
         await loadWorktrees();
       } else {
@@ -135,7 +139,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
       const fn = wt.locked
         ? electronGit.worktreeUnlock
         : electronGit.worktreeLock;
-      const result = await fn(wt.path);
+      const result = await fn(wt.path, selectedWorkDir);
       if (result.ok) {
         showToast({ type: "success", title: wt.locked ? "已解锁" : "已锁定" });
         await loadWorktrees();
@@ -156,7 +160,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
   const handlePrune = async () => {
     setActionLoading("prune");
     try {
-      const result = await electronGit.worktreePrune();
+      const result = await electronGit.worktreePrune(selectedWorkDir);
       if (result.ok) {
         await loadWorktrees();
       }

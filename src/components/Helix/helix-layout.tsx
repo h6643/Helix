@@ -163,14 +163,6 @@ const TerminalPanel = lazy(() =>
 const WorktreePanel = lazy(() =>
   import("./worktree-panel").then((m) => ({ default: m.WorktreePanel })),
 );
-const PrPanel = lazy(() =>
-  import("./pr-panel").then((m) => ({ default: m.PrPanel })),
-);
-const DiagnosticsPanel = lazy(() =>
-  import("./diagnostics-panel").then((m) => ({
-    default: m.DiagnosticsPanel,
-  })),
-);
 const DelegationsPanel = lazy(() =>
   import("./delegations-panel").then((m) => ({ default: m.DelegationsPanel })),
 );
@@ -589,8 +581,6 @@ export function HelixLayout() {
   const showChannelsCenter = useHelixStore((s) => s.showChannelsCenter);
   const showRuntimePanel = useHelixStore((s) => s.showRuntimePanel);
   const showWorktreePanel = useHelixStore((s) => s.showWorktreePanel);
-  const showPrPanel = useHelixStore((s) => s.showPrPanel);
-  const showDiagnosticsPanel = useHelixStore((s) => s.showDiagnosticsPanel);
   const showSubAgentPanel = useHelixStore((s) => s.showSubAgentPanel);
   const showActivityFeed = useHelixStore((s) => s.showActivityFeed);
   const showArtifactsBrowser = useHelixStore((s) => s.showArtifactsBrowser);
@@ -604,8 +594,6 @@ export function HelixLayout() {
   const sidePanelOpen =
     showRuntimePanel ||
     showWorktreePanel ||
-    showPrPanel ||
-    showDiagnosticsPanel ||
     showSubAgentPanel ||
     showSkillPanel ||
     showScheduledTasksPanel;
@@ -683,8 +671,6 @@ export function HelixLayout() {
     showSkillPanel ||
     showRuntimePanel ||
     showWorktreePanel ||
-    showPrPanel ||
-    showDiagnosticsPanel ||
     showSubAgentPanel;
   const activeSessionWorkDir = useHelixStore((s) => s.activeSessionWorkDir);
   // Which workDir the branch picker operates on. An active session uses its
@@ -824,6 +810,7 @@ export function HelixLayout() {
           message && message.trim().length > 0
             ? message.trim()
             : ``,
+          branchPickerWorkDir,
         );
         if (!commitRes.ok) {
           storeActions.showToast({
@@ -834,7 +821,7 @@ export function HelixLayout() {
           return;
         }
         if (pushAfter) {
-          const pushRes = await electronGit.push();
+          const pushRes = await electronGit.push({ cwd: branchPickerWorkDir });
           if (!pushRes.ok) {
             storeActions.showToast({
               type: "error",
@@ -2777,22 +2764,6 @@ export function HelixLayout() {
                     <PanelSuspense>
                       <WorktreePanel
                         onClose={() => storeActions.toggleWorktreePanel()}
-                      />
-                    </PanelSuspense>
-                  </div>
-                )}
-                {showPrPanel && (
-                  <div className="absolute inset-0 z-20">
-                    <PanelSuspense>
-                      <PrPanel onClose={() => storeActions.togglePrPanel()} />
-                    </PanelSuspense>
-                  </div>
-                )}
-                {showDiagnosticsPanel && (
-                  <div className="absolute inset-0 z-20">
-                    <PanelSuspense>
-                      <DiagnosticsPanel
-                        onClose={() => storeActions.toggleDiagnosticsPanel()}
                       />
                     </PanelSuspense>
                   </div>

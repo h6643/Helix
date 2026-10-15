@@ -475,25 +475,30 @@ function buildTauriAPI(): ElectronAPI {
   api.git = {
     status: (cwd?: string | null) =>
       invoke("status", { targetCwd: cwd ?? null }),
-    diff: (filePath?: string, staged?: boolean) =>
-      invoke("diff", { filePath: filePath ?? null, staged: staged ?? null }),
-    diffHead: (filePath?: string, context?: number) =>
+    diff: (filePath?: string, staged?: boolean, cwd?: string | null) =>
+      invoke("diff", {
+        filePath: filePath ?? null,
+        staged: staged ?? null,
+        targetCwd: cwd ?? null,
+      }),
+    diffHead: (filePath?: string, context?: number, cwd?: string | null) =>
       invoke("diff_head", {
         filePath: filePath ?? null,
         context: context ?? null,
+        targetCwd: cwd ?? null,
       }),
     diffNumstat: (cwd?: string | null) =>
       invoke("diff_numstat", { targetCwd: cwd ?? null }),
     diffNumstatFull: (cwd?: string | null) =>
       invoke("diff_numstat_full", { targetCwd: cwd ?? null }),
-    revert: (filePath?: string) =>
-      invoke("revert", { filePath: filePath ?? null }),
-    stage: (filePath?: string) =>
-      invoke("stage", { filePath: filePath ?? null }),
-    unstage: (filePath?: string) =>
-      invoke("unstage", { filePath: filePath ?? null }),
-    commit: (message?: string) =>
-      invoke("commit", { message: message ?? null }),
+    revert: (filePath?: string, cwd?: string | null) =>
+      invoke("revert", { filePath: filePath ?? null, targetCwd: cwd ?? null }),
+    stage: (filePath?: string, cwd?: string | null) =>
+      invoke("stage", { filePath: filePath ?? null, targetCwd: cwd ?? null }),
+    unstage: (filePath?: string, cwd?: string | null) =>
+      invoke("unstage", { filePath: filePath ?? null, targetCwd: cwd ?? null }),
+    commit: (message?: string, cwd?: string | null) =>
+      invoke("commit", { message: message ?? null, targetCwd: cwd ?? null }),
     branchList: (cwd?: string | null) =>
       invoke("branch_list", { targetCwd: cwd ?? null }),
     branchSwitch: (branch: string, cwd?: string | null) =>
@@ -502,13 +507,19 @@ function buildTauriAPI(): ElectronAPI {
       invoke("branch_create", { branch, targetCwd: cwd ?? null }),
     currentBranch: (cwd?: string | null) =>
       invoke("current_branch", { targetCwd: cwd ?? null }),
-    log: (count?: number) => invoke("log", { count: count ?? null }),
-    worktreeList: () => invoke("worktree_list"),
+    log: (count?: number, cwd?: string | null) =>
+      invoke("log", { count: count ?? null, targetCwd: cwd ?? null }),
+    worktreeList: (cwd?: string | null) =>
+      invoke("worktree_list", { targetCwd: cwd ?? null }),
     worktreeAdd: (opts: unknown) => invoke("worktree_add", { opts }),
-    worktreeRemove: (wtPath: string) => invoke("worktree_remove", { wtPath }),
-    worktreeLock: (wtPath: string) => invoke("worktree_lock", { wtPath }),
-    worktreeUnlock: (wtPath: string) => invoke("worktree_unlock", { wtPath }),
-    worktreePrune: () => invoke("worktree_prune"),
+    worktreeRemove: (wtPath: string, cwd?: string | null) =>
+      invoke("worktree_remove", { wtPath, targetCwd: cwd ?? null }),
+    worktreeLock: (wtPath: string, cwd?: string | null) =>
+      invoke("worktree_lock", { wtPath, targetCwd: cwd ?? null }),
+    worktreeUnlock: (wtPath: string, cwd?: string | null) =>
+      invoke("worktree_unlock", { wtPath, targetCwd: cwd ?? null }),
+    worktreePrune: (cwd?: string | null) =>
+      invoke("worktree_prune", { targetCwd: cwd ?? null }),
     push: (opts?: unknown) => invoke("push", { opts: opts ?? null }),
     pull: (opts?: unknown) => invoke("pull", { opts: opts ?? null }),
     fetch: (opts?: unknown) => invoke("fetch", { opts: opts ?? null }),

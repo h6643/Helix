@@ -95,6 +95,7 @@ import {
   helixApi,
   sendRpc,
 } from "@/lib/electron-bridge";
+import { isSessionBackfillNotice } from "@/lib/extension-notices";
 import { generateId } from "@/lib/format";
 import {
   processClipboardImage,
@@ -4305,12 +4306,6 @@ export function AgentFlowPanel() {
       busyBehavior?: "steer" | "followUp";
     }) => {
       const isBackground = !!opts?.sessionId;
-      // 本轮所属项目根（本机语义），开局就定下来：回合末尾再读 activeSessionWorkDir
-      // 可能已经被别的对话切走，检查会跑错仓库。
-      const runWorkDir = localProjectRoot(
-        useHelixStore.getState().activeSessionWorkDir ??
-          useHelixStore.getState().selectedWorkDir,
-      );
       const currentInput = opts?.prompt ?? inputValueRef.current;
       // 终端式输入历史：记录用户从输入框发送的文本（程序化 prompt / 斜杠命令除外）。
       if (!opts?.prompt) pushInputHistory(currentInput);
@@ -4443,15 +4438,6 @@ export function AgentFlowPanel() {
               // 调 handleBtwQuestion 新建，每次 /btw 都把上一条旁路对话顶掉
               // （面板只显示 bylineReplies[mainCid] 这一条）。
               void handleBtwAsk(question);
-              break;
-            }
-            case "pr": {
-              // PR / 诊断面板是铺满主区的覆盖层，命令只负责开合（再发一次即收起）。
-              useHelixStore.getState().togglePrPanel();
-              break;
-            }
-            case "diagnostics": {
-              useHelixStore.getState().toggleDiagnosticsPanel();
               break;
             }
           }
@@ -6361,13 +6347,7 @@ export function AgentFlowPanel() {
                   // pi-hermes-memory 的 session backfill 每次会话启动都会播报
                   // 「🧠 Session backfill complete: ...」例行状态，对用户无意义，
                   // 在前端直接静默（其余扩展播报照常展示）。
-                  const notice = text.trim();
-                  if (
-                    notice.startsWith("🧠 Session backfill") ||
-                    notice.includes("Session backfill complete")
-                  ) {
-                    return;
-                  }
+                  if (isSessionBackfillNotice(text)) return;
                   setExtensionNotices((prev) =>
                     [...prev, { id: generateId(), ts: Date.now(), text }].slice(
                       -20,
@@ -8755,51 +8735,28 @@ export function AgentFlowPanel() {
             useHelixStore.getState();
           if (gitAutoCommit) {
             try {
-              const stageResult = await window.electron.git.stage();
+              // targetCwd：这条对话的项目根。不传会落到后端 state.work_dir
+              // （workdir.json 里那个项目），于是「在 Helix 仓库里自动提交」
+              // 变成「在 Hcode 仓库里 add -A + commit」——把无关仓库的脏改动
+              // 一起卷进来，正是用户报的「明明在项目内却报 outside repository」。
+              const autoCommitCwd = localProjectRoot(
+                useHelixStore.getState().activeSessionWorkDir ??
+                  useHelixStore.getState().selectedWorkDir,
+              );
+              const stageResult = await window.electron.git.stage(
+                undefined,
+                autoCommitCwd,
+              );
               if (stageResult?.ok) {
                 const msg = gitCommitTemplate || "chore: auto-commit changes";
-                await window.electron.git.commit(msg);
+                await window.electron.git.commit(msg, autoCommitCwd);
                 if (gitAutoPush) {
-                  await window.electron.git.push();
+                  await window.electron.git.push({ cwd: autoCommitCwd });
                 }
               }
             } catch (e) {
               console.error("[GitAutoCommit] Failed:", e);
             }
-          }
-        }
-
-        // 回合结束自动诊断（「诊断」面板里的「每轮结束自动检查」）：跑项目自带的
-        // 类型检查/lint，结果缓存进 store，面板打开即见。
-        // fire-and-forget —— cargo check 可能几十秒，不能挡住后面的持久化。
-        // 后台旁路 run（/btw）不触发：它不动工作区，检查只会白跑一遍。
-        if (
-          isElectron() &&
-          sid &&
-          !isBackground &&
-          !controller.signal.aborted
-        ) {
-          const { diagnosticsAfterRun } = useHelixStore.getState();
-          if (diagnosticsAfterRun && runWorkDir) {
-            void window.electron.diagnostics
-              ?.run({ cwd: runWorkDir })
-              .then((r) => {
-                const store = useHelixStore.getState();
-                if (r.ok && r.cwd) store.setLastDiagnostics(r.cwd, r);
-                const errors = r.counts?.errors ?? 0;
-                if (r.ok && errors > 0) {
-                  store.showToast({
-                    type: "warning",
-                    title: `${r.label ?? "检查"}：${errors} 个错误`,
-                    description:
-                      "发 /diagnostics 打开「诊断」查看，可一键交给 AI 修复",
-                    duration: 6000,
-                  });
-                }
-              })
-              .catch(() => {
-                // 检查跑不起来（工具缺失 / 超时）不值得打断对话
-              });
           }
         }
 

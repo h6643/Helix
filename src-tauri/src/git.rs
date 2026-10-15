@@ -92,6 +92,7 @@ pub fn diff(
     state: State<'_, Arc<AppState>>,
     file_path: Option<String>,
     staged: Option<bool>,
+    target_cwd: Option<String>,
 ) -> Value {
     let mut args: Vec<String> = vec!["diff".to_string()];
     if staged.unwrap_or(false) {
@@ -101,7 +102,7 @@ pub fn diff(
         args.push("--".to_string());
         args.push(fp);
     }
-    match git_exec(&state, &args, None) {
+    match git_exec(&state, &args, target_cwd.as_deref()) {
         Ok((stdout, _)) => json!({ "ok": true, "diff": stdout }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
@@ -112,6 +113,7 @@ pub fn diff_head(
     state: State<'_, Arc<AppState>>,
     file_path: Option<String>,
     context: Option<u32>,
+    target_cwd: Option<String>,
 ) -> Value {
     let mut args: Vec<String> = vec!["diff".to_string(), "HEAD".to_string()];
     // context：「更改」面板要一次拿全文件上下文，自己折叠「N 行未改动」并支持
@@ -123,59 +125,87 @@ pub fn diff_head(
         args.push("--".to_string());
         args.push(fp);
     }
-    match git_exec(&state, &args, None) {
+    // target_cwd：调用方（右侧「更改」面板）已经知道这条对话的项目根，必须显式
+    // 传下来。不传就会落到 git_cwd 的兜底 state.work_dir —— 那是**主进程持久化
+    // 的 workdir.json**（= 用户上次选的项目），跟当前对话的项目经常不是同一个。
+    // 症状：`git diff HEAD -- D:/Project/Helix/src-tauri/src/delegations.rs` 在
+    // `D:/桌面/Hcode` 里执行 → git 报「is outside repository at 'D:/桌面/Hcode'」，
+    // 于是文件列表（diff_numstat_full 是带 cwd 的）明明正确，点开却全是报错。
+    match git_exec(&state, &args, target_cwd.as_deref()) {
         Ok((stdout, _)) => json!({ "ok": true, "diff": stdout }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
 #[tauri::command]
-pub fn revert(state: State<'_, Arc<AppState>>, file_path: Option<String>) -> Value {
+pub fn revert(
+    state: State<'_, Arc<AppState>>,
+    file_path: Option<String>,
+    target_cwd: Option<String>,
+) -> Value {
+    let cwd = target_cwd.as_deref();
     match file_path {
         Some(fp) => {
-            let r1 = git_exec(&state, &["checkout", "HEAD", "--", fp.as_str()], None);
-            let r2 = git_exec(&state, &["clean", "-fd", "--", fp.as_str()], None);
+            let r1 = git_exec(&state, &["checkout", "HEAD", "--", fp.as_str()], cwd);
+            let r2 = git_exec(&state, &["clean", "-fd", "--", fp.as_str()], cwd);
             if r1.is_err() && r2.is_err() {
                 return json!({ "ok": false, "error": r1.err().unwrap_or_default() });
             }
             json!({ "ok": true })
         }
         None => {
-            if git_exec(&state, &["checkout", "HEAD", "--", "."], None).is_err() {
+            if git_exec(&state, &["checkout", "HEAD", "--", "."], cwd).is_err() {
                 return json!({ "ok": false, "error": "checkout failed" });
             }
-            let _ = git_exec(&state, &["clean", "-fd"], None);
+            let _ = git_exec(&state, &["clean", "-fd"], cwd);
             json!({ "ok": true })
         }
     }
 }
 
 #[tauri::command]
-pub fn stage(state: State<'_, Arc<AppState>>, file_path: Option<String>) -> Value {
+pub fn stage(
+    state: State<'_, Arc<AppState>>,
+    file_path: Option<String>,
+    target_cwd: Option<String>,
+) -> Value {
     let target = file_path.as_deref().unwrap_or(".");
-    match git_exec(&state, &["add", target], None) {
+    match git_exec(&state, &["add", target], target_cwd.as_deref()) {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
 #[tauri::command]
-pub fn unstage(state: State<'_, Arc<AppState>>, file_path: Option<String>) -> Value {
+pub fn unstage(
+    state: State<'_, Arc<AppState>>,
+    file_path: Option<String>,
+    target_cwd: Option<String>,
+) -> Value {
     let target = file_path.as_deref().unwrap_or(".");
-    match git_exec(&state, &["reset", "-q", "HEAD", "--", target], None) {
+    match git_exec(
+        &state,
+        &["reset", "-q", "HEAD", "--", target],
+        target_cwd.as_deref(),
+    ) {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
 #[tauri::command]
-pub fn commit(state: State<'_, Arc<AppState>>, message: Option<String>) -> Value {
+pub fn commit(
+    state: State<'_, Arc<AppState>>,
+    message: Option<String>,
+    target_cwd: Option<String>,
+) -> Value {
     let msg = message.unwrap_or_else(|| "chore: auto-commit".to_string());
-    match git_exec(&state, &["add", "-A"], None) {
+    let cwd = target_cwd.as_deref();
+    match git_exec(&state, &["add", "-A"], cwd) {
         Ok(_) => {}
         Err(e) => return json!({ "ok": false, "error": e }),
     }
-    match git_exec(&state, &["commit", "-m", msg.as_str()], None) {
+    match git_exec(&state, &["commit", "-m", msg.as_str()], cwd) {
         Ok((stdout, _)) => json!({ "ok": true, "output": stdout.trim() }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
@@ -531,9 +561,17 @@ pub fn current_branch(state: State<'_, Arc<AppState>>, target_cwd: Option<String
 }
 
 #[tauri::command]
-pub fn log(state: State<'_, Arc<AppState>>, count: Option<u32>) -> Value {
+pub fn log(
+    state: State<'_, Arc<AppState>>,
+    count: Option<u32>,
+    target_cwd: Option<String>,
+) -> Value {
     let n = count.unwrap_or(20).to_string();
-    match git_exec(&state, &["log", "--oneline", "-n", n.as_str()], None) {
+    match git_exec(
+        &state,
+        &["log", "--oneline", "-n", n.as_str()],
+        target_cwd.as_deref(),
+    ) {
         Ok((stdout, _)) => json!({ "ok": true, "output": stdout.trim() }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
@@ -542,8 +580,12 @@ pub fn log(state: State<'_, Arc<AppState>>, count: Option<u32>) -> Value {
 // ── worktree ───────────────────────────
 
 #[tauri::command]
-pub fn worktree_list(state: State<'_, Arc<AppState>>) -> Value {
-    match git_exec(&state, &["worktree", "list", "--porcelain"], None) {
+pub fn worktree_list(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
+    match git_exec(
+        &state,
+        &["worktree", "list", "--porcelain"],
+        target_cwd.as_deref(),
+    ) {
         Ok((stdout, _)) => {
             let mut entries: Vec<Value> = Vec::new();
             let mut current: Option<serde_json::Map<String, Value>> = None;
@@ -605,6 +647,14 @@ pub fn worktree_add(state: State<'_, Arc<AppState>>, opts: Value) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // cwd 由调用方（worktree 面板）显式给出：与上面其余命令同一个理由——
+    // 缺省会落到 state.work_dir（workdir.json 里那个项目），而面板操作的是
+    // 当前对话的项目。用户报过「点 + 号建 worktree，建到了别的仓库里」。
+    let target_cwd = opts
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty());
     let branch = opts
         .get("branch")
         .and_then(|v| v.as_str())
@@ -627,18 +677,22 @@ pub fn worktree_add(state: State<'_, Arc<AppState>>, opts: Value) -> Value {
     } else {
         args.push(wt_path);
     }
-    match git_exec(&state, &args, None) {
+    match git_exec(&state, &args, target_cwd.as_deref()) {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
 #[tauri::command]
-pub fn worktree_remove(state: State<'_, Arc<AppState>>, wt_path: String) -> Value {
+pub fn worktree_remove(
+    state: State<'_, Arc<AppState>>,
+    wt_path: String,
+    target_cwd: Option<String>,
+) -> Value {
     match git_exec(
         &state,
         &["worktree", "remove", wt_path.as_str(), "--force"],
-        None,
+        target_cwd.as_deref(),
     ) {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
@@ -646,24 +700,40 @@ pub fn worktree_remove(state: State<'_, Arc<AppState>>, wt_path: String) -> Valu
 }
 
 #[tauri::command]
-pub fn worktree_lock(state: State<'_, Arc<AppState>>, wt_path: String) -> Value {
-    match git_exec(&state, &["worktree", "lock", wt_path.as_str()], None) {
+pub fn worktree_lock(
+    state: State<'_, Arc<AppState>>,
+    wt_path: String,
+    target_cwd: Option<String>,
+) -> Value {
+    match git_exec(
+        &state,
+        &["worktree", "lock", wt_path.as_str()],
+        target_cwd.as_deref(),
+    ) {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
 #[tauri::command]
-pub fn worktree_unlock(state: State<'_, Arc<AppState>>, wt_path: String) -> Value {
-    match git_exec(&state, &["worktree", "unlock", wt_path.as_str()], None) {
+pub fn worktree_unlock(
+    state: State<'_, Arc<AppState>>,
+    wt_path: String,
+    target_cwd: Option<String>,
+) -> Value {
+    match git_exec(
+        &state,
+        &["worktree", "unlock", wt_path.as_str()],
+        target_cwd.as_deref(),
+    ) {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
 #[tauri::command]
-pub fn worktree_prune(state: State<'_, Arc<AppState>>) -> Value {
-    match git_exec(&state, &["worktree", "prune"], None) {
+pub fn worktree_prune(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
+    match git_exec(&state, &["worktree", "prune"], target_cwd.as_deref()) {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
@@ -674,6 +744,11 @@ pub fn worktree_prune(state: State<'_, Arc<AppState>>) -> Value {
 #[tauri::command]
 pub fn push(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
     let opts = opts.unwrap_or_default();
+    let target_cwd = opts
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty());
     let mut args = vec!["push"];
     if opts.get("force").and_then(|v| v.as_bool()).unwrap_or(false) {
         args.push("--force");
@@ -684,7 +759,7 @@ pub fn push(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
     if let Some(b) = opts.get("branch").and_then(|v| v.as_str()) {
         args.push(b);
     }
-    match git_exec(&state, &args, None) {
+    match git_exec(&state, &args, target_cwd.as_deref()) {
         Ok((stdout, stderr)) => json!({ "ok": true, "output": format!("{stdout}{stderr}") }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
@@ -693,6 +768,11 @@ pub fn push(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
 #[tauri::command]
 pub fn pull(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
     let opts = opts.unwrap_or_default();
+    let target_cwd = opts
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty());
     let mut args = vec!["pull"];
     if let Some(r) = opts.get("remote").and_then(|v| v.as_str()) {
         args.push(r);
@@ -700,7 +780,7 @@ pub fn pull(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
     if let Some(b) = opts.get("branch").and_then(|v| v.as_str()) {
         args.push(b);
     }
-    match git_exec(&state, &args, None) {
+    match git_exec(&state, &args, target_cwd.as_deref()) {
         Ok((stdout, stderr)) => json!({ "ok": true, "output": format!("{stdout}{stderr}") }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
@@ -709,11 +789,16 @@ pub fn pull(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
 #[tauri::command]
 pub fn fetch(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
     let opts = opts.unwrap_or_default();
+    let target_cwd = opts
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty());
     let mut args = vec!["fetch"];
     if let Some(r) = opts.get("remote").and_then(|v| v.as_str()) {
         args.push(r);
     }
-    match git_exec(&state, &args, None) {
+    match git_exec(&state, &args, target_cwd.as_deref()) {
         Ok((stdout, stderr)) => json!({ "ok": true, "output": format!("{stdout}{stderr}") }),
         Err(e) => json!({ "ok": false, "error": e }),
     }

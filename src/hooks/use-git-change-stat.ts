@@ -12,7 +12,8 @@ interface GitChangeFile {
   added: number;
   removed: number;
   binary: boolean;
-  /** 未跟踪新文件（diffNumstatFull 补的那部分）——「更改」面板标 U。 */
+  /** 未跟踪新文件（diffNumstatFull 补的那部分）——对 HEAD 没有 diff，
+   *  「更改」面板读文件内容伪造成全增。 */
   untracked: boolean;
 }
 

@@ -843,10 +843,12 @@ export interface ElectronAPI {
     diff: (
       filePath?: string,
       staged?: boolean,
+      cwd?: string | null,
     ) => Promise<{ ok: boolean; diff?: string; error?: string }>;
     diffHead: (
       filePath?: string,
       context?: number,
+      cwd?: string | null,
     ) => Promise<{ ok: boolean; diff?: string; error?: string }>;
     diffNumstat: (
       cwd?: string | null,
@@ -867,11 +869,21 @@ export interface ElectronAPI {
       removed?: number;
       error?: string;
     }>;
-    revert: (filePath?: string) => Promise<{ ok: boolean; error?: string }>;
-    stage: (filePath?: string) => Promise<{ ok: boolean; error?: string }>;
-    unstage: (filePath?: string) => Promise<{ ok: boolean; error?: string }>;
+    revert: (
+      filePath?: string,
+      cwd?: string | null,
+    ) => Promise<{ ok: boolean; error?: string }>;
+    stage: (
+      filePath?: string,
+      cwd?: string | null,
+    ) => Promise<{ ok: boolean; error?: string }>;
+    unstage: (
+      filePath?: string,
+      cwd?: string | null,
+    ) => Promise<{ ok: boolean; error?: string }>;
     commit: (
       message?: string,
+      cwd?: string | null,
     ) => Promise<{ ok: boolean; output?: string; error?: string }>;
     branchList: (
       cwd?: string | null,
@@ -889,9 +901,10 @@ export interface ElectronAPI {
     ) => Promise<{ ok: boolean; branch?: string; error?: string }>;
     log: (
       count?: number,
+      cwd?: string | null,
     ) => Promise<{ ok: boolean; output?: string; error?: string }>;
     // Worktree operations
-    worktreeList: () => Promise<{
+    worktreeList: (cwd?: string | null) => Promise<{
       ok: boolean;
       worktrees?: Array<{
         path: string;
@@ -909,27 +922,38 @@ export interface ElectronAPI {
       path: string;
       branch?: string;
       newBranch?: string;
+      cwd?: string | null;
     }) => Promise<{ ok: boolean; error?: string }>;
     worktreeRemove: (
       wtPath: string,
+      cwd?: string | null,
     ) => Promise<{ ok: boolean; error?: string }>;
-    worktreeLock: (wtPath: string) => Promise<{ ok: boolean; error?: string }>;
+    worktreeLock: (
+      wtPath: string,
+      cwd?: string | null,
+    ) => Promise<{ ok: boolean; error?: string }>;
     worktreeUnlock: (
       wtPath: string,
+      cwd?: string | null,
     ) => Promise<{ ok: boolean; error?: string }>;
-    worktreePrune: () => Promise<{ ok: boolean; error?: string }>;
+    worktreePrune: (
+      cwd?: string | null,
+    ) => Promise<{ ok: boolean; error?: string }>;
     // Remote operations
     push: (opts?: {
       remote?: string;
       branch?: string;
       force?: boolean;
+      cwd?: string | null;
     }) => Promise<{ ok: boolean; output?: string; error?: string }>;
     pull: (opts?: {
       remote?: string;
       branch?: string;
+      cwd?: string | null;
     }) => Promise<{ ok: boolean; output?: string; error?: string }>;
     fetch: (opts?: {
       remote?: string;
+      cwd?: string | null;
     }) => Promise<{ ok: boolean; output?: string; error?: string }>;
   };
 
