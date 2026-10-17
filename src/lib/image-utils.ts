@@ -253,20 +253,6 @@ export function copyTextAndImages(
   return Promise.reject(new Error("nothing to copy"));
 }
 
-/**
- * 只复制一张图（image/png）。“消息里的图片想单独拷走”走这条：
- * 粘到画图 / 微信 / 聊天框都能直接出图。失败则抛错，调用方提提示。
- */
-export async function copyImage(dataUrl: string): Promise<void> {
-  if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) {
-    throw new Error("clipboard write unsupported");
-  }
-  const blob = await dataUrlToPngBlob(dataUrl); // 先编码，避开不支持 PNG 时白等
-  await navigator.clipboard.write([
-    new ClipboardItem({ "image/png": new Blob([blob], { type: "image/png" }) }),
-  ]);
-}
-
 export function canAddMoreImages(
   currentCount: number,
   newCount: number,

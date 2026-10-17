@@ -1,18 +1,9 @@
-﻿/**
+/**
  * Agent behaviour settings slice — Helix Desktop style.
- *
- * Changes from original:
- * - Removed temperature, maxOutputTokens (backend-managed)
- * - Removed customInstructions (backend-managed via SOUL.md)
- * - Removed smartTruncation, compressionEnabled, toolGuardrailsEnabled (backend-managed)
- * - Removed streamingEnabled (always on)
- * - Changed reasoningEffort to Helix native scale: none/minimal/low/medium/high/xhigh/max/ultra
- * - Added perModelPresets (reasoning + fast per provider::model key)
- * - Added fastMode (service tier)
- * - Personality is now named preset (not free text)
+ * temperature / maxOutputTokens / customInstructions / streaming 等由后端管理，
+ * 这里只留前端真正会改的开关。
  */
 import type { StateCreator } from "zustand";
-import { loadModelPresets, saveModelPreset } from "@/stores/agent-presets";
 import type { ReasoningEffortLevel } from "@/stores/helix-types";
 
 export interface AgentSettingsSlice {
@@ -31,27 +22,11 @@ export interface AgentSettingsSlice {
   // 'auto' = 自动优先 Git Bash，找不到回退 cmd.exe；'cmd' = 始终用 cmd.exe；
   // 'pwsh' = PowerShell 7；'powershell' = PowerShell 5。
   terminalShell: "auto" | "cmd" | "pwsh" | "powershell";
-  // Agent presets (custom system prompts)
-  agentPresets: Record<string, { name: string; systemPrompt: string }>;
-  activePreset: string | null;
 
-  setAgentMaxIterations: (n: number) => void;
-  setAutoCompactContext: (v: boolean) => void;
-  setAutoSaveSession: (v: boolean) => void;
-  setAutoArchiveOldTasks: (v: boolean) => void;
-  setAutoArchiveRetentionDays: (v: number) => void;
   setReasoningEffort: (v: ReasoningEffortLevel) => void;
   setPersonality: (v: string) => void;
-  setFastMode: (v: boolean) => void;
-  setTerminalShell: (v: "auto" | "cmd" | "pwsh" | "powershell") => void;
-  setAgentPresets: (
-    presets: Record<string, { name: string; systemPrompt: string }>,
-  ) => void;
-  setActivePreset: (preset: string | null) => void;
-
-  // Per-model presets (Helix Desktop style)
-  applyModelPreset: (providerModelKey: string) => void;
-  saveCurrentAsModelPreset: (providerModelKey: string) => void;
+  setAutoArchiveOldTasks: (v: boolean) => void;
+  setAutoArchiveRetentionDays: (v: number) => void;
 }
 
 export const createAgentSettingsSlice: StateCreator<
@@ -59,7 +34,7 @@ export const createAgentSettingsSlice: StateCreator<
   [],
   [],
   AgentSettingsSlice
-> = (set, get) => ({
+> = (set) => ({
   agentMaxIterations: 90,
   autoCompactContext: true,
   autoSaveSession: false,
@@ -69,37 +44,9 @@ export const createAgentSettingsSlice: StateCreator<
   personality: "helpful",
   fastMode: false,
   terminalShell: "auto", // 自动：优先 Git Bash，找不到回退 cmd.exe
-  // Agent presets defaults
-  agentPresets: {},
-  activePreset: null,
 
-  setAgentMaxIterations: (n) => set({ agentMaxIterations: n }),
-  setAutoCompactContext: (v) => set({ autoCompactContext: v }),
-  setAutoSaveSession: (v) => set({ autoSaveSession: v }),
-  setAutoArchiveOldTasks: (v) => set({ autoArchiveOldTasks: v }),
-  setAutoArchiveRetentionDays: (v) => set({ autoArchiveRetentionDays: v }),
   setReasoningEffort: (v) => set({ reasoningEffort: v }),
   setPersonality: (v) => set({ personality: v }),
-  setFastMode: (v) => set({ fastMode: v }),
-  setTerminalShell: (v) => set({ terminalShell: v }),
-  setAgentPresets: (presets) => set({ agentPresets: presets }),
-  setActivePreset: (preset) => set({ activePreset: preset }),
-
-  applyModelPreset: (providerModelKey: string) => {
-    const preset = loadModelPresets()[providerModelKey];
-    if (!preset) return;
-    set({
-      reasoningEffort:
-        (preset.reasoningEffort as ReasoningEffortLevel) || "medium",
-      fastMode: preset.fast ?? false,
-    });
-  },
-
-  saveCurrentAsModelPreset: (providerModelKey: string) => {
-    const state = get();
-    saveModelPreset(providerModelKey, {
-      reasoningEffort: state.reasoningEffort,
-      fast: state.fastMode,
-    });
-  },
+  setAutoArchiveOldTasks: (v) => set({ autoArchiveOldTasks: v }),
+  setAutoArchiveRetentionDays: (v) => set({ autoArchiveRetentionDays: v }),
 });

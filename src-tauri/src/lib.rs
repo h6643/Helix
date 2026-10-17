@@ -100,6 +100,9 @@ pub fn run() {
             // (rename/copy, best effort, only when no override is configured).
             crate::paths::migrate_legacy_data_dir();
 
+            // 清理过期的 delegation 目录（24h 以上未完成的孤儿数据）。
+            crate::delegations::cleanup_stale_delegations();
+
             // 把用户禁用的包内置技能重新改名回 SKILL.md：npm 重装/升级会
             // 覆盖 node_modules，把 `SKILL.md.disabled` 变回 `SKILL.md`，
             // 等于禁用默默失效。必须在 gateway 拉起前跑完，否则 pi 这次启动
@@ -374,6 +377,7 @@ pub fn run() {
             background_tasks::tasks_list,
             background_tasks::tasks_read,
             background_tasks::tasks_kill,
+            background_tasks::remote_tasks_list,
             // window
             window::minimize,
             window::maximize,

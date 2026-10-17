@@ -143,7 +143,7 @@ export function previewKindOf(name: string): PreviewKind | null {
   return EXT_KIND[name.slice(dot + 1).toLowerCase()] ?? null;
 }
 
-export function mimeForExt(ext: string): string {
+function mimeForExt(ext: string): string {
   return EXT_MIME[ext.toLowerCase()] ?? "application/octet-stream";
 }
 

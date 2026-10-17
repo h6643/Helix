@@ -17,7 +17,6 @@ import {
   Check,
   Copy,
   Info,
-  Play,
   type LucideIcon,
   Zap,
 } from "lucide-react";
@@ -223,38 +222,6 @@ function DiffView({ code }: { code: string }) {
   );
 }
 
-// 只有真正可执行的命令/脚本语言才显示「执行」按钮（白名单）。
-const RUNNABLE_LANGS = new Set([
-  "bash",
-  "sh",
-  "zsh",
-  "fish",
-  "powershell",
-  "pwsh",
-  "cmd",
-  "batch",
-  "python",
-  "py",
-  "javascript",
-  "js",
-  "typescript",
-  "ts",
-  "node",
-  "go",
-  "ruby",
-  "php",
-  "perl",
-  "java",
-  "c",
-  "cpp",
-  "csharp",
-  "rust",
-  "swift",
-  "kotlin",
-  "lua",
-  "r",
-]);
-
 /** Walk the table's React children into a row-major matrix of cell text. */
 function tableRows(children: ReactNode): string[][] {
   const rows: string[][] = [];
@@ -337,22 +304,18 @@ function MarkdownTable({ children }: { children: ReactNode }) {
 export function CodeCard({
   language,
   code,
-  showRunButton = true,
   className,
   showHeader = true,
 }: {
   language: string;
   code: string;
-  showRunButton?: boolean;
   className?: string;
-  // showHeader=false 时完全不渲染顶部头部栏（语言标签 + 复制/执行按钮）——工具结果
+  // showHeader=false 时完全不渲染顶部头部栏（语言标签 + 复制按钮）——工具结果
   // 卡用它去掉那条灰底"大边框"式头部，内容直接铺开；卡片外框与圆角保留。
   showHeader?: boolean;
 }) {
   const trimmed = code.replace(/^\n+/, "").trimEnd();
   const [copied, setCopied] = useState(false);
-  const [sent, setSent] = useState(false);
-  const canRun = RUNNABLE_LANGS.has(language);
   const isDiff = language === "diff";
   // 流式半截围栏（未闭合）：代码文本以 ``` 或 ~~~ 结尾，或块本身刚被开围栏
   // 创建、语言标签还是空串（"..." fence，no info string）。这些形状意味着
@@ -377,24 +340,6 @@ export function CodeCard({
     <HighlightedCode code={trimmed} language={language} />
   );
 
-  const runCode = () => {
-    const isShell = [
-      "bash",
-      "sh",
-      "zsh",
-      "fish",
-      "powershell",
-      "pwsh",
-      "cmd",
-      "batch",
-    ].includes(language);
-    const fenceLang = language ? `${language}\n` : "";
-    const prompt = `${isShell ? "请执行以下命令" : "请执行以下代码"}并输出执行结果：\n\n\`\`\`${fenceLang}${trimmed}\n\`\`\``;
-    useHelixStore.getState().injectAndSend(prompt);
-    setSent(true);
-    setTimeout(() => setSent(false), 2000);
-  };
-
   return (
     <pre
       className={className ? `${className} helix-code-body-pre` : "helix-code-body-pre"}
@@ -409,21 +354,6 @@ export function CodeCard({
             {isDiff ? "diff" : language || (boxDiagram ? "text" : "code")}
           </span>
           <span className="flex items-center gap-1">
-            {showRunButton && canRun && (
-              <button
-                type="button"
-                aria-label="执行代码"
-                data-tip="执行代码"
-                onClick={runCode}
-                className="p-1 rounded text-foreground/40 hover:text-foreground/70 hover:bg-foreground/5 transition-colors cursor-pointer"
-              >
-                {sent ? (
-                  <Check className="size-3.5" />
-                ) : (
-                  <Play className="size-3.5" />
-                )}
-              </button>
-            )}
             <button
               type="button"
               aria-label="复制代码"

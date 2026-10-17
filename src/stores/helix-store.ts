@@ -125,7 +125,6 @@ import {
   createCompressionRecordsSlice,
   type CompressionRecordsSlice,
 } from "./slices/compression-records-slice";
-import { createDiagnosticsSlice, type DiagnosticsSlice } from "./slices/diagnostics-slice";
 import { createEditorSlice, type EditorSlice, swapEditorSession } from "./slices/editor-slice";
 import { createGitSlice, type GitSlice } from "./slices/git-slice";
 import { createPanelSlice, type PanelSlice } from "./slices/panel-slice";
@@ -141,7 +140,7 @@ import {
   type TerminalSlice,
 } from "./slices/terminal-slice";
 import { createToastSlice, type ToastSlice } from "./slices/toast-slice";
-import { helixApi } from "@/lib/electron-bridge";
+import { helixApi, sendRpc } from "@/lib/electron-bridge";
 import {
   isElectron,
   getElectronAPI,
@@ -152,6 +151,7 @@ import { generateId, truncateString } from "@/lib/format";
 import { debug, warn, error as logError } from "@/lib/logger";
 import type { PersistedChatMessage, PersistedOpenTab } from "@/lib/persist";
 import { defaultFiles } from "@/lib/seed-data";
+import { resolveBackendSid, persistSessionMapEntries } from "@/lib/session-map";
 import { applyHelixPalette } from "@/lib/themes";
 import { cleanUrl } from "@/lib/url-utils";
 import { useGatewayStore } from "@/stores/gateway-store";
@@ -182,7 +182,6 @@ export type RightSidebarTab =
   | "byline"
   | "terminal"
   | "more"
-  | "tree"
   | null;
 
 /**
@@ -209,8 +208,6 @@ function rightSidebarTabEffects(
       return { rightSidebarTab: "byline", showPreviewRail: false, editorOpen: false };
     case "terminal":
       return { rightSidebarTab: "terminal", showPreviewRail: false, editorOpen: false };
-    case "tree":
-      return { rightSidebarTab: "tree", showPreviewRail: false, editorOpen: false };
     case "more":
       return { rightSidebarTab: "more", showPreviewRail: false, editorOpen: false };
     default:
@@ -288,7 +285,6 @@ function mergeSwaps(
 interface HelixState
   extends
     GitSlice,
-    DiagnosticsSlice,
     ToastSlice,
     CompactNoticeSlice,
     CompressionRecordsSlice,
@@ -617,13 +613,6 @@ interface HelixState
   setGatewayStatus: (v: "connecting" | "ready" | "disconnected") => void;
   setIsAgentRunning: (v: boolean) => void;
   streamingDrafts: Record<string, StreamingDraft>;
-  injectInputSignal: { text: string; nonce: number; append?: boolean } | null;
-  injectInput: (text: string) => void;
-  /** 追加注入：把 text 追加到当前输入框内容之后（用于连续选取网页元素累积） */
-  injectInputAppend: (text: string) => void;
-  requestSendSignal: number;
-  requestSend: () => void;
-  injectAndSend: (text: string) => void;
   tabInputs: Record<string, string>;
   // 输入队列：模型还在思考时发出的纯文本消息先按会话排在这里（附件不排队，
   // 它们必须跟着 prompt 一起发出），卡片上可编辑 / 删除 / 立即发送。
@@ -677,13 +666,12 @@ interface HelixState
   setPendingQueue: (sessionId: string, q: { steering: number; followUp: number }) => void;
   /**
    * 忙时行为（pi 的 prompt.streamingBehavior）：
-   *  - abort（默认）= 先停当前轮再发，旧任务被替换
-   *  - steer = 插话：等当前工具调用结束、下一次 LLM 调用前注入
+   *  - steer（默认）= 插话：等当前工具调用结束、下一次 LLM 调用前注入
    *  - followUp = 排队：当前轮完全跑完后才投递
    * 存 localStorage，跨会话不变。
    */
-  busyBehavior: "abort" | "steer" | "followUp";
-  setBusyBehavior: (b: "abort" | "steer" | "followUp") => void;
+  busyBehavior: "steer" | "followUp";
+  setBusyBehavior: (b: "steer" | "followUp") => void;
   agentExecutionSteps: Array<{
     type: string;
     toolName?: string;
@@ -862,7 +850,6 @@ interface HelixState
   editorTheme: "vs-dark" | "light";
   fontFamily: string;
   fontSize: number;
-  interfaceFont: string;
   transcriptFontSize: number;
   // Theme style: 'default' (built-in cream) or a Catppuccin flavor id.
   themeStyle: string;
@@ -918,8 +905,9 @@ interface HelixState
    * 从某条消息处分叉出新会话（新会话带该消息及之前的全部历史）。
    * `labelPrefix` 覆盖默认的"分支"前缀（例如 /btw 用"旁路"）。
    */
-  /** 从某条消息分叉：复制到该条为止的会话消息到**新对话**（纯本地，不涉及
-   *  后端 session fork / 分支链）。labelPrefix 用于旁路（/btw）等场景。 */
+  /** 从某条消息分叉：复制到该条为止的会话消息到**新对话**。
+   *  后端可达时走 pi 原生 fork/clone（`session/fork` RPC，完整条目树无损），
+   *  失败则回落到纯本地复制。labelPrefix 用于旁路（/btw）等场景。 */
   forkConversation: (
     messageId: string,
     opts?: { labelPrefix?: string },
@@ -936,7 +924,6 @@ interface HelixState
   setEditorTheme: (theme: "vs-dark" | "light") => void;
   setFontFamily: (font: string) => void;
   setFontSize: (size: number) => void;
-  setInterfaceFont: (font: string) => void;
   setTranscriptFontSize: (size: number) => void;
   setThemeStyle: (styleId: string) => void;
   setBootBackgroundImage: (image: string | null) => void;
@@ -1628,7 +1615,6 @@ function profilesFromPiSnapshot(
 
 export const useHelixStore = create<HelixState>()((set, get, store) => ({
   ...createGitSlice(set, get, store),
-  ...createDiagnosticsSlice(set, get, store),
   ...createToastSlice(set, get, store),
   ...createCompactNoticeSlice(set, get, store),
   ...createCompressionRecordsSlice(set, get, store),
@@ -1670,7 +1656,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   editorTheme: "light" as const,
   fontFamily: "'Geist Mono', 'Fira Code', 'Consolas', monospace" as const,
   fontSize: 14 as const,
-  interfaceFont: "var(--font-geist-sans)" as const,
   transcriptFontSize: 16,
   themeStyle:
     typeof window !== "undefined"
@@ -1688,19 +1673,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // Agent Execution
   isAgentRunning: false,
   setIsAgentRunning: (v) => set({ isAgentRunning: v }),
-  injectInputSignal: null,
-  requestSendSignal: 0,
-  injectInput: (text) =>
-    set({ injectInputSignal: { text, nonce: Date.now() } }),
-  injectInputAppend: (text) =>
-    set({ injectInputSignal: { text, nonce: Date.now(), append: true } }),
-  requestSend: () =>
-    set((s) => ({ requestSendSignal: s.requestSendSignal + 1 })),
-  injectAndSend: (text: string) =>
-    set((s) => ({
-      injectInputSignal: { text, nonce: Date.now() },
-      requestSendSignal: s.requestSendSignal + 1,
-    })),
   gatewayStatus: "connecting",
   setGatewayStatus: (v) => set({ gatewayStatus: v }),
   streamingDrafts: {},
@@ -1841,13 +1813,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       };
     }),
   busyBehavior:
-    typeof localStorage !== "undefined"
-      ? localStorage.getItem("helix-busy-behavior") === "steer"
-        ? "steer"
-        : localStorage.getItem("helix-busy-behavior") === "followUp"
-          ? "followUp"
-          : "abort"
-      : "abort",
+    typeof localStorage !== "undefined" &&
+    localStorage.getItem("helix-busy-behavior") === "followUp"
+      ? "followUp"
+      : "steer",
   setBusyBehavior: (b) => {
     if (typeof localStorage !== "undefined") {
       localStorage.setItem("helix-busy-behavior", b);
@@ -2664,13 +2633,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     // Copy messages up to fork point
     const forkedMsgs = msgs.slice(0, forkIdx + 1);
 
-    // Generate new session ID
-    const newSessionId =
-      "session-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
-
-    // 纯本地分叉（不依赖后端 session/fork RPC——该 RPC 已从网关移除）：
-    // 复制到分叉点为止的消息到新对话，后续 run 正常创建自己的后端会话。
-
     // Determine branch name: count existing forks from this parent
     const { persistence } = await import("@/lib/persist");
     const allSessions = await persistence.loadSessions();
@@ -2681,6 +2643,89 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     // 正式的分支线。字母后缀 A/B/C… 仍按同一父会话下的既有分叉数量递增。
     const labelPrefix = opts?.labelPrefix ?? "分支";
     const branchLabel = `${labelPrefix} ${String.fromCharCode(65 + siblingForks.length)}`; // A, B, C...
+
+    // Generate new session ID（本地会话 id；后端 sid 由下方 fork RPC 决定）
+    const newSessionId =
+      "session-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
+
+    // ── 后端无损分叉（尽力而为）────────────────────────────────────
+    // pi 的 fork 在目标 entry 处创建 branched session 文件：完整条目树
+    //（工具调用/结果/思考块）全部保留，而不是只搬本地可见的聊天文本。
+    // 网关侧是 Helix 命名的 `session/fork`（内部翻译成 pi 的 fork/clone），
+    // 裸 `fork` 不在 passthrough 白名单里，会报「pi adapter does not implement fork」。
+    //
+    // 入口条件：必须能解析出**本对话自己**的后端 sid，且必须能从本地消息定位到
+    // pi 的 fork entryId。缺任何一条都整个跳过（不 clone）：clone 复制的是 leaf
+    // 全量历史，会把分叉点之后的几轮也带进新分支——那不是用户点的那个分叉点。
+    // 跳过后走纯本地分叉，新对话的首条消息由 handleRun 的阶梯 ⑤ 用本地历史重建
+    // 后端会话，语义与分叉点严格一致。
+    //
+    // entryId 语义：pi 固定 position "before"，即 branch 到该 user entry 的
+    // parent。所以要传**分叉点之后第一条 user 消息**的 entryId 才能表达
+    // 「保留到分叉点为止」。
+    let backendForked = false;
+    let backendSid = "";
+    try {
+      // 只用本对话映射里的 sid：`helixSessionId` 是「最后跑过的那条对话」的
+      // 全局值，旁路（btw-）会话不落映射，拿它当父 sid 会错分叉到主线会话上。
+      const parentSid = state.currentSessionId?.startsWith("btw-")
+        ? ""
+        : ((await resolveBackendSid(state.currentSessionId)) ?? "");
+      if (parentSid) {
+        const { getUserMessageEntryIdsForFork } = await import(
+          "@/lib/pi-fork"
+        );
+        const forkTarget = await getUserMessageEntryIdsForFork(
+          parentSid,
+          forkedMsgs,
+        );
+        if (forkTarget.entryId) {
+          const r = (await sendRpc("session/fork", {
+            session_id: parentSid,
+            entryId: forkTarget.entryId,
+          })) as {
+            session_id?: string;
+            fork?: { cancelled?: boolean };
+          } | null;
+          // pi 的 fork 可被扩展取消（beforeFork hook）——取消时后端仍停在父
+          // 会话上，此时不能声称分叉成功，否则新对话会绑定一个不属于它的 sid。
+          if (r?.session_id && r.fork?.cancelled !== true) {
+            backendForked = true;
+            backendSid = r.session_id;
+            // 新对话绑定到 pi 新铸的 branched sid，并按当前网关代记 epoch：
+            // handleRun 的阶梯 ① 会直接沿用它（不付 resume 代价），子 Agent 磁盘
+            // 清单也靠 resolveBackendSids 的新条目归位。
+            await persistSessionMapEntries([
+              [
+                newSessionId,
+                {
+                  sid: r.session_id,
+                  epoch: useGatewayStore.getState().gatewayEpoch,
+                },
+              ],
+            ]);
+            // 让 agent-flow-panel 的 sessionMapRef 合并到这条新绑定：它的 ref
+            // 只在挂载时读过一次盘，不 bump 就停在旧值上，下一条 handleRun 会把
+            // 新对话判成「全新对话」再 session/new 一遍（分叉白做）。
+            useHelixStore.getState().bumpSessionMapVersion();
+          } else {
+            debug(
+              "[fork] session/fork 未返回新 sid（取消/失败），回落纯本地分叉",
+              r,
+            );
+          }
+        } else {
+          debug(
+            "[fork] 无法定位 pi fork entryId，回落纯本地分叉：",
+            forkTarget.reason,
+          );
+        }
+      }
+    } catch (e) {
+      // 后端分叉失败不影响分叉本身：纯本地复制已经准备好，只是新对话的第一条
+      // 消息会走 session/new + seedHistory 重建后端上下文。
+      debug("[fork] 后端 session/fork 失败，回落纯本地分叉：", e);
+    }
 
     // Persist the new session as a fork
     await persistence.saveSession({
@@ -2723,8 +2768,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       branchName: branchLabel,
     });
 
-    // Reset Helix session for the new branch
-    useGatewayStore.getState().setHelixSessionId(null);
+    // 全局 helixSessionId 指向新对话的后端会话（后端 fork 成功 = branched
+    // sid；失败 = null，交给 handleRun 的阶梯 ⑤ 建）。放在 setCurrentSessionId
+    // 之前：agent-flow-panel 的 [currentSessionId] effect 会用 sessionMapRef 里的
+    // 值覆盖它，那时映射里必须已经是新 sid（persistSessionMapEntries 已落盘）。
+    useGatewayStore
+      .getState()
+      .setHelixSessionId(backendForked ? backendSid : null);
 
     // Switch to the new session
     state.setCurrentSessionId(newSessionId);
@@ -2746,7 +2796,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     state.showToast({
       type: "success",
       title: `已创建 ${branchLabel}`,
-      description: `从第 ${forkIdx + 1} 条消息处分叉`,
+      description: backendForked
+        ? `从第 ${forkIdx + 1} 条消息处分叉（后端会话已无损分支）`
+        : `从第 ${forkIdx + 1} 条消息处分叉`,
     });
 
     // Increment session save version so sidebar refreshes
@@ -2793,17 +2845,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     localStorage.setItem("helix-font-size", String(fontSize));
     import("@/lib/persist").then(({ persistence }) =>
       persistence.saveSetting("fontSize", fontSize),
-    );
-  },
-  setInterfaceFont: (font) => {
-    set({ interfaceFont: font });
-    // UI font: applied to the app chrome (chat + settings) via the `--helix-interface-font`
-    // CSS var on <body>. We deliberately do NOT write body.style.fontFamily directly so
-    // the code-editor font (a separate var) stays isolated from the UI font.
-    document.documentElement.style.setProperty("--helix-interface-font", font);
-    localStorage.setItem("helix-interface-font", font);
-    import("@/lib/persist").then(({ persistence }) =>
-      persistence.saveSetting("interfaceFont", font),
     );
   },
   setTranscriptFontSize: (size) => {
@@ -3248,6 +3289,42 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       if (planModeBySession.__draft__ && !planModeBySession[id])
         planModeBySession[id] = true;
       delete planModeBySession.__draft__;
+      // 侧栏状态的草稿迁移（与 plan 轴同理，但用**当前所见（flat）兜底**）：
+      // 新对话分配出真 cid 时，swapSidebarSession 系列只按 nextId 取记录、
+      // 取不到就恢复成空 —— 草稿期选的子 Agent 视图 / 开着的页面 / 停留页签
+      // 若不搬过去，会话一创建就被恢复成 null，界面变成「未选择子 Agent」。
+      // 草稿期 tab 没有双写（只在 swap 时落表），所以一律 flat 优先于 __draft__。
+      let sidebarState: Partial<HelixState> | undefined;
+      if (state.currentSessionId === null) {
+        const pick = <T,>(m: Record<string, T>, flat: T): T =>
+          "__draft__" in m ? (m.__draft__ as T) : flat;
+        const pages = { ...state.rightSidebarPagesBySession };
+        const pageIds = { ...state.activePageIdBySession };
+        const agentViews = { ...state.activeAgentViewBySession };
+        const tabBySession = { ...state.rightSidebarTabBySession };
+        const editorTabs = { ...state.editorTabsBySession };
+        const activeEditorTabIds = { ...state.activeEditorTabIdBySession };
+        let moved = false;
+        if (!(id in pages)) { pages[id] = pick(state.rightSidebarPagesBySession, state.rightSidebarPages); moved = true; }
+        if (!(id in pageIds)) { pageIds[id] = pick(state.activePageIdBySession, state.activePageId); moved = true; }
+        if (!(id in agentViews)) { agentViews[id] = pick(state.activeAgentViewBySession, state.activeAgentView); moved = true; }
+        if (!(id in tabBySession)) { tabBySession[id] = pick(state.rightSidebarTabBySession, state.rightSidebarTab); moved = true; }
+        if (!(id in editorTabs)) { editorTabs[id] = pick(state.editorTabsBySession, state.editorTabs); moved = true; }
+        if (!(id in activeEditorTabIds)) { activeEditorTabIds[id] = pick(state.activeEditorTabIdBySession, state.activeEditorTabId); moved = true; }
+        if (moved) {
+          sidebarState = {
+            rightSidebarPagesBySession: pages,
+            activePageIdBySession: pageIds,
+            activeAgentViewBySession: agentViews,
+            rightSidebarTabBySession: tabBySession,
+            editorTabsBySession: editorTabs,
+            activeEditorTabIdBySession: activeEditorTabIds,
+          };
+        }
+      }
+      const effectiveState: HelixState = sidebarState
+        ? { ...state, ...sidebarState }
+        : state;
       const history = [...state.sessionHistory];
       const idx = state.sessionHistoryIndex;
       // Check if the target ID already exists at the current position (deduplicate)
@@ -3256,7 +3333,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         return {
           currentSessionId: id,
           planModeBySession,
-          ...mergeSwaps(state, id),
+          ...mergeSwaps(effectiveState, id),
         };
       }
       // Remove any forward history when navigating to a new session
@@ -3269,7 +3346,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         sessionHistory: newHistory,
         sessionHistoryIndex: newHistory.length - 1,
         planModeBySession,
-        ...mergeSwaps(state, id),
+        ...mergeSwaps(effectiveState, id),
       };
     }),
   clearSessionSidebarState: (sessionId) =>
@@ -4307,7 +4384,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           : []),
         persistence.saveSetting("fontFamily", state.fontFamily),
         persistence.saveSetting("fontSize", state.fontSize),
-        persistence.saveSetting("interfaceFont", state.interfaceFont),
         persistence.saveSetting("transcriptFontSize", state.transcriptFontSize),
         persistence.saveSetting("themeStyle", state.themeStyle),
         persistence.saveSetting("sessionUsageStats", state.sessionUsageStats),
@@ -4352,10 +4428,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting("gitRemoteUrl", state.gitRemoteUrl),
         persistence.saveSetting("gitCommitTemplate", state.gitCommitTemplate),
         persistence.saveSetting("gitBranchPrefix", state.gitBranchPrefix),
-        persistence.saveSetting(
-          "diagnosticsAfterRun",
-          state.diagnosticsAfterRun,
-        ),
         persistence.saveSetting("sessionHistory", state.sessionHistory),
         persistence.saveSetting(
           "sessionHistoryIndex",
@@ -4440,7 +4512,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         apiProfiles,
         fontFamily,
         fontSize,
-        interfaceFont,
         transcriptFontSize,
         themeStyle,
         sessionUsageStats,
@@ -4468,7 +4539,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitRemoteUrl,
         gitCommitTemplate,
         gitBranchPrefix,
-        diagnosticsAfterRun,
         modelBySession,
         startupGreeting,
         bootBackgroundImage,
@@ -4497,10 +4567,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         ),
         safeLoad(persistence.loadSetting<string>("fontFamily"), "fontFamily"),
         safeLoad(persistence.loadSetting<number>("fontSize"), "fontSize"),
-        safeLoad(
-          persistence.loadSetting<string>("interfaceFont"),
-          "interfaceFont",
-        ),
         safeLoad(
           persistence.loadSetting<number>("transcriptFontSize"),
           "transcriptFontSize",
@@ -4615,10 +4681,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(
           persistence.loadSetting<string>("gitBranchPrefix"),
           "gitBranchPrefix",
-        ),
-        safeLoad(
-          persistence.loadSetting<boolean>("diagnosticsAfterRun"),
-          "diagnosticsAfterRun",
         ),
         safeLoad(
           persistence.loadSetting<
@@ -5189,12 +5251,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           (typeof localStorage !== "undefined"
             ? Number(localStorage.getItem("helix-font-size")) || get().fontSize
             : get().fontSize),
-        interfaceFont:
-          interfaceFont ||
-          (typeof localStorage !== "undefined"
-            ? localStorage.getItem("helix-interface-font")
-            : null) ||
-          get().interfaceFont,
         transcriptFontSize:
           transcriptFontSize ||
           (typeof localStorage !== "undefined"
@@ -5319,8 +5375,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitRemoteUrl: gitRemoteUrl || get().gitRemoteUrl,
         gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
-        diagnosticsAfterRun:
-          diagnosticsAfterRun ?? get().diagnosticsAfterRun,
         // 权限档 / plan 轴不从这里恢复：前者由 syncPermissionMode 在设置加载
         // 完成后回读扩展配置（真相只有那一份文件），后者是 pi 实例级状态，
         // 进程重启即失效。旧版本持久化过的 "approvalMode" /
@@ -5499,14 +5553,21 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         "--helix-font-family",
         s.fontFamily,
       );
-      document.body.style.fontFamily = s.fontFamily;
+      // NOTE: 不写 document.body.style.fontFamily。fontFamily 是**代码编辑器**
+      // 专用字体（见 setFontFamily 的注释与 :root 的 font-scope 说明），写进
+      // body inline style 会盖掉 globals.css 里 `html, body {
+      // font-family: var(--helix-interface-font) }`，把整个界面连同对话框
+      // 一起拖回等宽字体。该栈（'Geist Mono','Fira Code','Consolas',monospace）
+      // 不含任何中文字形，中英混排时中文被浏览器回退到系统默认中文字体，
+      // 于是同一段文字「英文 Consolas + 中文微软雅黑」字体割裂。
+      // CodeMirror 已经通过 --helix-font-family 拿到字体，无需再动 body。
+      // 旧版本曾把编辑器等宽字体写进 body inline style；inline style 优先级
+      // 高于 stylesheet，光删掉写入代码不清掉已有的值，界面仍会被它拖回
+      // 等宽。这里 removeProperty 做一次性修复（值为 null 时是 no-op）。
+      document.body.style.removeProperty("font-family");
       document.documentElement.style.setProperty(
         "--helix-font-size",
         `${s.fontSize}px`,
-      );
-      document.documentElement.style.setProperty(
-        "--helix-interface-font",
-        s.interfaceFont,
       );
       document.documentElement.style.setProperty(
         "--helix-transcript-size",

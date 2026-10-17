@@ -168,7 +168,6 @@ import {
 import {
   APPROVAL_MODE_ITEMS,
   approvalModeOf,
-  permissionScopeLabelOf,
   type PermissionScopeTarget,
 } from "@/stores/helix-types";
 import type { ApprovalLevel } from "@/stores/helix-types";
@@ -473,15 +472,54 @@ function _EmptyState() {
 
 // ==== Reasoning Effort Select ==================================================================
 
+/**
+ * 前端展示的思考强度档位：只暴露低 / 中 / 高三档。
+ *
+ * 底层 ReasoningEffortLevel 有 9 个值（none/off/minimal/low/medium/high/
+ * xhigh/max/ultra）——那是**与 pi 后端通信的协议枚举**，不同 provider 暴露的
+ * 子集不同，不能删。这里只收敛前端可选范围：三档对用户足够表达意图，
+ * 7 档下拉里「极低 / 轻度」「极高 / 最高」的差别在实际使用中几乎感知不到，
+ * 却要用户在发送前多做一次判断。
+ *
+ * 映射（后端值 → 展示档）在 normalizeReasoningDisplay 里完成；这里保持
+ * 与 pi 通信的原值，不自己造中间值。
+ */
 const REASONING_OPTIONS: { value: ReasoningEffortLevel; label: string }[] = [
-  { value: "off", label: "关" },
-  { value: "minimal", label: "极低" },
-  { value: "low", label: "轻度" },
+  { value: "low", label: "低" },
   { value: "medium", label: "中" },
   { value: "high", label: "高" },
-  { value: "xhigh", label: "极高" },
-  { value: "max", label: "最高" },
 ];
+
+/**
+ * 把任意 ReasoningEffortLevel 归一到三档之一，用于下拉选中项的回显。
+ *
+ * 为什么需要：store / 后端可能存着旧值或当前模型不支持的档（如 xhigh、
+ * minimal、off）。这些值不在 REASONING_OPTIONS 里，若不归一，
+ * findIndex 会返回 -1，UI 会退到一个写死的兜底档，显示与真实状态不符。
+ *
+ * 按「思考预算」的直觉排序归并：
+ *   none/off/minimal → 低（几乎不思考）
+ *   low             → 低
+ *   medium          → 中
+ *   high            → 高
+ *   xhigh/max/ultra → 高（比高更强，但前端不区分，统一显示为高）
+ */
+function normalizeReasoningDisplay(
+  level: ReasoningEffortLevel | undefined,
+): ReasoningEffortLevel {
+  switch (level) {
+    case "medium":
+      return "medium";
+    case "high":
+    case "xhigh":
+    case "max":
+    case "ultra":
+      return "high";
+    default:
+      // low / minimal / off / none / undefined
+      return "low";
+  }
+}
 
 export function ReasoningEffortControl({
   value,
@@ -497,6 +535,11 @@ export function ReasoningEffortControl({
   const [levels, setLevels] = useState<Set<string> | null>(null);
   const activeProvider = useHelixStore((s) => s.apiConfig?.provider);
   const activeModel = useHelixStore((s) => s.activeModel);
+
+  // 回显用的归一化值：store 里可能是 xhigh/minimal/off 等三档之外的值
+  // （旧版本留下的、或其他面板设的），先归一到低/中/高，再拿去匹配选项。
+  // 注意只影响**显示**——onChange 传出去的仍是用户新选的三档原值。
+  const displayValue = normalizeReasoningDisplay(value);
 
   useEffect(() => {
     if (!isElectron()) return;
@@ -517,9 +560,14 @@ export function ReasoningEffortControl({
         setLevels(new Set(arr));
         // 当前选择不被这个模型支持时，自动收敛到第一个支持的档（按档位序），
         // 而不是等 pi 在发送时静默裁剪。
-        if (!arr.includes(value)) {
+        //
+        // 用 displayValue 而不是原 value 判断：模型只支持 medium 时，store 里
+        // 的 xhigh 归一到 high 后仍不被支持，会正确触发收敛；若用原值判断，
+        // xhigh 恰好在 arr 里就不会收敛，但用户看到的却是「高」。
+        if (!arr.includes(displayValue)) {
           const fallback = REASONING_OPTIONS.find((o) => arr.includes(o.value));
-          if (fallback && fallback.value !== value) onChange(fallback.value);
+          if (fallback && fallback.value !== displayValue)
+            onChange(fallback.value);
         }
       } catch {
         /* 拿不到能力表就不收敛，保持全量可选 */
@@ -528,13 +576,28 @@ export function ReasoningEffortControl({
     return () => {
       cancelled = true;
     };
-  }, [activeProvider, activeModel, value, onChange]);
+  }, [activeProvider, activeModel, displayValue, onChange]);
 
-  const options = levels
+  // 只保留模型支持的三档。能力表里可能有 minimal/xhigh 等值，它们不在
+  // REASONING_OPTIONS 里，filter 后自然消失。
+  // 极端情况：模型只暴露了三档之外的值（如只有 minimal）→ options 为空，
+  // 此时退化为全量三档，避免下拉变空、控件失效。
+  const filtered = levels
     ? REASONING_OPTIONS.filter((o) => levels.has(o.value))
     : REASONING_OPTIONS;
-  const idx = options.findIndex((o) => o.value === value);
-  const safeIdx = idx < 0 ? Math.min(2, options.length - 1) : idx;
+  const options = filtered.length > 0 ? filtered : REASONING_OPTIONS;
+  const idx = options.findIndex((o) => o.value === displayValue);
+  // 兜底档用「中」而不是数组末位：归一化后 displayValue 必定是 low/medium/
+  // high 之一，正常情况下 idx >= 0。真落到这里说明 options 被能力表过滤得
+  // 极奇怪（比如只剩 high），此时选中间档比选最高档更稳妥——「高」会明显
+  // 拉慢每轮响应。
+  const fallbackIdx = options.findIndex((o) => o.value === "medium");
+  const safeIdx =
+    idx >= 0
+      ? idx
+      : fallbackIdx >= 0
+        ? fallbackIdx
+        : Math.floor(options.length / 2);
   const current = options[safeIdx];
 
   const [open, setOpen] = useState(false);
@@ -582,9 +645,11 @@ export function ReasoningEffortControl({
       const max = Math.max(0, options.length - 1);
       const nextIdx = Math.max(0, Math.min(max, Math.round(ratio * max)));
       const nextValue = options[nextIdx].value;
-      if (nextValue !== value) onChange(nextValue);
+      // 与 displayValue 比较而不是原 value：原值可能是 xhigh 等三档之外的值，
+      // 那样每次拖动都会判定「变化了」并重复 onChange，尽管用户拖到的是同一档。
+      if (nextValue !== displayValue) onChange(nextValue);
     },
-    [options, value, onChange],
+    [options, displayValue, onChange],
   );
 
   const onPointerDown = useCallback(
@@ -877,15 +942,10 @@ function PendingQueueIndicator() {
 }
 
 // 忙时行为三档：决定「正在跑时按 Enter」把这条消息怎么处理。
-// pi 的 prompt.streamingBehavior；abort 档不传这个字段（后端走旧的
-// abort+重发路径）。
+// pi 的 prompt.streamingBehavior（两档，均为 pi 原生行为）：
+//  - steer = 插话：等当前工具调用结束、下一次 LLM 调用前注入
+//  - followUp = 排队：本轮完全跑完后投递
 const BUSY_BEHAVIOR_OPTIONS = [
-  {
-    value: "abort" as const,
-    label: "先停再发",
-    tip: "先停当前轮再发：旧任务被新任务替换",
-    icon: Square,
-  },
   {
     value: "steer" as const,
     label: "插话",
@@ -929,13 +989,13 @@ export function BusyBehaviorSelector({
         className="flex items-center gap-1.5 px-2.5 h-8 rounded-xl ui-text-sm2 transition-colors duration-150 text-muted-foreground hover:text-foreground hover:bg-muted/50"
         data-tip={
           compact
-            ? `${cur?.label ?? "排队"}（模型忙时按 Enter 的处理方式）`
+            ? `${cur?.label ?? "插话"}（模型忙时按 Enter 的处理方式）`
             : "模型忙时按 Enter 的处理方式"
         }
       >
         <ListOrdered className="size-3.5 shrink-0" />
         {!compact && (
-          <span className="truncate">{cur?.label ?? "排队"}</span>
+          <span className="truncate">{cur?.label ?? "插话"}</span>
         )}
         <ChevronDown className="size-3" />
       </button>
@@ -981,7 +1041,7 @@ export function BusyBehaviorSelector({
 
 export function AgentFlowPanel() {
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
-  // 忙时行为：队列卡片的「立即发送」按钮文案跟着它变（插话 / 排队 / 先停再发）。
+  // 忙时行为：队列卡片的「立即发送」按钮文案跟着它变（插话 / 排队）。
   const busyBehavior = useHelixStore((s) => s.busyBehavior);
   // 重启后没有可恢复会话时为 true：界面停在"无当前会话"占位，不发消息、
   // 不创建任何会话文件，直到用户显式点「新对话」或从侧边栏选一个会话。
@@ -1194,11 +1254,8 @@ export function AgentFlowPanel() {
   // 扩展播报（pi 的 extension_ui_request{method:"notify"}）。网关把 notify /
   // setStatus / setWidget 统一归到 model/warning 这条兜底通道（见 pi_gateway.rs
   // 的 fire-and-forget 分支），在前端只有这里认领它 —— 否则扩展的播报只会进
-  // 调试日志。以对话流内联状态行呈现。
+  // 调试日志。以右上角 toast 呈现（用户反馈：不要显示在对话流中）。
   // 只存在前端内存里，不写进会话，因此不会进模型上下文。
-  const [extensionNotices, setExtensionNotices] = useState<
-    Array<{ id: string; ts: number; text: string }>
-  >([]);
   const workspaceFilesRef = useRef<Array<{ name: string; path: string }>>([]);
   // 已加载过 @ 候选的项目目录（换项目才重扫）
   const workspaceFilesLoadedFor = useRef<string | null>(null);
@@ -1546,29 +1603,6 @@ export function AgentFlowPanel() {
   pendingFilesRef.current = pendingFiles;
   const [isDraggingFile, setIsDraggingFile] = useState(false);
 
-  // External input injection (Command Center / Review panel push text here)
-  // 一次性事件：应用后立即清空 store 里的信号。injectInputSignal 是写在 store
-  // 里就再也不清的对象，而本组件挂在 `showSettings ? ... : ...` 的 else 分支——
-  // 每次开/关设置都会卸载重挂载本组件，effect 带着残留的旧信号重放一遍，
-  // 把上一次 inject 的文本重新打进输入框（"点过一次代码块运行按钮后，那段
-  // 命令提示就一直自动出现在输入框"的根因）。消费即清，信号变成真正的一次性。
-  const injectSignal = useHelixStore((s) => s.injectInputSignal);
-  useEffect(() => {
-    if (injectSignal) {
-      if (injectSignal.append) {
-        // 追加模式（连续选取网页元素累积）：保留现有输入，换行拼接新内容
-        const prev = inputValueRef.current;
-        setInputSynced(
-          prev ? `${prev}\n${injectSignal.text}` : injectSignal.text,
-        );
-      } else {
-        setInputSynced(injectSignal.text);
-      }
-      inputRef.current?.focus();
-      useHelixStore.setState({ injectInputSignal: null });
-    }
-  }, [injectSignal, setInputSynced]);
-
   const [responseBlocks, setResponseBlocks] = useState<ResponseBlock[]>([]);
   const responseBlocksRef = useRef<ResponseBlock[]>(responseBlocks);
   responseBlocksRef.current = responseBlocks;
@@ -1707,7 +1741,6 @@ export function AgentFlowPanel() {
   // 每次 setState 都生成新函数，会导致 effect 无限重触发（Maximum update depth exceeded）。
   useEffect(() => {
     setAutoCompressNotices([]);
-    setExtensionNotices([]);
     const key = currentSessionId ?? DRAFT_SESSION_KEY;
     useHelixStore.getState().clearCompressionNotice(key);
     let cancelled = false;
@@ -1849,10 +1882,6 @@ export function AgentFlowPanel() {
         emphasis: "compress",
       });
     }
-    // 扩展播报同样以居中状态行插入，紧跟在压缩提示之后。
-    for (const notice of extensionNotices) {
-      items.push({ kind: "status", id: notice.id, text: notice.text });
-    }
     // 压缩完成提示以 WorkBuddy 风格的 inline divider 插入对话流。锚定到压缩后
     // 的最后一条消息之后，后续新消息不会把该时间点往上顶。
     if (compressionNotice) {
@@ -1885,9 +1914,7 @@ export function AgentFlowPanel() {
   }, [
     sessionMessages,
     autoCompressNotices,
-    // 扩展播报是本地 state（append 于 model/warning、切会话时清空），不入依赖
-    // 的话新播报要等别的依赖变化才出现在对话流里（纯渲染 memo，补上无行为风险）。
-    extensionNotices,
+
     compressionNotice,
     compressionBusy,
   ]);
@@ -3691,7 +3718,7 @@ export function AgentFlowPanel() {
         <ChevronDown className="size-3 opacity-60" />
       </button>
       {showFolderDropdown && (
-        <div className="absolute bottom-full left-0 mb-2 w-[220px] bg-card border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in p-1.5">
+        <div className="absolute bottom-full left-0 mb-2 w-[100px] bg-card border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in p-1.5">
           <button
             type="button"
             onClick={async () => {
@@ -3707,7 +3734,7 @@ export function AgentFlowPanel() {
             className="w-full flex items-center gap-2 px-2 py-1.5 ui-text-sm2 rounded-lg text-foreground/70 hover:bg-accent hover:text-foreground transition-colors"
           >
             <FolderPlus className="size-3.5 shrink-0" />
-            选择本地目录…
+            本地目录
           </button>
           {remoteAvailable() && (
             <div className="mt-1.5 pt-1.5 border-t border-border/30">
@@ -3720,7 +3747,7 @@ export function AgentFlowPanel() {
                 className="w-full flex items-center gap-2 px-2 py-1.5 ui-text-sm2 rounded-lg text-foreground/70 hover:bg-accent hover:text-foreground transition-colors"
               >
                 <Cloud className="size-3.5 shrink-0" />
-                添加远程项目
+                远程项目
               </button>
             </div>
           )}
@@ -4300,7 +4327,6 @@ export function AgentFlowPanel() {
       keepInput?: boolean;
       /**
        * pi 的 `streamingBehavior`：忙时插话（steer）或排队（followUp）。
-       * 不传 = 旧行为（后端先 abort 再重发，即「先停再发」）。
        * 后端在 busy 错误时会按这个值重试一次。
        */
       busyBehavior?: "steer" | "followUp";
@@ -4475,23 +4501,19 @@ export function AgentFlowPanel() {
       }
 
       // ── 输入队列 ────────────────────────────────────────────────────────
-      // 本会话还在跑时，纯文本消息不再「先停再发」（那会掐掉正在跑的任务），
-      // 而是排进发送队列：任务结束后按 Enter 自动刷入，或在队列卡片上
-      // 「立即发送」。附件 / 链接卡片不排队——它们必须跟着这一发 prompt 一起
-      // 发出去，拆开会丢掉本轮的上下文，所以仍走原来的「先停再发」。
-      //
-      // 三档按「忙时该不该插进当前轮」分流（BUSY_BEHAVIOR_OPTIONS）：
+      // 本会话还在跑时，纯文本消息按「忙时行为」两档分流
+      //（BUSY_BEHAVIOR_OPTIONS，均为 pi 原生 streamingBehavior）：
       //  - steer（插话）→ 注入当前轮。不起新 run，pi 在正在跑的那一轮里消费
       //    队列，回答仍从当前轮的事件流出来（详见 handleSteerInjection）。
-      //  - followUp（排队）/ abort（先停再发）→ 落本地队列卡片。等本轮跑完
-      //    刷入；abort 档「先停再发」的动作由 flushQueueItem 在**刷出时**做。
+      //  - followUp（排队）→ 落本地队列卡片，本轮结束后自动投递（见下方
+      //    auto-flush effect），也可手动「立即排队」。
+      // 附件 / 链接卡片不排队——它们必须跟着这一发 prompt 一起发出去，拆开会
+      // 丢掉本轮的上下文，所以照常往下发（带 streaming_behavior）。
       //
-      // 旧实现把条件写成 `busyBehavior === "abort"`，于是只有「先停再发」才
-      // 入队；插话/排队两档落到下面继续执行，在**同一个 cid** 上起第二个
-      // handleRun——它的 pre-try 段无条件重置该会话的草稿
-      //（setStreamingDraft(textBuffer:"") + abortControllersRef.set），
-      // 于是上一轮正在流的内容被抹、停止按钮改指新 controller、两个 run
-      // 抢同一条事件流 = 「发新消息把刚才的对话掐了」。
+      // 关键：绝不在这里起第二个 handleRun——它会在**同一个 cid** 上无条件
+      // 重置该会话的草稿（setStreamingDraft(textBuffer:"") +
+      // abortControllersRef.set），上一轮正在流的内容被抹、停止按钮改指新
+      // controller、两个 run 抢同一条事件流 =「发新消息把刚才的对话掐了」。
       if (!isBackground && !cmd && !opts?.keepInput) {
         const hasAttachments =
           pendingImagesRef.current.length > 0 ||
@@ -4522,23 +4544,9 @@ export function AgentFlowPanel() {
         }
       }
 
-      // 后台旁路提问跑在自己的会话上，绝不能因为「主线正在跑」就 handleStop 掉
-      // 主线的 run（那是 toggle 语义，只对当前会话生效）。同理也不读主线的
-      // 草稿来判断忙闲——要查的是旁路会话自己的草稿。
-      const activeDraft = isBackground
-        ? streamingDrafts[opts!.sessionId!]
-        : currentSessionId
-          ? streamingDrafts[currentSessionId]
-          : undefined;
-      if (activeDraft?.isAgentRunning && busyBehavior === "abort") {
-        // 先停再发档：掐掉当前轮再发。
-        handleStop(
-          (isBackground ? opts!.sessionId : currentSessionId) ?? undefined,
-        );
-        return;
-      }
-      // 忙时的插话 / 排队档不掐轮：直接往下发 prompt，opts.busyBehavior
-      // 让后端在 busy 错误时按声明的 behavior 重试一次。
+      // 忙时不在这里掐轮：插话已在上面的门里注入当前轮、排队已落本地队列。
+      // 能走到这里的是空闲发送或带附件的发送，直接往下发 prompt，
+      // opts.busyBehavior 让后端在 busy 错误时按声明的 behavior 重试一次。
 
       // Check API key — serve 模式下密钥由后端托管，Helix 侧 apiConfig.apiKey
       // 为空，跳过该门否则发送会被永久拦截（"发送按钮无效"）。
@@ -6346,13 +6354,19 @@ export function AgentFlowPanel() {
                 if (raw?.method === "notify" && text) {
                   // pi-hermes-memory 的 session backfill 每次会话启动都会播报
                   // 「🧠 Session backfill complete: ...」例行状态，对用户无意义，
-                  // 在前端直接静默（其余扩展播报照常展示）。
+                  // 在前端直接静默（其余扩展播报以 toast 呈现）。
                   if (isSessionBackfillNotice(text)) return;
-                  setExtensionNotices((prev) =>
-                    [...prev, { id: generateId(), ts: Date.now(), text }].slice(
-                      -20,
-                    ),
-                  );
+                  const nType = (raw.notifyType || "info") as
+                    | "info"
+                    | "warning"
+                    | "error"
+                    | "success";
+                  useHelixStore.getState().showToast({
+                    type: nType === "info" ? "info" : nType,
+                    title: "扩展通知",
+                    description: text,
+                    duration: nType === "error" ? 10000 : 5000,
+                  });
                 } else {
                   debug("[Helix] model warning:", params?.message ?? params);
                 }
@@ -6860,11 +6874,9 @@ export function AgentFlowPanel() {
             prompt: promptItems,
             // 忙时插话 / 排队：把声明的行为交给后端，它收到 busy 错误时按
             // 这个值重试一次。空闲时不带（pi 空闲时该字段无意义，保持旧形状）。
-            ...(opts?.busyBehavior
-              ? { streaming_behavior: opts.busyBehavior }
-              : busyBeforeSend && busyBehavior !== "abort"
-                ? { streaming_behavior: busyBehavior }
-                : {}),
+            ...(opts?.busyBehavior || busyBeforeSend
+              ? { streaming_behavior: opts?.busyBehavior ?? busyBehavior }
+              : {}),
           })
           .then((result: { session_id?: string }) => {
             // session/prompt is now ack-only (official model): result == {status:'streaming'}.
@@ -8777,7 +8789,6 @@ export function AgentFlowPanel() {
       resolveCommand,
       BUILTIN_COMMANDS,
       setInputSynced,
-      handleStop,
       streamingDrafts,
       pushInputHistory,
       // 忙时行为：handleRun 在 payload 里读它（插话 / 排队），必须进依赖。
@@ -8791,13 +8802,9 @@ export function AgentFlowPanel() {
     ],
   );
 
-  // External "send" trigger (Command Center / Review panel call injectAndSend,
-  // which bumps requestSendSignal). Fires handleRun with the injected text.
-  const requestSendSignal = useHelixStore((s) => s.requestSendSignal);
   // handleRun 经 ref 引用，绝不进依赖数组：它依赖 input（每次粘贴/键入都变），
-  // 放进 deps 会让本 effect 在"信号已是 1"后随每次输入变化重跑 —— `> 0` 的
-  // 守卫永久为真，输入框一有内容就发送（"点过代码块运行后，粘贴任何内容
-  // 都自动发出"的根因）。ref 方案下 effect 只对信号本身的递增做出反应。
+  // 放进 deps 会让持有它的 effect 随每次输入变化重跑。ref 方案下消费方只对
+  // 自己的信号/刻度做出反应。
   const handleRunRef = useRef(handleRun);
   const handleBtwQuestionRef = useRef(handleBtwQuestion);
   useEffect(() => {
@@ -8829,16 +8836,6 @@ export function AgentFlowPanel() {
     if (targetMainCid) mainCidRef.current = targetMainCid;
     void handleBtwAsk(q);
   }, [bylineAskSignal, handleBtwAsk]);
-  const lastSendSignalRef = useRef(requestSendSignal);
-  useEffect(() => {
-    if (requestSendSignal !== lastSendSignalRef.current) {
-      lastSendSignalRef.current = requestSendSignal;
-      if (requestSendSignal > 0) {
-        const text = inputValueRef.current;
-        if (text.trim()) handleRunRef.current();
-      }
-    }
-  }, [requestSendSignal]);
 
   // 右侧「旁路问答」面板停止按钮的信号：对当前主线名下开放的旁路会话调用
   // handleStop。Enter 在面板里只发送（运行中直接忽略），停止只能走这个
@@ -8861,10 +8858,6 @@ export function AgentFlowPanel() {
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
   const [editingQueueText, setEditingQueueText] = useState("");
   const editQueueRef = useRef<HTMLTextAreaElement | null>(null);
-  // 「立即发送」先 handleStop 再把这条消息挂在这里，等 run 真的停下来后
-  // 由下方的 effect 发出去（handleStop 是异步的，当场判忙一定还是忙）。
-  const pendingFlushRef = useRef<string | null>(null);
-  const [flushTick, setFlushTick] = useState(0);
 
   const saveQueueEdit = useCallback(
     (id: string) => {
@@ -8904,44 +8897,51 @@ export function AgentFlowPanel() {
         });
         return;
       }
-      if (running && behavior === "abort") {
-        // 先停再发档（默认）：不先停，prompt 会被后端拒绝（session busy）。
-        // handleStop 异步，稍等一拍再判忙重发。
-        handleStop();
-        pendingFlushRef.current = prompt;
-        window.setTimeout(() => setFlushTick((t) => t + 1), 250);
-      } else {
-        // 插话 / 排队档：不 abort，直接带 streamingBehavior 发。后端在 busy
-        // 错误时按声明的 behavior 重试一次；队列长度由 queue_update 反映。
-        void handleRunRef.current({
-          prompt,
-          keepInput: true,
-          busyBehavior:
-            behavior === "steer" || behavior === "followUp"
-              ? behavior
-              : undefined,
-        });
-      }
+      // 排队档：空闲（或本轮已结束）直接带 streamingBehavior 发；本轮还在跑时
+      // 由后端按声明的 behavior 排队。队列长度由 queue_update 反映。
+      void handleRunRef.current({
+        prompt,
+        keepInput: true,
+        busyBehavior: behavior,
+      });
     },
     [
       editingQueueId,
       queueSessionKey,
-      handleStop,
       handleRunRef,
       handleSteerInjection,
       currentSessionId,
     ],
   );
 
-  // 等待中的「立即发送」：run 一旦真正停下就把这条发出去。
+  // 排队档自动投递：本会话没在跑、队列里还有货时，自动发最早的一条。
+  // 「排队」的语义就是「本轮完全跑完再投递」，所以不需要用户再手动按 Enter。
+  // flushQueueItem 经 ref 取最新引用；用 done 标志保证每个「忙→闲」周期只投一条
+  //（否则新 run 刚发起、isBusy 尚未点亮时会一路把整个队列并发刷完）。
+  const flushQueueItemRef = useRef(flushQueueItem);
   useEffect(() => {
-    if (!pendingFlushRef.current) return;
-    const st = useHelixStore.getState();
-    if (st.streamingDrafts[currentSessionId ?? ""]?.isAgentRunning) return;
-    const prompt = pendingFlushRef.current;
-    pendingFlushRef.current = null;
-    void handleRunRef.current({ prompt, keepInput: true });
-  }, [flushTick, streamingDrafts, currentSessionId, handleRunRef]);
+    flushQueueItemRef.current = flushQueueItem;
+  }, [flushQueueItem]);
+  const autoFlushRef = useRef<{ key: string; done: boolean }>({
+    key: queueSessionKey,
+    done: false,
+  });
+  useEffect(() => {
+    const state = autoFlushRef.current;
+    if (state.key !== queueSessionKey) {
+      state.key = queueSessionKey;
+      state.done = false;
+    }
+    if (isBusy) {
+      state.done = false;
+      return;
+    }
+    if (state.done) return;
+    const oldest = inputQueue[0];
+    if (!oldest) return;
+    state.done = true;
+    flushQueueItemRef.current(oldest.id);
+  }, [isBusy, inputQueue, queueSessionKey]);
 
   // 进入编辑态就聚焦编辑框
   useEffect(() => {
@@ -9598,14 +9598,8 @@ export function AgentFlowPanel() {
                     className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-orange-400/40 bg-orange-500/10 text-orange-500 hover:bg-orange-500/20 transition-colors"
                   >
                     <Send className="size-3" />
-                    {busyBehavior === "steer"
-                      ? "立即插话"
-                      : busyBehavior === "followUp"
-                        ? "立即排队"
-                        : "立即发送"}
-                    {busyBehavior !== "abort" && (
-                      <span className="opacity-60">(不停)</span>
-                    )}
+                    {busyBehavior === "steer" ? "立即插话" : "立即排队"}
+                    <span className="opacity-60">(不停)</span>
                   </button>
                 )}
                 {!editing && (
@@ -9667,8 +9661,6 @@ export function AgentFlowPanel() {
             const scopeTag = planOn
               ? null
               : pendingTier
-                ? "待生效"
-                : permissionScopeLabelOf(permissionScopeInfo);
             return (
               <>
                 <ShieldQuestion className="size-3.5 shrink-0" />

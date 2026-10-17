@@ -29,7 +29,7 @@ import {
   thinkingSegmentDurationS,
 } from "./transcript-utils";
 import { formatDurationSeconds } from "@/lib/format";
-import { copyImage, copyTextAndImages } from "@/lib/image-utils";
+import { copyTextAndImages } from "@/lib/image-utils";
 import {
   normalizeAcpContent,
   normalizeAcpContentRaw,
@@ -409,51 +409,6 @@ function CopyButton({
     >
       {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
     </button>
-  );
-}
-
-/**
- * 消息里的一张图 + 悬停「复制图片」。
- *
- * 为什么要自带这个按钮：Helix 把全局 contextmenu 给 `preventDefault()` 掉了
- * （见 context-menu.tsx 的 ContextMenuProvider），WebView 自带的右键「复制图片」
- * 也就跟着没了，而转录区的复制按钮只能拿到文字。这里直接写 `image/png` 到
- * 剪贴板（不是 data URL 文本），粘到微信/画图/聊天框才是一张真实的图。
- */
-function MessageImage({ dataUrl, name }: { dataUrl: string; name?: string }) {
-  const [copied, setCopied] = useState(false);
-  const [failed, setFailed] = useState(false);
-  return (
-    <div className="relative group/img">
-      <img
-        src={dataUrl}
-        alt={name || "pasted image"}
-        className="rounded-lg max-h-[300px] max-w-full object-contain"
-      />
-      <button
-        onClick={() => {
-          copyImage(dataUrl)
-            .then(() => {
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
-            })
-            .catch(() => {
-              setFailed(true);
-              setTimeout(() => setFailed(false), 1500);
-            });
-        }}
-        className="absolute top-1.5 right-1.5 p-1.5 rounded-md bg-background/80 backdrop-blur border border-border/40 text-foreground/70 hover:text-foreground opacity-0 group-hover/img:opacity-100 transition-opacity"
-        data-tip={failed ? "复制失败" : "复制图片"}
-      >
-        {copied ? (
-          <Check className="size-3.5" />
-        ) : failed ? (
-          <Copy className="size-3.5 text-destructive" />
-        ) : (
-          <Copy className="size-3.5" />
-        )}
-      </button>
-    </div>
   );
 }
 
@@ -1041,10 +996,11 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
             {msg.images && msg.images.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-2">
                 {msg.images.map((img) => (
-                  <MessageImage
+                  <img
                     key={img.id}
-                    dataUrl={img.dataUrl}
-                    name={img.name}
+                    src={img.dataUrl}
+                    alt={img.name || "pasted image"}
+                    className="rounded-lg max-h-[300px] max-w-full object-contain"
                   />
                 ))}
               </div>

@@ -2,6 +2,7 @@
 
 import { Check, ChevronDown } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
+import { CodeThemePreview } from "./code-theme-preview";
 import { useLockScrollOnOpen } from "./settings-hooks";
 import {
   SettingRow,
@@ -180,16 +181,6 @@ const FONT_OPTIONS = [
   { label: "SF Mono", value: '"SF Mono", monospace' },
 ];
 
-const UI_FONT_OPTIONS = [
-  { label: "默认", value: "var(--font-geist-sans)" },
-  { label: "Inter", value: '"Inter", sans-serif' },
-  { label: "SF Pro", value: '"-apple-system", "SF Pro", sans-serif' },
-  { label: "Segoe UI", value: '"Segoe UI", sans-serif' },
-  { label: "Monaco", value: "Monaco, monospace" },
-  { label: "JetBrains Mono", value: '"JetBrains Mono", monospace' },
-  { label: "Consolas", value: "Consolas, monospace" },
-];
-
 const fontSelect = (
   value: string,
   onChange: (v: string) => void,
@@ -224,8 +215,6 @@ export function AppearanceSettingsPanel({
   const setFontFamily = useHelixStore((s) => s.setFontFamily);
   const fontSize = useHelixStore((s) => s.fontSize);
   const setFontSize = useHelixStore((s) => s.setFontSize);
-  const interfaceFont = useHelixStore((s) => s.interfaceFont);
-  const setInterfaceFont = useHelixStore((s) => s.setInterfaceFont);
   const transcriptFontSize = useHelixStore((s) => s.transcriptFontSize);
   const setTranscriptFontSize = useHelixStore((s) => s.setTranscriptFontSize);
   const bootBackgroundImage = useHelixStore((s) => s.bootBackgroundImage);
@@ -293,15 +282,15 @@ export function AppearanceSettingsPanel({
         </SettingGroup>
       </div>
 
+      {/* 代码预览：浅色 / 深色两张并排卡，各自固定一套 shiki 主题 */}
+      <CodeThemePreview />
+
       {/* 界面：标题和描述在卡片上方，卡片内放 UI 字体/字号 */}
       <div className="pt-1">
         <div className="px-4 pt-3 pb-2">
           <h4 className="ui-subtitle font-semibold text-foreground">界面</h4>
         </div>
         <SettingGroup>
-          <SettingRow label="UI 字体" hint="调整界面文字使用的字体。">
-            {fontSelect(interfaceFont, setInterfaceFont, UI_FONT_OPTIONS)}
-          </SettingRow>
           <SettingRow
             label="界面字号"
             hint="调整应用界面的文字大小，图标和布局尺寸不受影响。"

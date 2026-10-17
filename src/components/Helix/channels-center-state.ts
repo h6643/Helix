@@ -12,6 +12,8 @@
  *   跨启动生效；状态文本也能推导一部分（见各渠道 usage.js 的固定文案）。
  */
 import { helixApi, isElectron } from "@/lib/electron-bridge";
+import { isSessionBackfillNotice, sessionBackfillDetail } from "@/lib/extension-notices";
+import { useHelixStore } from "@/stores/helix-store";
 
 type NotifyMessage = { message: string; type: string };
 type BridgeResult = {
@@ -103,9 +105,47 @@ function splitOverview(message: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * 非渠道播报（如 pi-hermes-memory 的 session backfill）：最近一次弹过 toast
+ * 的时间戳。文案里的计数每次刷新都会变（78 skipped → 75 skipped），按原文去重
+ * 挡不住，只能按时间窗拦 —— 与 STALE_MS 同口径，一小时内最多弹一次。
+ */
+let lastBackfillToastTs = 0;
+const BACKFILL_TOAST_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * 桥进程里除 pi-connect 外还加载着其它扩展 —— hermes-memory 的 session
+ * backfill 播报也会混进 /connect 的 notify 流，被当成渠道行渲染出来。
+ * 这里把它捞出来单独 toast，渠道卡片只留 /connect 自己的文本。
+ */
+function toastBackfill(msgs: NotifyMessage[]) {
+  const now = Date.now();
+  if (now - lastBackfillToastTs < BACKFILL_TOAST_WINDOW_MS) return;
+  const notice = msgs.find((m) => isSessionBackfillNotice(m.message ?? ""));
+  if (!notice) return;
+  lastBackfillToastTs = now;
+  useHelixStore.getState().showToast({
+    type: "info",
+    title: "会话索引已完成",
+    description: sessionBackfillDetail(notice.message),
+    duration: 5000,
+  });
+}
+
+/** 拆出非渠道播报（纯过滤，不弹 toast）：错误详情的拼接路径用这个。 */
+function withoutBackfill(msgs: NotifyMessage[]): NotifyMessage[] {
+  return msgs.filter((m) => !isSessionBackfillNotice(m.message ?? ""));
+}
+
+/** 渠道消息本体：播报先弹 toast，再把它从消息里摘掉。 */
+function onlyChannel(msgs: NotifyMessage[]): NotifyMessage[] {
+  toastBackfill(msgs);
+  return withoutBackfill(msgs);
+}
+
 function applyStatus(msgs: NotifyMessage[]) {
   const blocks: string[] = [];
-  for (const m of msgs) {
+  for (const m of onlyChannel(msgs)) {
     const text = m.message?.trim();
     if (!text) continue;
     if (text.includes("渠道概览")) blocks.push(...splitOverview(text));
@@ -183,14 +223,18 @@ export function query(action: "status" | "checkin", opts?: { silent?: boolean })
       const results = (r?.results ?? []) as BridgeResult[];
       const first = results[0];
       if (!first || !first.success) {
-        const detail = first?.messages?.map((m) => m.message).join("\n");
+        const detail = first?.messages
+          ?.filter((m) => !isSessionBackfillNotice(m.message))
+          .map((m) => m.message)
+          .join("\n");
         throw new Error(detail || "渠道命令执行失败");
       }
       if (action === "status") {
         applyStatus(first.messages);
       } else {
-        setState({ checkinResults: first.messages, error: null });
-        if (checkinRunCompleted(first.messages)) {
+        const msgs = onlyChannel(first.messages);
+        setState({ checkinResults: msgs, error: null });
+        if (checkinRunCompleted(msgs)) {
           const today = todayStamp();
           writeCheckinStamp(today);
           setState({ checkinDoneDate: today });

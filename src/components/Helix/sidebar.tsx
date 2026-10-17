@@ -47,6 +47,7 @@ import {
 import { timeAgo } from "@/lib/format";
 import { persistence, type PersistedSession } from "@/lib/persist";
 import {
+  adoptRemoteDraftWorkDir,
   connectRemoteProject,
   disconnectRemoteProject,
   findServiceByRemoteWorkDir,
@@ -55,6 +56,7 @@ import {
   remoteProjectLabel,
   remoteProjectSubtitle,
   remoteWorkDirForService,
+  toRemoteTarget,
 } from "@/lib/remote-projects";
 import { resolveBackendSid, removeConversationIndex } from "@/lib/session-map";
 import { mapBackendMessages } from "@/lib/session-resync";
@@ -450,7 +452,7 @@ function ProjectActionsMenu({
           e.stopPropagation();
           setOpen((v) => !v);
         }}
-        className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+        className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 rounded-lg transition-colors opacity-0 group-hover/project:opacity-100 focus:opacity-100"
         data-tip="更多操作"
       >
         <MoreVertical className="size-3.5" />
@@ -1363,13 +1365,19 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
       }
       setRemoteBusyId(svc.id);
       try {
-        const { localPort } = await connectRemoteProject(svc, svc.remotePath);
+        const { localPort } = await connectRemoteProject(
+          await toRemoteTarget(svc),
+          svc.remotePath,
+        );
+        // 同向导 finish()：连上隧道后把草稿的项目身份也设成这台远程项目，
+        // 否则第一条消息仍按旧的本机 cwd 发（「选了远程项目却在本机对话」）。
+        const adopted = adoptRemoteDraftWorkDir(svc, svc.remotePath);
         showToast({
           type: "success",
           title: "已连接远程项目",
           description: `${remoteProjectLabel(svc)}${
             localPort ? `（隧道 127.0.0.1:${localPort}）` : ""
-          } — agent 现在远端跑。`,
+          } — agent 现在远端跑。${adopted ? "下一条消息将在远端执行。" : "（正进行的对话不受影响）"}`,
         });
       } catch (e) {
         showToast({ type: "error", title: "连接失败", description: String(e) });

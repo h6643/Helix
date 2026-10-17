@@ -615,7 +615,6 @@ function ToolCard({
                 <CodeCard
                   language="text"
                   code={[headerText, liveTail].filter(Boolean).join("\n\n")}
-                  showRunButton={false}
                   showHeader={false}
                   className="!leading-snug !my-0"
                 />
@@ -768,7 +767,6 @@ function ToolCard({
                       <CodeCard
                         language={resultLang}
                         code={clamped}
-                        showRunButton={false}
                         showHeader={false}
                         className="!leading-snug !my-0"
                       />

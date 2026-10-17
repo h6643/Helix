@@ -85,6 +85,21 @@ interface ContextUsageData {
   }>;
 }
 
+/**
+ * pi 自己的 `/context`（pi-cc-extensions）报告 —— 网关 `session/context_report`
+ * 就是去问 pi 要的这份，与 pi CLI 里 `/context` 弹框完全同一份数。
+ * 分类固定是：系统提示 / 记忆文件 / 技能 / 工具定义 / 工具结果 / 对话上下文，
+ * 再加「其他」与「剩余空间」（id = "free"，是窗口余量，不计入已用）。
+ */
+interface ContextReportData {
+  source: "pi-context" | "unavailable";
+  context_max: number;
+  context_used: number;
+  context_percent: number;
+  free_space?: number;
+  categories: ContextBreakdown[];
+}
+
 // Backend categories use a chars/4 heuristic, while the top-level `used` is the
 // provider-exact prompt+completion figure. For a coherent UI, categories are
 // normalized to the real usage total; tooltips retain the original heuristic
@@ -97,16 +112,24 @@ function ContextUsageBar({
   used,
   total,
   categories,
+  windowBasis = false,
 }: {
   used: number;
   total: number;
   categories: ContextBreakdown[];
+  /**
+   * true = pi `/context` 口径：段宽按「每个 part 占整个上下文窗口的比例」算，
+   * 剩余空间段自然把条形铺满整窗（part 之和 + 剩余 = 窗口）。
+   * false（默认）= 旧口径：段宽按 part 之间的相对占比摊到已用填充里。
+   */
+  windowBasis?: boolean;
 }) {
   const percentage = Math.min(Math.max((used / total) * 100, 0), 100);
   // Segment widths are proportional to each category's share, normalized to the
   // used fill — so the bar always reads as used/total regardless of whether the
   // category tokens come from the backend or the local session stats.
   const catTotal = categories.reduce((s, c) => s + c.tokens, 0) || 1;
+  const basis = windowBasis && total > 0 ? total : catTotal;
 
   return (
     <div className="w-full">
@@ -121,15 +144,24 @@ function ContextUsageBar({
       {/* Segmented bar */}
       <div className="h-2 w-full bg-muted rounded-full overflow-hidden flex">
         {categories.map((cat) => {
-          const catPercent =
-            used > 0 ? (cat.tokens / catTotal) * percentage : 0;
+          const catPercent = windowBasis
+            ? // 窗口口径：每段直接是「占整窗的比例」，剩余那段刚好补满右缘。
+              (cat.tokens / basis) * 100
+            : // 旧口径：段与段之间按相对占比，整体只铺满「已用」那一截。
+              (cat.tokens / catTotal) * percentage;
           if (catPercent <= 0) return null;
+          // 剩余空间段吃掉右缘余量：各段百分比四舍五入后右缘常留一条空白槽，
+          // 看着像"窗口没用满"。按 id 认，不按位置——位置会随空分类移动。
+          const width =
+            cat.id === "free"
+              ? `${Math.max(100 - usedShareBefore(categories, cat.id, basis), 0)}%`
+              : `${Math.max(catPercent, 0.5)}%`;
           return (
             <div
               key={cat.id}
               className="h-full transition-all duration-300 first:rounded-l-full last:rounded-r-full"
               style={{
-                width: `${Math.max(catPercent, 0.5)}%`,
+                width,
                 backgroundColor: cat.color,
               }}
               data-tip={`${cat.label}: ~${formatTokens(cat.tokens)}`}
@@ -141,6 +173,20 @@ function ContextUsageBar({
   );
 }
 
+/** `beforeId` 之前各段累计占的百分比（窗口口径），供剩余空间段补齐右缘用。 */
+function usedShareBefore(
+  categories: ContextBreakdown[],
+  beforeId: string,
+  basis: number,
+): number {
+  let sum = 0;
+  for (const c of categories) {
+    if (c.id === beforeId) break;
+    sum += (c.tokens / basis) * 100;
+  }
+  return sum;
+}
+
 // ---- Panel (detailed breakdown popover) ----
 
 function ContextUsagePanel({
@@ -149,6 +195,7 @@ function ContextUsagePanel({
   categories,
   toolsets,
   cache,
+  report,
   style,
   contentRef,
 }: {
@@ -161,6 +208,8 @@ function ContextUsagePanel({
     schema_tokens: number;
   }>;
   cache?: { input: number; cacheRead: number; cacheWrite: number };
+  /** pi `/context` 的报告（`session.context_report`）。有它就走 pi 的口径。 */
+  report?: ContextReportData | null;
   style?: React.CSSProperties;
   contentRef?: React.RefObject<HTMLDivElement | null>;
 }) {
@@ -169,12 +218,31 @@ function ContextUsagePanel({
   // Raw per-toolset schema estimates; they describe schema size, not the exact
   // provider token cost, so they remain unnormalized.
   const toolsetList = toolsets ?? [];
-  const normalizedCategories = normalizeCategories(used, categories);
+  // pi `/context` 口径：part 之和 + 剩余空间 = 窗口，段宽按整窗比例算，
+  // 每行再标「占窗口百分比」——和 pi CLI 里 `/context` 弹框同一式样。
+  const reportMax =
+    report?.source === "pi-context" ? report.context_max || 0 : 0;
+  const piParts =
+    report?.source === "pi-context"
+      ? (report.categories ?? []).filter((c) => c.tokens > 0)
+      : [];
+  const piStyle = piParts.length > 0 && reportMax > 0;
+  const normalizedCategories = piStyle
+    ? piParts
+    : normalizeCategories(used, categories);
+  // pi 口径下整块浮层都用报告自己的 used/total：part 之和 + 剩余 = 窗口是 pi
+  // 那边算好的，换成环的读数（本地快照，可能是压缩前高位）会让条形顶出 100%。
+  const shownTotal = piStyle ? reportMax : total;
+  const shownUsed = piStyle ? report?.context_used || 0 : used;
   // 后端在会话文件落盘前只能给出"整块占用"这一项 —— 明确说明，别让它看起来
   // 像某个内容分类（"对话中分类变成会话上下文"的观感来源）。
   const aggregateOnly =
+    !piStyle &&
     normalizedCategories.length > 0 &&
     normalizedCategories.every(isAggregateCategory);
+
+  const windowPercent = (tokens: number) =>
+    shownTotal > 0 ? ((tokens / shownTotal) * 100).toFixed(1) : "0.0";
 
   // Portal 到 body：卡片的 overflow-x: clip（globals.css .helix-chat-input-card）
   // 会把这个 288px 宽的浮层按卡片左缘切掉——左侧「~16.3K」整段被削平。fixed
@@ -186,9 +254,10 @@ function ContextUsagePanel({
       className="w-72 bg-card border border-border/40 rounded-xl shadow-lg p-3 z-50"
     >
       <ContextUsageBar
-        used={used}
-        total={total}
+        used={shownUsed}
+        total={shownTotal}
         categories={normalizedCategories}
+        windowBasis={piStyle}
       />
       {/* Legend list */}
       <div className="mt-3 space-y-1.5">
@@ -198,6 +267,7 @@ function ContextUsagePanel({
           </div>
         ) : (
           normalizedCategories.map((item) => {
+            const isFree = item.id === "free";
             return (
               <div key={item.id} className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
@@ -205,12 +275,23 @@ function ContextUsagePanel({
                     className="w-2 h-2 rounded-sm"
                     style={{ backgroundColor: item.color }}
                   />
-                  <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground">
+                  <span
+                    className={
+                      isFree
+                        ? "text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground"
+                        : "text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground"
+                    }
+                  >
                     {item.label}
                   </span>
                 </div>
                 <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground tabular-nums">
                   ~{formatTokens(item.tokens)}
+                  {piStyle && (
+                    <span className="ml-1.5 text-muted-foreground/70">
+                      {windowPercent(item.tokens)}%
+                    </span>
+                  )}
                 </span>
               </div>
             );
@@ -277,6 +358,7 @@ function ContextUsagePanel({
 export function ContextUsageIndicator({ sessionId }: { sessionId?: string | null }) {
   const [open, setOpen] = useState(false);
   const [backendData, setBackendData] = useState<ContextUsageData | null>(null);
+  const [reportData, setReportData] = useState<ContextReportData | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -352,17 +434,54 @@ export function ContextUsageIndicator({ sessionId }: { sessionId?: string | null
     }
   }, [sessionId]);
 
+  // ── pi `/context` 报告 ────────────────────────────────────────────────
+  // 分类口径与 pi CLI 的 `/context` 完全对齐：网关去问 pi 要那份分布
+  // （系统提示 / 记忆 / 技能 / 工具定义 / 工具结果 / 对话上下文 + 其他 + 剩余）。
+  // 后端没有该扩展时返回 source="unavailable"，这里清空、面板回落旧的分类。
+  const fetchContextReport = useCallback(async () => {
+    try {
+      const currentSessionId = sessionId ?? useHelixStore.getState().currentSessionId;
+      const resolvedSid = await resolveBackendSid(currentSessionId);
+      if (!resolvedSid) {
+        setReportData(null);
+        return;
+      }
+      const result = await helixApi()?.send("session.context_report", {
+        session_id: resolvedSid,
+      });
+      if (result && typeof result === "object") {
+        const data = result as ContextReportData;
+        setReportData(
+          data.source === "pi-context" && (data.categories?.length ?? 0) > 0
+            ? data
+            : null,
+        );
+      }
+    } catch {
+      // 旧后端不认识这个方法（或不支持）—— 静默回落到本地分类。
+      setReportData(null);
+    }
+  }, [sessionId]);
+
   // 打开弹层时查询，并在打开期间每 5s 刷新一次：后端 agent 可能刚构建完成，
   // 分类数据不会在会话创建瞬间就绪，只查一次容易永久停留在"暂无上下文分类数据"。
   // （自动压缩的决策已交给 pi 的回合内阈值压缩，这里不再为检测 80% 门槛
   //  保持后台轮询；压缩发生时的可见反馈走 compaction 事件与压缩通知卡。）
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      // 关了就撤：报告只在这个浮层里用，留着会让下次打开先闪一份旧分布。
+      setReportData(null);
+      return;
+    }
     fetchContextData();
-    const timer = setInterval(fetchContextData, 5000);
+    fetchContextReport();
+    const timer = setInterval(() => {
+      fetchContextData();
+      fetchContextReport();
+    }, 5000);
     return () => clearInterval(timer);
-  }, [open, fetchContextData]);
+  }, [open, fetchContextData, fetchContextReport]);
 
   // Quietly capture the category breakdown once per new live Helix session and
   // persist it into the local snapshot — WITHOUT overriding the displayed ring
@@ -490,6 +609,7 @@ export function ContextUsageIndicator({ sessionId }: { sessionId?: string | null
           // 缓存命中只读本地快照，与环同一个口径（见上面「统一口径」注释）：
           // 弹窗的 RPC 不直接喂显示，否则开/关弹窗会让这个数字自己跳。
           cache={localCtx?.usageStats}
+          report={reportData}
           style={panelStyle}
           contentRef={contentRef}
         />

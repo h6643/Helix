@@ -75,8 +75,6 @@ export interface EditorSlice {
   revealEditorRange: (path: string, start: number, end?: number) => void;
   updateEditorTabContent: (id: string, content: string) => void;
   markEditorTabSaved: (id: string) => void;
-  toggleCodeEditor: () => void;
-  closeCodeEditor: () => void;
 }
 
 /**
@@ -302,8 +300,6 @@ export const createEditorSlice: StateCreator<
     );
   },
 
-  toggleCodeEditor: () => set((s) => ({ editorOpen: !s.editorOpen })),
-  closeCodeEditor: () => set({ editorOpen: false }),
 });
 
 /**

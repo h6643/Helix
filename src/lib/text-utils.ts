@@ -52,7 +52,9 @@ export function normalizeAcpContent(
   if (typeof content === "string") text = content;
   else if (content === null || content === undefined) text = "";
   else if (Array.isArray(content))
-    text = content.map((block: unknown) => normalizeAcpContent(block)).join("");
+    text = content
+      .map((block: unknown) => normalizeAcpContent(block, opts))
+      .join("");
   else if (typeof content === "object") {
     const obj = content as { text?: string; content?: string };
     if (typeof obj.text === "string") text = obj.text;
@@ -70,13 +72,22 @@ export function normalizeAcpContent(
   // Strip invisible transport control chars that overlap lines in WebKitGTK's
   // pre-wrap (lone CR = progress-bar carriage-return; ANSI CSI sequences).
   // Visible text, emoji and <system-reminder> are preserved.
-  return sanitizeControlChars(cleaned);
+  const sanitized = sanitizeControlChars(cleaned);
+  // 剔掉泄进文本流的 chat-template 特殊 token（`<|...|>`）。这是传输层
+  // 产物不是内容，正文与思考都不该显示（原始 bug：`</think>` 泄进可见
+  // 转录）。普通渲染与 verbatim 展示都走这里，所以无条件剔。
+  return stripSpecialTokens(sanitized);
 }
 
 /**
- * Flatten ACP content to a string WITHOUT any content modification:
+ * Flatten ACP content to a string for verbatim model-output display.
  * does NOT strip <system-reminder> tags and does NOT strip emoji.
- * Use for verbatim ("raw") model output display.
+ *
+ * 一个例外：chat-template 特殊 token（`<|...|>`）**仍会被剔掉**。这类标记
+ * 是传输层产物、不是内容，无论正文还是思考折叠都不该给用户看到（原始 bug
+ * 就是 `</think>` 泄进可见转录；而转录的可见正文/思考都走本函数）。真正
+ * 合法的 `<|XXX|>` 字面量（如展示模板语法）极少出现在模型回复里，两害相
+ * 权取其轻：宁可漏展一个罕见模板示例，不可让用户天天看到脏 token。
  */
 export function normalizeAcpContentRaw(content: unknown): string {
   return normalizeAcpContent(content, { stripSystemReminder: false });
@@ -91,6 +102,27 @@ function sanitizeControlChars(s: string): string {
     .replace(/\r/g, "\n")
 // eslint-disable-next-line no-control-regex
     .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
+/**
+ * 剩除泄进正文的模型**特殊 token**（chat-template 控制标记）。
+ *
+ * 背景：部分混合推理模型（DeepSeek-V3.2-think / V4 等）在思考段末尾会字面
+ * 输出模板控制 token（如思考结束标记），本应是服务端的停止/分隔符。一旦上游
+ * 没把它当结构分隔处理（不识别该 token、或思考/正文拼接逻辑把它当成普通内容），
+ * 它就会以原文泄进文本流，在 UI 里变成一行「单独的 <think> 块」。Helix 不
+ * 控制上游，只能在收口处剔掉这类标记。
+ *
+ * 只剔“确实是模板 token 形状”的子串：尖括号包裹、竖线界定、内部为
+ * 字母数字下划线（大小写与词内位置不限，`think_END` 这类混合命名也能命中）。
+ * 不会误删普通尖括号文本（markdown / HTML / 代码里 `<a|b>` 这种写法不常见，
+ * 即便出现也只删一个孤立片段，不破坏结构）。
+ */
+const SPECIAL_TOKEN_RE = /<\|[A-Za-z0-9_]+\|>/g;
+export function stripSpecialTokens(s: string): string {
+  // 快速门控：没有「<|」就不可能是模板 token，直接返回，避开正则开销。
+  if (!s || !s.includes("<|")) return s;
+  return s.replace(SPECIAL_TOKEN_RE, "");
 }
 
 const EMOJI_RE =

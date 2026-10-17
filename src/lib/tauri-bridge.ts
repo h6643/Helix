@@ -301,11 +301,15 @@ function buildTauriAPI(): ElectronAPI {
       port: number;
       username: string;
       remote_path: string;
+      auth_type?: string;
+      secret?: string;
     }) => invoke("remote_connect", {
       host: params.host,
       port: params.port,
       username: params.username,
       remotePath: params.remote_path,
+      authType: params.auth_type ?? null,
+      secret: params.secret ?? null,
     }),
     remoteDisconnect: () => invoke("remote_disconnect"),
     remoteTunnelStatus: () => invoke("remote_tunnel_status"),
@@ -313,11 +317,15 @@ function buildTauriAPI(): ElectronAPI {
       host: string;
       port: number;
       username: string;
+      auth_type?: string;
+      secret?: string;
     }) =>
       invoke("remote_preflight", {
         host: params.host,
         port: params.port,
         username: params.username,
+        authType: params.auth_type ?? null,
+        secret: params.secret ?? null,
       }),
     remoteListPaths: (params: {
       host: string;
@@ -325,6 +333,8 @@ function buildTauriAPI(): ElectronAPI {
       username: string;
       path: string;
       include_hidden?: boolean;
+      auth_type?: string;
+      secret?: string;
     }) =>
       invoke("remote_list_paths", {
         host: params.host,
@@ -332,6 +342,8 @@ function buildTauriAPI(): ElectronAPI {
         username: params.username,
         path: params.path,
         includeHidden: params.include_hidden ?? false,
+        authType: params.auth_type ?? null,
+        secret: params.secret ?? null,
       }),
     setDelegationIdentities: (identities: unknown) =>
       invoke("helix_set_delegation_identities", { identities }),
@@ -626,6 +638,20 @@ function buildTauriAPI(): ElectronAPI {
     read: (taskId: string, tailBytes?: number) =>
       invoke("tasks_read", { taskId, tailBytes: tailBytes ?? null }),
     kill: (taskId: string) => invoke("tasks_kill", { taskId }),
+    remoteList: (params: {
+      host: string;
+      port: number;
+      username: string;
+      auth_type?: string;
+      secret?: string;
+    }) =>
+      invoke("remote_tasks_list", {
+        host: params.host,
+        port: params.port,
+        username: params.username,
+        authType: params.auth_type ?? null,
+        secret: params.secret ?? null,
+      }),
   };
 
   // ── diagnostics ─────────────────────────────────────────────────────────

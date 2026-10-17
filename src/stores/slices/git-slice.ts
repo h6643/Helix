@@ -1,8 +1,8 @@
 /**
  * Git auto-commit / push settings slice.
- * Isolated domain: zero cross-reference with other store state. The action
- * implementations are simple setters so the HelixState interface can just
- * extend this slice.
+ * Isolated domain: zero cross-reference with other store state. Values are
+ * written via `setState` in the settings restore path and read by the
+ * auto-commit flow in agent-flow-panel; no setter actions needed.
  */
 import type { StateCreator } from "zustand";
 
@@ -14,18 +14,9 @@ export interface GitSlice {
   gitRemoteUrl: string;
   gitCommitTemplate: string;
   gitBranchPrefix: string;
-  setGitAutoCommit: (v: boolean) => void;
-  setGitAutoPush: (v: boolean) => void;
-  setGitPushConfirm: (v: boolean) => void;
-  setGitAutoBranch: (v: boolean) => void;
-  setGitRemoteUrl: (v: string) => void;
-  setGitCommitTemplate: (v: string) => void;
-  setGitBranchPrefix: (v: string) => void;
 }
 
-export const createGitSlice: StateCreator<GitSlice, [], [], GitSlice> = (
-  set,
-) => ({
+export const createGitSlice: StateCreator<GitSlice, [], [], GitSlice> = () => ({
   gitAutoCommit: false,
   gitAutoPush: false,
   gitPushConfirm: true,
@@ -33,12 +24,4 @@ export const createGitSlice: StateCreator<GitSlice, [], [], GitSlice> = (
   gitRemoteUrl: "",
   gitCommitTemplate: "chore: auto-commit changes",
   gitBranchPrefix: "feature/",
-
-  setGitAutoCommit: (v) => set({ gitAutoCommit: v }),
-  setGitAutoPush: (v) => set({ gitAutoPush: v }),
-  setGitPushConfirm: (v) => set({ gitPushConfirm: v }),
-  setGitAutoBranch: (v) => set({ gitAutoBranch: v }),
-  setGitRemoteUrl: (v) => set({ gitRemoteUrl: v }),
-  setGitCommitTemplate: (v) => set({ gitCommitTemplate: v }),
-  setGitBranchPrefix: (v) => set({ gitBranchPrefix: v }),
 });

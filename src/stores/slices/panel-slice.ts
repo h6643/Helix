@@ -26,7 +26,6 @@ function persistNavState(history: NavEntry[], index: number) {
 
 export interface PanelSlice {
   showCommandPalette: boolean;
-  showTaskPanel: boolean;
   showSubAgentPanel: boolean;
   showSessionManager: boolean;
   showSettings: boolean;
@@ -38,11 +37,6 @@ export interface PanelSlice {
   /** 渠道中心叠加面板（侧边栏「设置」按钮上方的入口打开）。 */
   showChannelsCenter: boolean;
   showWorktreePanel: boolean;
-  /** PR 面板（`gh` 直建或推送分支 + compare 链接）。 */
-  showPrPanel: boolean;
-  /** 诊断面板：跑项目自带的类型检查/lint 并列出可跳转的问题。 */
-  showDiagnosticsPanel: boolean;
-  showPluginManager: boolean;
   availableCommands: AvailableCommand[];
   /** 计划模式（plan mode）模型产出的待批准方案。由后端 plan_complete /
    *  run 结束等事件写入，全局共享，供右上角工作面板与底部 PlanReviewBar 共用。 */
@@ -54,7 +48,6 @@ export interface PanelSlice {
   setPendingPlanReview: (v: PlanReviewRequest | null) => void;
   toggleCommandPalette: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
-  toggleTaskPanel: () => void;
   toggleSubAgentPanel: () => void;
   toggleSessionManager: () => void;
   toggleSettings: (page?: string) => void;
@@ -62,8 +55,6 @@ export interface PanelSlice {
   pushNavigation: (entry: NavEntry) => void;
   navigateBack: () => NavEntry | null;
   navigateForward: () => NavEntry | null;
-  canGoBack: () => boolean;
-  canGoForward: () => boolean;
   /** 统一处理前进/后退后的落地行为（切会话 / 开设置页），供标题栏按钮、
    *  窗口菜单与快捷键共用——此前 6 处回调各自实现且行为不一致。 */
   navigateHistory: (direction: "back" | "forward") => void;
@@ -76,9 +67,6 @@ export interface PanelSlice {
   toggleCustomizePanel: () => void;
   toggleChannelsCenter: () => void;
   toggleWorktreePanel: () => void;
-  togglePrPanel: () => void;
-  toggleDiagnosticsPanel: () => void;
-  togglePluginManager: () => void;
   setAvailableCommands: (cmds: AvailableCommand[]) => void;
 }
 
@@ -87,7 +75,6 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
   get,
 ) => ({
   showCommandPalette: false,
-  showTaskPanel: false,
   showSubAgentPanel: false,
   showSessionManager: false,
   showSettings: false,
@@ -97,9 +84,6 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
   showCustomizePanel: false,
   showChannelsCenter: false,
   showWorktreePanel: false,
-  showPrPanel: false,
-  showDiagnosticsPanel: false,
-  showPluginManager: false,
   availableCommands: [],
   pendingPlanReview: null,
   activePlan: [],
@@ -107,7 +91,6 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
   toggleCommandPalette: () =>
     set((state) => ({ showCommandPalette: !state.showCommandPalette })),
   setCommandPaletteOpen: (open) => set({ showCommandPalette: open }),
-  toggleTaskPanel: () => set((s) => ({ showTaskPanel: !s.showTaskPanel })),
   toggleSubAgentPanel: () =>
     set((s) => ({ showSubAgentPanel: !s.showSubAgentPanel })),
   toggleSessionManager: () =>
@@ -156,12 +139,6 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
     return entry;
   },
 
-  canGoBack: () => get().navigationIndex > 0,
-  canGoForward: () => {
-    const { navigationHistory, navigationIndex } = get();
-    return navigationIndex < navigationHistory.length - 1;
-  },
-
   navigateHistory: (direction) => {
     const s = get() as PanelSlice & {
       navigateSession: (
@@ -202,11 +179,6 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
     set((s) => ({ showChannelsCenter: !s.showChannelsCenter })),
   toggleWorktreePanel: () =>
     set((s) => ({ showWorktreePanel: !s.showWorktreePanel })),
-  togglePrPanel: () => set((s) => ({ showPrPanel: !s.showPrPanel })),
-  toggleDiagnosticsPanel: () =>
-    set((s) => ({ showDiagnosticsPanel: !s.showDiagnosticsPanel })),
-  togglePluginManager: () =>
-    set((s) => ({ showPluginManager: !s.showPluginManager })),
   setAvailableCommands: (cmds) => set({ availableCommands: cmds }),
   setPendingPlanReview: (v) => set({ pendingPlanReview: v }),
   setActivePlan: (steps) => set({ activePlan: steps ?? [] }),

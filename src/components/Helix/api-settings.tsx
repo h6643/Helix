@@ -346,14 +346,12 @@ export function ApiSettings({
   // The main sidebar width lives in helix-layout and is the single source of
   // truth. We mirror it here so the settings nav matches, and let the user drag
   // this handle to resize — which also resizes the main sidebar live.
-  const SETTINGS_NAV_MIN = 200;
+  const SETTINGS_NAV_MIN = 220;
   const SETTINGS_NAV_MAX = 500;
-  const uiFontSize = useHelixStore((s) => s.fontSize);
   const navWidth = Math.max(
     SETTINGS_NAV_MIN,
     Math.min(SETTINGS_NAV_MAX, sidebarWidth),
   );
-  const navVisualWidth = navWidth * (uiFontSize / 14);
   const [isResizing, setIsResizing] = useState(false);
   const resizeStartX = useRef(0);
   const resizeStartW = useRef(navWidth);
@@ -2940,7 +2938,7 @@ export function ApiSettings({
       {showSidebar && (
         <div
           className={`helix-sidebar relative flex flex-col shrink-0 h-full overflow-hidden ${isResizing ? "" : "transition-[width] duration-200 ease-out"}`}
-          style={{ width: sidebarCollapsed ? 48 : navVisualWidth }}
+          style={{ width: sidebarCollapsed ? 48 : navWidth }}
         >
           {sidebarCollapsed ? (
             <div className="flex-1 flex flex-col items-center pt-2 gap-1 overflow-y-auto">

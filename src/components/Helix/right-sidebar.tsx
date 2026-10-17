@@ -9,7 +9,6 @@ import { CodeEditorPanel } from "./code-editor-panel";
 import { DiffSidebarPanel } from "./diff-sidebar-panel";
 import { MoreActionsPage } from "./more-actions-page";
 import { BrowserToolbar, BrowserView } from "./preview-rail";
-import { SessionTreePanel } from "./session-tree-panel";
 import { TerminalPanel } from "./terminal-panel";
 import { isTauri } from "@/lib/tauri-bridge";
 import { cleanUrl, summarizeUrl } from "@/lib/url-utils";
@@ -23,8 +22,7 @@ type PageKind =
   | "agent"
   | "byline"
   | "terminal"
-  | "more"
-  | "tree";
+  | "more";
 interface PanelPage {
   id: string;
   kind: PageKind;
@@ -96,7 +94,6 @@ const PANEL_ORDER: PageKind[] = [
   "agent",
   "byline",
   "terminal",
-  "tree",
   "code",
 ];
 
@@ -110,7 +107,8 @@ const PANEL_ORDER: PageKind[] = [
  * Band 1's ✕ closes the whole face: for the browser that means every open web
  * page at once, for a single-item panel it is that one page. Files close through
  * band 3 (closing every editor tab could hit unsaved buffers, so 代码 has no ✕
- * in band 1). The "+" menu creates a new page (browser / diff).
+ * in band 1). The "+" button opens the 更多操作 page（浏览器 / 审阅 /
+ * 终端 / 旁路问答）。
  */
 export function RightSidebar() {
   const tab = useHelixStore((s) => s.rightSidebarTab);
@@ -172,7 +170,7 @@ export function RightSidebar() {
   const pendingActivateRef = useRef<string | null>(null);
 
   // Keep the active view in sync with the selected sidebar tab WITHOUT remounting
-  // (the header "目录/更改/浏览器" menu just sets `rightSidebarTab`). This replaces
+  // (the header tab row just sets `rightSidebarTab`). This replaces
   // the old `key={rightSidebarTab}` remount that rebuilt the whole panel — and the
   // browser <webview> — on every tab switch (the white flash). Code is shown via
   // the editor's own tabs (editorTabs), so selecting "code" just reveals the code
@@ -194,11 +192,9 @@ export function RightSidebar() {
               ? "byline"
               : tab === "terminal"
                 ? "terminal"
-                : tab === "tree"
-                  ? "tree"
-                  : tab === "more"
-                    ? "more"
-                    : null;
+                : tab === "more"
+                  ? "more"
+                  : null;
     if (!kind) return;
     const existing = pagesRef.current.find((p) => p.kind === kind);
     if (existing) {
@@ -302,7 +298,7 @@ export function RightSidebar() {
     // 允许「新建并激活」浏览器页只限于用户本来就在看浏览器的两种情况：
     //   · 当前激活的页本身就是 browser → 原地导航，不动激活态；
     //   · 侧边栏页签是「浏览器」→ 新建并激活（点消息里的链接走这条）。
-    // 其余情况（用户正在看「更改 / 目录 / 代码」）：
+    // 其余情况（用户正在看「更改 / 代码」等）：
     //   · 已有浏览器页 → 后台原地导航（不往标签条里堆新页），不激活；
     //   · 没有浏览器页 + quiet（agent 后台导航）→ 什么都不建，只留 URL。
     //     tab 条是按 pages 渲染的：侧边栏收起时静默建页，会让用户下次打开侧
@@ -457,11 +453,23 @@ export function RightSidebar() {
     setActivePageId(np.id);
   }, [browserAddSeq, setPages, setActivePageId]);
 
+  // 关掉最后一个文件后该落到哪一面：优先「更改」（动线就是 更改→开文件→关
+  // 文件→应回到更改），其次任意真实面。只剩「更多(more)」伪页时返回 null——
+  // more 不在 panelKinds 的 chip 里，落过去等于一片空白 + 无任何高亮。
+  const pickLandingPage = (list: PanelPage[]): PanelPage | null =>
+    list.find((p) => p.kind === "diff") ??
+    list.find((p) => p.kind !== "more") ??
+    null;
+
   // Close the whole code view (empty-state "关闭编辑器" button).
   const closeCodeView = () => {
     useHelixStore.getState().closeAllEditorTabs();
-    if (pages.length > 0) setActivePageId(pages[0].id);
-    else doRetract();
+    const landed = pickLandingPage(pages);
+    if (landed) {
+      activePageIdRef.current = landed.id;
+      setActivePageId(landed.id);
+      setTab(landed.kind);
+    } else doRetract();
   };
 
   // 关掉最后一个文件后，若还留着其它面板页（尤其「更改」），退位过去。
@@ -470,19 +478,14 @@ export function RightSidebar() {
   // → code chip 已从 panelKinds 消失），而旧版这里只 setActivePageId(pages[0])
   // 不同步 tab → chips 高亮与实际内容对不上、pages[0] 也不一定是 diff，表现为
   // 「标签里还有更改但不跳过去，只显示一个空的右侧边栏」。这里把 activePageId
-  // 与 tab 一起退位到真正落地的那一面，优先「更改」（动线就是 更改→开文件→关
-  // 文件→应回到更改）。只在当前确实无激活页（activePageId 指向不存在的页 =
+  // 与 tab 一起退位到真正落地的那一面（与 closeCodeView 共用 pickLandingPage，
+  // 两条路径不能再各写一套）。只在当前确实无激活页（activePageId 指向不存在的页 =
   // code 空面）时才动，不干扰用户主动浏览其他页。关光所有面后由下方 retract
   // effect 接手。
   useEffect(() => {
     if (editorTabs.length > 0 || pages.length === 0) return;
     if (pages.some((p) => p.id === activePageId)) return; // 已落在真实页上，不动
-    // 只在还有「真实面」时退位；只剩「更多(more)」这一伪页时不退位（more 不在
-    // panelKinds 的 chip 里，退过去反而落在一个不渲染的面），收起交给下方
-    // retract effect。
-    const landed =
-      pages.find((p) => p.kind === "diff") ??
-      pages.find((p) => p.kind !== "more");
+    const landed = pickLandingPage(pages);
     if (!landed) return;
     activePageIdRef.current = landed.id;
     setActivePageId(landed.id);
@@ -575,9 +578,7 @@ export function RightSidebar() {
             ? "旁路问答"
             : k === "terminal"
               ? "终端"
-              : k === "tree"
-                ? "会话树"
-                : "文件";
+              : "文件";
   const openKind = (k: PageKind) => {
     if (k === "code") {
       setActivePageId("");
@@ -749,7 +750,6 @@ export function RightSidebar() {
                     />
                   )}
                   {p.kind === "more" && <MoreActionsPage />}
-                  {p.kind === "tree" && <SessionTreePanel />}
                 </div>
               );
             });

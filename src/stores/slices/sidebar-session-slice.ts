@@ -2,7 +2,7 @@
  * Per-session right-sidebar state.
  *
  * Every conversation gets its own independent right-sidebar workspace:
- *   · the list of open pages (browser / diff / agent / byline / terminal / tree)
+ *   · the list of open pages (browser / diff / agent / byline / terminal)
  *   · which page is active
  *   · which sub-agent is being viewed
  *
@@ -31,8 +31,7 @@ export interface SidebarPage {
     | "agent"
     | "byline"
     | "terminal"
-    | "more"
-    | "tree";
+    | "more";
   url: string;
 }
 

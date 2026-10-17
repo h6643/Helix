@@ -48,6 +48,10 @@ function ensureDir() {
 
 function pruneOld() {
   try {
+    // 只对「未消费的活跃请求」按 MAX_KEEP 限额淘汰。`.json.consumed` 是
+    // Rust 消费后重命名的死标记（名字以 .consumed 结尾，不会被下面
+    // endsWith(".json") 命中），它只由 dropStale 无条件回收；若把它们也
+    // 计入 MAX_KEEP，就会提前删掉真正还没消费的活跃请求。
     const files = readdirSync(REQ_DIR)
       .filter((f) => f.endsWith(".json") && f !== "latest.json")
       .sort();
@@ -67,7 +71,13 @@ function dropStale() {
   try {
     const now = Date.now();
     for (const f of readdirSync(REQ_DIR)) {
-      if (!f.endsWith(".json") || f === "latest.json") continue;
+      if (f === "latest.json") continue;
+      // .consumed 文件是 Rust 侧消费请求后留下的死标记，直接清掉
+      if (f.endsWith(".json.consumed")) {
+        try { unlinkSync(join(REQ_DIR, f)); dropped.push(f); } catch { /* best-effort */ }
+        continue;
+      }
+      if (!f.endsWith(".json")) continue;
       const m = f.match(/^(\d+)-/);
       if (!m) continue;
       if (now - Number(m[1]) <= STALE_AFTER_MS) continue;

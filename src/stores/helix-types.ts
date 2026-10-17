@@ -85,9 +85,7 @@ export interface ExecutionStep {
   finishedAt?: number;
   duration_s?: number;
   logs?: string[];
-  agentName?: string;
   subSteps?: ExecutionStep[];
-  delegationId?: string;
   inlineDiff?: string;
   summary?: string;
   output?: string;
@@ -414,14 +412,6 @@ export function permissionScopeInfoFrom(
  * 同样是 null。
  * 远程会话与扩展总开关必须保留：此刻本机的档根本不作用于闸门，不标就是骗人。
  */
-export function permissionScopeLabelOf(
-  info: PermissionScopeInfo | null,
-): string | null {
-  if (!info) return null;
-  if (!info.enabled) return "扩展已关闭";
-  if (info.remote) return "远程会话";
-  return null;
-}
 
 /** UI 下拉的值域 = 权限档 ∪ plan 轴；由两条轴合成，不是存储状态。 */
 export type ApprovalMode = PermissionTier | "plan";

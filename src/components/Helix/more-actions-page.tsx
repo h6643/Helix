@@ -2,14 +2,11 @@
 
 import {
   FileDiff,
-  FileText,
   Globe,
-  ListTree,
   MessagesSquare,
   TerminalSquare,
   type LucideIcon,
 } from "lucide-react";
-import { electronDialog } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
 interface MoreActionsCard {
@@ -41,12 +38,6 @@ export function MoreActionsPage() {
       icon: FileDiff,
       label: "打开审阅",
       onClick: () => useHelixStore.getState().setRightSidebarTab("diff"),
-    },
-    {
-      key: "tree",
-      icon: ListTree,
-      label: "会话树",
-      onClick: () => useHelixStore.getState().setRightSidebarTab("tree"),
     },
     {
       key: "terminal",

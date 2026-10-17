@@ -6,13 +6,10 @@ import type { StateCreator } from "zustand";
 
 export interface TerminalSlice {
   terminalOutput: string[];
-  terminalRawBuffer: string;
   isTerminalOpen: boolean;
   terminalHistory: string[];
   terminalHistoryIndex: number;
   addTerminalOutput: (output: string) => void;
-  clearTerminal: () => void;
-  setTerminalRawBuffer: (buffer: string) => void;
   toggleTerminal: () => void;
   pushTerminalHistory: (cmd: string) => void;
   navigateTerminalHistory: (direction: "up" | "down") => string;
@@ -25,7 +22,6 @@ export const createTerminalSlice: StateCreator<
   TerminalSlice
 > = (set, get) => ({
   terminalOutput: ["Helix v1.0.0 ready — type help for commands", ""],
-  terminalRawBuffer: "",
   isTerminalOpen: false,
   terminalHistory: [],
   terminalHistoryIndex: 0,
@@ -39,8 +35,6 @@ export const createTerminalSlice: StateCreator<
       const lines = filtered.split("\n");
       return { terminalOutput: [...state.terminalOutput, ...lines] };
     }),
-  clearTerminal: () => set({ terminalOutput: [], terminalRawBuffer: "" }),
-  setTerminalRawBuffer: (buffer) => set({ terminalRawBuffer: buffer }),
   toggleTerminal: () =>
     set((state) => ({ isTerminalOpen: !state.isTerminalOpen })),
   pushTerminalHistory: (cmd) =>

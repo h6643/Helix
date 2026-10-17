@@ -1048,6 +1048,13 @@ fn checkin_summary(v: &Value) -> String {
         .map(|ms| {
             ms.iter()
                 .filter_map(|m| m.get("message").and_then(Value::as_str))
+                // 桥进程加载全部扩展：hermes-memory 的 session backfill 播报
+                // 会混进这段 notify 流（前端渠道中心已改成 toast），桌面通知
+                // 正文里不该出现这条与签到无关的内部信息。
+                .filter(|t| {
+                    !t.starts_with("🧠 Session backfill")
+                        && !t.contains("Session backfill complete")
+                })
                 .map(str::to_string)
                 .collect()
         })

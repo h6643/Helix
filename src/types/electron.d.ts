@@ -257,6 +257,28 @@ export interface ElectronAPI {
       already_finished?: boolean;
       error?: string;
     }>;
+    /** 远程项目的后台任务：SSH 读远端 ~/.pi/agent/tasks.json。 */
+    remoteList: (params: {
+      host: string;
+      port: number;
+      username: string;
+      auth_type?: string;
+      secret?: string;
+    }) => Promise<{
+      ok: boolean;
+      tasks?: Array<{
+        id: string;
+        command: string;
+        pid: number;
+        session_id: string;
+        started_at: number;
+        status: "running" | "completed" | "failed" | "killed";
+        exit_code?: number;
+        finished_at?: number;
+        output_file: string;
+      }>;
+      error?: string;
+    }>;
   };
 
   // Delegations（src-tauri/src/delegations.rs）。wire 形状来自 .pi/state/
@@ -458,6 +480,8 @@ export interface ElectronAPI {
       port: number;
       username: string;
       remote_path: string;
+      auth_type?: string;
+      secret?: string;
     }) => Promise<{
       ok: boolean;
       local_port?: number;
@@ -471,6 +495,8 @@ export interface ElectronAPI {
       host: string;
       port: number;
       username: string;
+      auth_type?: string;
+      secret?: string;
     }) => Promise<{
       ok: boolean;
       home: string;
@@ -487,6 +513,8 @@ export interface ElectronAPI {
       username: string;
       path: string;
       include_hidden?: boolean;
+      auth_type?: string;
+      secret?: string;
     }) => Promise<{ cwd: string; paths: string[] }>;
     remoteTunnelStatus: () => Promise<{
       connected: boolean;

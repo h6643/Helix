@@ -342,8 +342,6 @@ function AppearanceSection() {
     setFontFamily,
     fontSize,
     setFontSize,
-    interfaceFont,
-    setInterfaceFont,
   } = useHelixStore();
 
   const fontOptions = [
@@ -351,12 +349,6 @@ function AppearanceSection() {
     { value: "SF Pro", label: "SF Pro" },
     { value: "system-ui", label: "System UI" },
     { value: "monospace", label: "Monospace" },
-  ];
-
-  const interfaceFontOptions = [
-    { value: "Inter", label: "Inter" },
-    { value: "SF Pro", label: "SF Pro" },
-    { value: "system-ui", label: "System UI" },
   ];
 
   return (
@@ -403,23 +395,6 @@ className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md tex
               className="w-full px-3 py-2 text-[length:var(--helix-transcript-size)] rounded-lg border border-border/50 bg-card/50"
             />
           </div>
-        </div>
-      </section>
-
-      <section className="space-y-3">
-        <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-medium text-foreground">
-          界面字体
-        </h3>
-        <div className="space-y-2">
-          <label className="text-[length:var(--helix-transcript-size)] text-muted-foreground">
-            字体系列
-          </label>
-          <PopupSelect
-            value={interfaceFont}
-            onChange={setInterfaceFont}
-            className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70 transition-colors"
-            options={interfaceFontOptions}
-          />
         </div>
       </section>
     </div>

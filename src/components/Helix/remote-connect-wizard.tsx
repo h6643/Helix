@@ -29,10 +29,12 @@ import {
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
+  adoptRemoteDraftWorkDir,
   connectRemoteProject,
   listRemotePaths,
   preflightRemoteProject,
   type RemotePreflightResult,
+  type RemoteTarget,
 } from "@/lib/remote-projects";
 import { cn } from "@/lib/utils";
 import { useHelixStore } from "@/stores/helix-store";
@@ -64,6 +66,15 @@ function WizardBody() {
   const [host, setHost] = useState(existing?.host ?? "");
   const [port, setPort] = useState(String(existing?.port ?? 22));
   const [user, setUser] = useState(existing?.username ?? "");
+  // 认证方式：password / key。新建默认密码（与表单示意一致）；旧数据没存
+  // authType 时默认 key：key 且 secret 空 = ssh-agent/默认密钥（和旧行为一致）。
+  const [authType, setAuthType] = useState<"password" | "key">(
+    existing ? (existing.authType ?? "key") : "password",
+  );
+  // 密码不回显也不覆盖旧值（留空 = 保持原值，见 submitServer）；私钥存的是
+  // 路径（非机密），解密后回显可编辑（见下方 existingPlain effect）。
+  const [password, setPassword] = useState("");
+  const [keyPath, setKeyPath] = useState("");
   const [formErr, setFormErr] = useState<string | null>(null);
   const [savingServer, setSavingServer] = useState(false);
   // 新增服务器时 addExternalService 会返回 id；后续要把选定的远端目录回写到它身上。
@@ -84,17 +95,57 @@ function WizardBody() {
   const [connecting, setConnecting] = useState(false);
   const [connErr, setConnErr] = useState<string | null>(null);
 
+  // 编辑已存服务器时把密文 secret 解一次密，供「密码留空 = 保持原值」时给
+  // 体检/连接用（只在内存里，不回显到输入框）。
+  const [existingPlain, setExistingPlain] = useState<string | null>(null);
+  useEffect(() => {
+    if (!existing?.secret) return;
+    const apply = (plain: string) => {
+      setExistingPlain(plain);
+      // 私钥路径非机密：解出来后回显进输入框（仅在用户还没改过时）。
+      if (existing.authType === "key") {
+        setKeyPath((cur) => (cur === "" || cur === existing.secret ? plain : cur));
+      }
+    };
+    if (existing.secretEncrypted) {
+      void window.electron?.secure
+        ?.decrypt?.(existing.secret)
+        .then((p) => apply(p ?? ""))
+        .catch(() => apply(""));
+    } else {
+      apply(existing.secret);
+    }
+  }, [existing?.secret, existing?.secretEncrypted, existing?.authType]);
+
   // 第 2/3 步用的目标三元组。第 1 步提交后 existing 可能仍是 null（新增时
   // store 刚写入、这一帧还没读到），所以兜底回表单值 —— 两者本来就相等。
   // useMemo 是必需的：下面两个 useCallback 把它列进依赖，每次渲染换对象会让
   // 自动体检/自动列目录的 effect 反复被判定为「变了」。
-  const target = useMemo(
+  const target = useMemo<RemoteTarget>(
     () => ({
       host: (existing?.host ?? host).trim(),
       port: Number(existing?.port ?? port) || 22,
       username: (existing?.username ?? user).trim(),
+      authType,
+      secret:
+        authType === "password"
+          ? password ||
+            (existing?.authType === "password" ? (existingPlain ?? "") : "")
+          : keyPath.trim(),
     }),
-    [existing?.host, existing?.port, existing?.username, host, port, user],
+    [
+      existing?.host,
+      existing?.port,
+      existing?.username,
+      existing?.authType,
+      existingPlain,
+      host,
+      port,
+      user,
+      authType,
+      password,
+      keyPath,
+    ],
   );
 
   const runPreflight = useCallback(async () => {
@@ -153,6 +204,14 @@ function WizardBody() {
       setFormErr("主机地址和用户名都要填");
       return;
     }
+    if (
+      authType === "password" &&
+      !password &&
+      !(existing?.secret && existing.authType === "password")
+    ) {
+      setFormErr("密码认证需要输入 SSH 密码");
+      return;
+    }
     setSavingServer(true);
     setFormErr(null);
     try {
@@ -161,6 +220,14 @@ function WizardBody() {
         host: host.trim(),
         port: Number(port) || 22,
         username: user.trim(),
+        authType,
+        // 密码：编辑已存服务器时留空 = 保持原值（不回显密文）；私钥：存的是
+        // 路径（非机密），直接覆盖。store 层会把 secret 加密落盘。
+        ...(authType === "password"
+          ? password
+            ? { secret: password }
+            : {}
+          : { secret: keyPath.trim() }),
       };
       if (resolvedId) {
         await updateExternalService(resolvedId, payload);
@@ -186,7 +253,7 @@ function WizardBody() {
     } finally {
       setSavingServer(false);
     }
-  }, [addExternalService, host, name, port, resolvedId, services, setStep, updateExternalService, user]);
+  }, [addExternalService, authType, existing, host, keyPath, name, password, port, resolvedId, services, setStep, updateExternalService, user]);
 
   const parentOf = (p: string) => {
     const trimmed = p.replace(/\/+$/, "");
@@ -203,12 +270,16 @@ function WizardBody() {
       if (resolvedId) {
         await updateExternalService(resolvedId, { remotePath: cwd });
       }
+      // 隧道通了还不够：把**草稿**的项目身份也设成这台远程项目。否则用户回到
+      // 输入框发的第一条消息仍带着上一个本机 cwd（session/new 的 cwd）在本机
+      // spawn —— 即「选了远程项目却在本机对话」。
+      const adopted = adoptRemoteDraftWorkDir(target, cwd);
       showToast({
         type: "success",
         title: "已连接远程项目",
         description: `${target.username}@${target.host}:${cwd}${
           localPort ? `（隧道 127.0.0.1:${localPort}）` : ""
-        } — agent 现在远端跑。`,
+        } — agent 现在远端跑。${adopted ? "下一条消息将在远端执行。" : "（正进行的对话不受影响，新对话可在远端跑）"}`,
       });
       bump();
       close();
@@ -291,27 +362,16 @@ function WizardBody() {
                   className={inputCls}
                 />
               </Field>
-              <Field label="主机地址">
-                <div className="relative">
-                  <input
-                    value={host}
-                    onChange={(e) => setHost(e.target.value)}
-                    placeholder="192.168.xx.xx"
-                    className={cn(inputCls, "pl-8")}
-                  />
-                  <Globe className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
-                </div>
-              </Field>
               <div className="grid grid-cols-[1fr_96px] gap-2">
-                <Field label="用户名">
+                <Field label="主机">
                   <div className="relative">
                     <input
-                      value={user}
-                      onChange={(e) => setUser(e.target.value)}
-                      placeholder="xxx"
+                      value={host}
+                      onChange={(e) => setHost(e.target.value)}
+                      placeholder="输入主机地址或 IP，例如 192.168.1.100"
                       className={cn(inputCls, "pl-8")}
                     />
-                    <User className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
+                    <Globe className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
                   </div>
                 </Field>
                 <Field label="端口">
@@ -326,8 +386,87 @@ function WizardBody() {
                   </div>
                 </Field>
               </div>
+              <div className="grid grid-cols-[1fr_160px] gap-2">
+                <Field label="用户名">
+                  <div className="relative">
+                    <input
+                      value={user}
+                      onChange={(e) => setUser(e.target.value)}
+                      placeholder="输入用户名，例如 root"
+                      className={cn(inputCls, "pl-8")}
+                    />
+                    <User className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
+                  </div>
+                </Field>
+                <Field label="认证方式">
+                  <div className="flex items-center gap-1 rounded-md border border-border/50 bg-background p-1">
+                    {(
+                      [
+                        ["password", "密码"],
+                        ["key", "私钥"],
+                      ] as const
+                    ).map(([t, label]) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setAuthType(t)}
+                        className={cn(
+                          "flex-1 rounded px-2 py-0.5 ui-text-sm2 transition-colors",
+                          authType === t
+                            ? "bg-accent text-foreground shadow-sm"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </Field>
+              </div>
+              {authType === "password" ? (
+                <Field label="密码">
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={
+                      existing?.secret && existing.authType === "password"
+                        ? "已保存密码（留空保持不变，输入则覆盖）"
+                        : "输入 SSH 密码"
+                    }
+                    autoComplete="off"
+                    className={inputCls}
+                  />
+                </Field>
+              ) : (
+                <Field label="私钥">
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={keyPath}
+                      onChange={(e) => setKeyPath(e.target.value)}
+                      placeholder="私钥文件路径（留空 = ssh-agent / 默认密钥）"
+                      className={cn(inputCls, "flex-1 min-w-0")}
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-[30px] shrink-0 ui-text-sm2"
+                      onClick={async () => {
+                        const p = await window.electron?.dialog?.openFile?.({
+                          filters: [{ name: "Private Key", extensions: ["*"] }],
+                        });
+                        if (p) setKeyPath(p);
+                      }}
+                    >
+                      浏览…
+                    </Button>
+                  </div>
+                </Field>
+              )}
               <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60">
-                需要已配好 SSH 免密登录（连接全程用 BatchMode，不会弹密码框）。
+                {authType === "password"
+                  ? "密码经系统加密存储，连接时通过 SSH_ASKPASS 自动注入，不会弹窗。"
+                  : "私钥只存路径；留空则用 ssh-agent / 默认密钥（免密）。"}
                 下一步只做只读体检，不会改动配置。
               </p>
               {formErr && <ErrorLine text={formErr} />}

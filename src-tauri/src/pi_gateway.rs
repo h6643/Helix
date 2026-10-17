@@ -145,16 +145,6 @@ const STREAM_SILENCE_TIMEOUT: Duration = Duration::from_secs(300);
 /// deadlines.
 const WATCHDOG_TICK: Duration = Duration::from_secs(30);
 
-/// 死循环护栏：同一条 (工具, 参数, 结果) 连续出现这么多次，就先给模型注一条
-/// 旁注（`LOOP_GUARD_NUDGE_AT`），再继续到 `LOOP_GUARD_ABORT_AT` 就停掉本轮。
-///
-/// 为什么两个看门狗都不管这类卡死：它们防的是「没有帧」，而死循环每一帧都
-/// 正常、每次工具都成功，只是**内容一模一样**。实测一例：同一个 node 抽取命令
-/// 连发 112 次、返回 1362 字符一字不差，111 次的思考开头都是「我要换个做法」。
-/// 近似确定性解码下「相同的上下文尾巴 ⇒ 相同的补全」，模型自己出不来 ——
-/// 必须由外部给它一个新尾巴，或替它停下。
-const LOOP_GUARD_NUDGE_AT: u32 = 3;
-const LOOP_GUARD_ABORT_AT: u32 = 6;
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -498,28 +488,15 @@ pub struct PiInstance {
     /// running, so the frontend card must stay "running" until the child's
     /// terminal event arrives (entry_appended subagents:record / started).
     subagents: Mutex<HashMap<String, SubAgentRecord>>,
-    /// 死循环护栏状态（见 [`LOOP_GUARD_NUDGE_AT`] 与 [`LoopGuard`]）。
-    loop_guard: Mutex<LoopGuard>,
-    /// 护栏判死时叫醒 `session/prompt` 等待循环。用 `notify_waiters`（不留许可）：
-    /// 上一回合没被叫醒的残留许可绝不能把下一回合当场判死。
-    loop_guard_wakeup: tokio::sync::Notify,
-}
-
-/// 「原地打转」计数：只看连续完全相同的工具调用指纹。
-///
-/// 序列**跨回合累计**，只有判死位是每个回合的：用户反复重发同一个词时，模型每轮
-/// 只重复一次调用也算打转（实测「读同一段代码 → 输出同一段 554 token 的分析」连发
-/// 4 轮，每轮内部都够不上阈值，整体却几个小时没动过）。
-#[derive(Default)]
-struct LoopGuard {
-    /// 上一条工具结果的指纹（0 = 还没记过）。
-    last_sig: u64,
-    /// 该指纹连续出现的次数。
-    streak: u32,
-    /// 这一段重复已经给过旁注了（不刷屏）。
-    nudged: bool,
-    /// 判死时的连续次数，0 = 没判过。等待循环取走它来收尾，回合开头复位。
-    tripped_streak: u32,
+    /// `/context` 探针闩：`Some` 时把 pi-cc-extensions 的 context 报告 notify
+    /// 收进缓冲（不当成 warning 抛给前端），见 [`pi_context_report_parts`]。
+    /// 闩是**每实例**的：别的实例的 notify 不该被这里吞掉。
+    context_probe: Mutex<Option<Vec<String>>>,
+    /// `/context` 命令是否可用（pi-cc-extensions 装没装）。0 = 还没探过，
+    /// 1 = 有，-1 = 没有。「有」直接缓存住（一直成立）；「没有」带 60s 保质期
+    /// —— 用户中途装了扩展不该被一个长期存活的实例永久判死。
+    context_cmd_state: std::sync::atomic::AtomicI8,
+    context_cmd_checked_ms: std::sync::atomic::AtomicU64,
 }
 
 /// One live pi-subagents child tracked across its full lifecycle.
@@ -583,8 +560,9 @@ impl PiInstance {
             last_assistant_thinking: Mutex::new(String::new()),
             last_assistant_error: Mutex::new(String::new()),
             subagents: Mutex::new(HashMap::new()),
-            loop_guard: Mutex::new(LoopGuard::default()),
-            loop_guard_wakeup: tokio::sync::Notify::new(),
+            context_probe: Mutex::new(None),
+            context_cmd_state: std::sync::atomic::AtomicI8::new(0),
+            context_cmd_checked_ms: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -609,65 +587,6 @@ impl PiInstance {
 
     fn touch(&self) {
         self.last_active_ms.store(now_ms(), Ordering::SeqCst);
-    }
-
-    /// 新一轮开始：只清「该停了」这一位 —— 它属于上一轮，没被等待循环取走就该作废，
-    /// 绝不能让用户刚发的新消息一上来就被判死。重复序列本身跨轮累计（见 [`LoopGuard`]）。
-    fn begin_turn_loop_guard(&self) {
-        self.loop_guard.lock().unwrap().tripped_streak = 0;
-    }
-
-    /// 护栏判死后收掉这一轮，收尾与卡死看门狗同一套（先开闸门再 abort，释放 waiter）。
-    /// 多一步 `clear_queue`：那条 steer 旁注可能还排在队列里，留着它会串进用户下一条
-    /// 消息那一轮，被模型当成用户又唠叨了一遍。
-    async fn abort_loop_guard_turn(&self, streak: u32) -> String {
-        self.arm_turn_gate();
-        let _ = self.request("clear_queue", Value::Null, RPC_TIMEOUT).await;
-        let _ = self.request("abort", Value::Null, RPC_TIMEOUT).await;
-        *self.turn_waiter.lock().unwrap() = None;
-        self.sync_streaming_flag();
-        format!("检测到死循环：同一个工具调用连续 {streak} 次、返回一字未变，已停止本轮。换做法（不同的命令/参数、别的文件）或换模型后再继续；只重发同一句话会给它同一个尾巴，转得回去。")
-    }
-
-    /// 记录一条工具结果，判断这条序列是否已在原地打转。
-    /// 返回 `Some(旁注文本)` = 此刻该给模型注一条 steer 旁注（换个新尾巴）；
-    /// 到判死阈值则记下 `tripped_streak`、叫醒等待循环并**清零计数**，
-    /// 让用户下一轮拿到一整份预算，而不是第一条调用就被上轮的余量当场判死。
-    fn observe_tool_outcome(&self, tool_name: &str, args: &Value, content: &Value) -> Option<String> {
-        let sig = tool_outcome_signature(tool_name, args, content);
-        let mut g = self.loop_guard.lock().unwrap();
-        if g.last_sig == sig {
-            g.streak += 1;
-        } else {
-            g.last_sig = sig;
-            g.streak = 1;
-            g.nudged = false;
-        }
-        if g.streak < LOOP_GUARD_NUDGE_AT {
-            return None;
-        }
-        if g.streak >= LOOP_GUARD_ABORT_AT {
-            g.tripped_streak = g.streak;
-            g.last_sig = 0;
-            g.streak = 0;
-            g.nudged = false;
-            drop(g);
-            self.loop_guard_wakeup.notify_waiters();
-            return None;
-        }
-        if g.nudged {
-            return None;
-        }
-        g.nudged = true;
-        let streak = g.streak;
-        drop(g);
-        Some(format!(
-            "【系统转达，非用户指令】你已经连续 {streak} 次发出**完全相同**的工具调用（{tool_name}：{}），\
-             每次拿到的结果也一字不差。这不是在推进任务。现在必须换一条路子：改用不同的命令或参数、\
-             去读别的文件、或者干脆停下来用两三句话告诉用户你卡在哪里、缺什么信息。\
-             不要重复上面这条调用，也不要把刚才那段分析再输出一遍。",
-            tool_args_hint(args)
-        ))
     }
 
     /// `streaming` 的唯一含义：**这个实例还有回合没跑完**（自己注册过、尚未结算的
@@ -3282,49 +3201,97 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             }
             Ok(json!({ "status": "mode-applied", "mode_id": mode }))
         }
-        // ── 无损分叉（pi 原生 fork / clone）────────────────────────────
-        // pi 的 fork 在目标 entry 处创建 branched session 文件（完整条目树：
-        // 工具调用/结果/思考块全部保留），并把这个实例 rebind 到新会话。
-        // - 带 entryId：fork（pi 固定 position "before"，即 branch 到该
-        //   user entry 的 parent——前端用"分叉点之后第一条 user 消息"的
-        //   entryId 来表达"保留到分叉点为止"）。
-        // - 不带 entryId：clone（leaf 全量副本），用于分叉点在会话末尾。
-        // rekey_instance 把实例的注册键从父 sid 换成 branched sid：新会话
-        // 的后续 RPC 直连本实例；父 sid 失去存活实例，下次使用走
-        // restore_session_instance 从其自身文件（未被 fork 改动）透明恢复。
-        "session/fork" => {
-            let instance = routed_instance(&params, &state).await?;
-            let entry_id = params
-                .get("entryId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            let fork_resp = match entry_id {
-                Some(eid) => {
-                    instance
-                        .request("fork", json!({ "entryId": eid }), RPC_TIMEOUT)
-                        .await?
-                }
-                None => instance.request("clone", Value::Null, RPC_TIMEOUT).await?,
-            };
-            let state_data = instance.session_state().await?;
-            let new_sid = state_data
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_default();
-            if new_sid.is_empty() {
-                return Err("pi fork returned no sessionId".into());
-            }
-            rekey_instance(&instance, new_sid.clone());
-            Ok(json!({ "session_id": new_sid, "fork": fork_resp }))
-        }
         "session/context_breakdown" => {
             let instance = routed_instance(&params, &state).await?;
             let stats = instance
                 .request("get_session_stats", Value::Null, RPC_TIMEOUT)
                 .await?;
             context_breakdown(&stats, &instance).await
+        }
+        // pi 自己的 `/context` 分类（pi-cc-extensions）：系统提示 / 记忆 / 技能 /
+        // 工具定义 / 工具结果 / 对话上下文，加「其他」和「剩余空间」——与 pi CLI 里
+        // `/context` 弹框完全同一份数（就是问 pi 要的，不自己猜）。
+        // `source: "pi-context"` 是前端的识别标记：带上它才按整窗口径渲染
+        // （part 之和 + 剩余 = 窗口），否则回落 jsonl 分类的比例归一化。
+        "session/context_report" => {
+            let instance = routed_instance(&params, &state).await?;
+            let stats = instance
+                .request("get_session_stats", Value::Null, RPC_TIMEOUT)
+                .await?;
+            let base = context_breakdown(&stats, &instance).await?;
+            let context_max = base
+                .get("context_max")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let context_used = base
+                .get("context_used")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let Some(parts) = pi_context_report_parts(&instance).await else {
+                return Ok(json!({
+                    "source": "unavailable",
+                    "context_max": context_max,
+                    "context_used": context_used,
+                    "context_percent": base.get("context_percent").cloned().unwrap_or(Value::Null),
+                    "categories": base.get("categories").cloned().unwrap_or_else(|| json!([])),
+                }));
+            };
+            // pi 的 part 顺序固定（collectContextBreakdown 的 returns）。按英文
+            // label 映射到 Helix 的分类 id / 中文 label / 主题色；表里没有的
+            // part（扩展改了文案）直接丢掉 —— 前端按「已归因」之和算其他/剩余，
+            // 漏一个只会掉进「其他」，不会让条形超出窗口。
+            let mut rows: Vec<(&str, &str, i64, &str)> = Vec::new();
+            for (pi_label, tokens) in &parts {
+                let row = match pi_label.as_str() {
+                    "System prompt" => ("systemPrompt", "系统提示", "var(--context-usage-system)"),
+                    "Memory" => ("memory", "记忆文件", "var(--context-usage-memory)"),
+                    "Skills" => ("skills", "技能", "var(--context-usage-skills)"),
+                    "Tools definition" => ("tools", "工具定义", "var(--context-usage-tools)"),
+                    "Tool results" => (
+                        "toolResults",
+                        "工具结果",
+                        "var(--context-usage-tool-results)",
+                    ),
+                    "Context" => (
+                        "context",
+                        "对话上下文",
+                        "var(--context-usage-conversation)",
+                    ),
+                    _ => continue,
+                };
+                rows.push((row.0, row.1, *tokens, row.2));
+            }
+            // 其他 / 剩余按网关自己的权威口径重算，不用 pi 报告里那两个数：
+            // pi 的 `used` 与 context_breakdown 的 context_used（provider 实测 /
+            // jsonl 估算取 max）可能差一截，混用会让条形和百分比对不上。
+            let attributed: i64 = rows.iter().map(|r| r.2).sum();
+            rows.push((
+                "other",
+                "其他",
+                (context_used - attributed).max(0),
+                "var(--context-usage-other)",
+            ));
+            let free = (context_max - context_used).max(0);
+            // 剩余空间单独一个字段（前端拿它收尾条形），同时作为分类进列表 ——
+            // pi 的面板也把它和别的 part 并列成一行。
+            rows.push(("free", "剩余空间", free, "var(--context-usage-free)"));
+            let categories: Vec<Value> = rows
+                .into_iter()
+                .filter(|r| r.2 > 0)
+                .map(|(id, label, tokens, color)| {
+                    json!({ "id": id, "label": label, "tokens": tokens, "color": color })
+                })
+                .collect();
+            Ok(json!({
+                "source": "pi-context",
+                "context_max": context_max,
+                "context_used": context_used,
+                "context_percent": base.get("context_percent").cloned().unwrap_or(Value::Null),
+                "free_space": free,
+                "estimated_total": attributed,
+                "categories": categories,
+                "usage_stats": base.get("usage_stats").cloned().unwrap_or(Value::Null),
+            }))
         }
         // Helix's /compact + auto-compaction. pi's compact returns
         // {summary, firstKeptEntryId, tokensBefore, estimatedTokensAfter};
@@ -3501,8 +3468,6 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
             // never be missed (events arrive on the reader thread).
             let (tx, mut rx) = tokio::sync::oneshot::channel();
             instance.turn_cancelled.store(false, Ordering::SeqCst);
-            // 死循环护栏：只复位上一轮没被取走的判死位（重复序列本身跨轮累计）。
-            instance.begin_turn_loop_guard();
             *instance.turn_waiter.lock().unwrap() = Some(TurnWaiter { tx });
             instance.streaming.store(true, Ordering::SeqCst);
             // 上一条消息之前中止过旧回合 ⇒ 本回合开头要先吞掉旧回合带同一 sid 的
@@ -3534,9 +3499,9 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
                         // **任何**失败都重试成 `streamingBehavior:"steer"`，于是用户的新
                         // 任务被塞进旧回合当插话（模型读完旁注照常把旧任务干完 = 「发新
                         // 任务却继续做旧任务」），顺带把别的真错误也静默吞了。
-                        // Helix 没有「跑动中插话」这条 UI 路径（发送队列的「立即发送」=
-                        // 先停再发，见 agent-flow-panel flushQueueItem），所以命中这里
-                        // 只可能是失步：前端/网关已把旧回合当结束，pi 却还在 headless 跑。
+                        // 带声明 behavior 的发送（插话 / 排队）走上面的 retry 分支；命中
+                        // 这里的是未声明 behavior 的交互式发送，所以只可能是失步：前端/
+                        // 网关已把旧回合当结束，pi 却还在 headless 跑。
                         eprintln!(
                             "[pi agent] prompt rejected (previous turn still live) \
                              -> aborting stale turn before resending"
@@ -3611,30 +3576,9 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
                         }
                         break v;
                     }
-                    _ = instance.loop_guard_wakeup.notified() => {
-                        // 护栏判死（reader 线程在 tool_execution_end 上点的火）。
-                        // notify_waiters 不留许可，所以没人接的时刻由下面的 30s tick 兜底。
-                        let tripped = {
-                            let mut g = instance.loop_guard.lock().unwrap();
-                            std::mem::take(&mut g.tripped_streak)
-                        };
-                        if tripped > 0 {
-                            return Err(instance.abort_loop_guard_turn(tripped).await);
-                        }
-                    }
                     _ = tokio::time::sleep(WATCHDOG_TICK) => {
                         let pending_ui = instance.ui_requests.lock().unwrap().len();
                         let tools_running = instance.executing_tools.lock().unwrap().len();
-                        // 用户在答审批卡时不算打转：那是模型在等人，不是在自己的圈里。
-                        let tripped = if pending_ui == 0 {
-                            let mut g = instance.loop_guard.lock().unwrap();
-                            std::mem::take(&mut g.tripped_streak)
-                        } else {
-                            0
-                        };
-                        if tripped > 0 {
-                            return Err(instance.abort_loop_guard_turn(tripped).await);
-                        }
                         if pending_ui == 0 && tools_running == 0 && instance.stream_wedged() {
                             instance.arm_turn_gate();
                             let _ = instance
@@ -3977,10 +3921,8 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
         | "get_session_stats"
         | "get_messages"
         | "get_entries"
-        | "get_tree"
         | "get_fork_messages"
         | "get_last_assistant_text"
-        | "set_session_name"
         | "clear_queue"
         | "set_auto_retry"
         | "abort_retry"
@@ -5264,6 +5206,118 @@ fn jsonl_active_branch_estimate(
     };
     let anchor = jsonl_usage_anchor(&lines, 0);
     (estimated, categories, anchor)
+}
+
+/// pi 的 `/context`（pi-cc-extensions）报告行：`System prompt: 12.3k tokens`。
+/// `formatTokens` 的口径：<1k 原样、<100k 一位小数 + k、其余整数 + k —— 所以
+/// 解析只要认「可选小数 + 可选 k 后缀」这一种形态，认不出就不是报告行。
+fn parse_pi_context_line(line: &str) -> Option<(String, i64)> {
+    let line = line.trim();
+    let (label, rest) = line.split_once(':')?;
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    let rest = rest.trim().strip_suffix("tokens")?.trim();
+    let (num, scale) = match rest.strip_suffix('k') {
+        Some(n) => (n.trim(), 1000f64),
+        None => (rest, 1f64),
+    };
+    let value: f64 = num.parse().ok()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    Some((label.to_string(), (value * scale).round() as i64))
+}
+
+/// 拉一次 pi 自己的 `/context`（pi-cc-extensions 的 context-window 分布），
+/// 返回它那 6+2 个 part 的 `(label, tokens)`。
+///
+/// 为什么走命令而不是自己猜分类：pi 的 `/context` 是**按真实请求**组装的
+/// （systemPrompt / tools / messages 三部分同步计数，见 pi-cc-extensions
+/// feature/context.ts），系统提示、技能、记忆、工具 schema 这些大头只在 pi
+/// 进程里现成。网关拿 jsonl 反推永远对不上（旧分类就是这么和 pi 显示不一致的）。
+///
+/// 前置条件：命令必须已注册。没有它时 `/context` 会被当普通 prompt 发给模型
+/// （`_tryExecuteExtensionCommand` 返回 false 就走真实回合了）——所以先用
+/// `get_commands` 确认，并把这个结论缓进实例（`context_cmd_state`）。
+///
+/// 返回 None = 这台 pi 上没有该命令（或它没吐出报告行），调用方回落到 jsonl 分类。
+async fn pi_context_report_parts(instance: &Arc<PiInstance>) -> Option<Vec<(String, i64)>> {
+    let now = now_ms();
+    let cached = instance.context_cmd_state.load(Ordering::SeqCst);
+    let checked_at = instance.context_cmd_checked_ms.load(Ordering::SeqCst);
+    // 负结论只信 60s：装扩展 / 升级扩展都不该被一个常驻实例永久否决。
+    let negative_stale = cached < 0 && now.saturating_sub(checked_at) >= 60_000;
+    if cached < 0 && !negative_stale {
+        return None;
+    }
+    if cached != 1 || negative_stale {
+        let cmds = instance
+            .request("get_commands", Value::Null, RPC_TIMEOUT)
+            .await
+            .ok()?;
+        let has = cmds
+            .get("commands")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .any(|c| c.get("name").and_then(Value::as_str) == Some("context"))
+            })
+            .unwrap_or(false);
+        instance
+            .context_cmd_state
+            .store(if has { 1 } else { -1 }, Ordering::SeqCst);
+        instance.context_cmd_checked_ms.store(now, Ordering::SeqCst);
+        if !has {
+            return None;
+        }
+    }
+    // 闩住，把这次 report 的 notify 收进来（handle_line 的 notify 分支见状不转发）。
+    // 已经在闩 = 另有探针在跑（两个浮层同时开）：不清它的缓冲，只搭车读，
+    // 免得前一个探针被抹成空、白等 1.5s 再回落到旧分类。
+    let armed_by_me = instance.context_probe.lock().unwrap().is_none();
+    if armed_by_me {
+        *instance.context_probe.lock().unwrap() = Some(Vec::new());
+    }
+    let prompted = instance
+        .request("prompt", json!({ "message": "/context" }), RPC_TIMEOUT)
+        .await;
+    // notify 是 fire-and-forget 的 event，正常情况下排在 prompt 响应**之前**
+    // 就到了；agent_settled 期间发出的 prompt 会被 pi 推迟，那就再等一下。
+    // 只 drain 不 take：迟到的行还能接着进同一个缓冲。
+    let mut captured: Vec<String> = Vec::new();
+    for _ in 0..30 {
+        captured = instance
+            .context_probe
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|v| v.clone())
+            .unwrap_or_default();
+        if !captured.is_empty() {
+            break;
+        }
+        if prompted.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if armed_by_me {
+        *instance.context_probe.lock().unwrap() = None;
+    }
+    if prompted.is_err() {
+        return None;
+    }
+    let parts: Vec<(String, i64)> = captured
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| parse_pi_context_line(l))
+        .collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    Some(parts)
 }
 
 /// get_session_stats → Helix context-breakdown shape.
@@ -6552,35 +6606,6 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 .unwrap()
                 .remove(&tool_call_id)
                 .unwrap_or(Value::Null);
-            // 死循环护栏：连续同 (工具, 参数, 结果) ⇒ 先注一条 steer 旁注给模型一个新
-            // 尾巴，继续重复则由 `session/prompt` 的等待循环收掉这一轮。嵌套调用
-            // （codemode 的 ctx.executeTool、子 agent）不参与计数 —— 它们与外层交替
-            // 出现，会把外层这条连续序列打断成 1，护栏就永远看不见外层的打转。
-            if !nested {
-                if let Some(nudge_text) =
-                    instance.observe_tool_outcome(tool_name, &exec_args, &content)
-                {
-                    let nudge_instance = Arc::clone(instance);
-                    // 读 stdout 的线程是裸 `thread::spawn`（见 reader 启动处），这里
-                    // 没有 Tokio 运行时上下文；`tokio::task::spawn` 会 panic
-                    // （"there is no reactor running"），panic 又掐死读线程 ⇒ pi 那边
-                    // 写 stdout 拿到 EPIPE 整个崩掉。用 Tauri 的全局运行时派发。
-                    tauri::async_runtime::spawn(async move {
-                        // 只用 steer：旁注必须进**正在跑的这一回合**。绝不降级成
-                        // followUp —— 那要等这轮结束才生效，而这轮正是结束不了才需要它。
-                        let result = nudge_instance
-                            .request(
-                                "prompt",
-                                json!({ "message": nudge_text, "streamingBehavior": "steer" }),
-                                RPC_TIMEOUT,
-                            )
-                            .await;
-                        if let Err(e) = result {
-                            eprintln!("[pi agent] loop guard steer inject failed: {e}");
-                        }
-                    });
-                }
-            }
             // write 覆盖前的旧状态（execution_start 抓的）——同样只取一次，防泄漏。
             //   NewFile    = 当时文件不存在（新建）
             //   Text(_)    = 读到了可逐行 diff 的旧文本
@@ -7270,12 +7295,29 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         .or_else(|| message.get("statusText"))
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    if !msg.is_empty() {
-                        emit_helix_event(
-                            "model/warning",
-                            &json!({ "session_id": sid(), "message": msg, "raw": message }),
-                        );
+                    if msg.is_empty() {
+                        return;
                     }
+                    // `/context` 探针进行中（见 `pi_context_report_parts`）：形状
+                    // 像报告的 notify 行进探针缓冲，不再当前端 warning 弹出去。
+                    // 别的扩展的 notify 照旧转发，测试期间的通知一条不吞。
+                    if ui_method == "notify" {
+                        let mut probe = instance.context_probe.lock().unwrap();
+                        if let Some(buf) = probe.as_mut() {
+                            let is_report = msg
+                                .lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .all(|l| parse_pi_context_line(l).is_some());
+                            if is_report {
+                                buf.extend(msg.lines().map(str::to_string));
+                            }
+                            return;
+                        }
+                    }
+                    emit_helix_event(
+                        "model/warning",
+                        &json!({ "session_id": sid(), "message": msg, "raw": message }),
+                    );
                 }
                 // 其余未列出的方法（如 ask_user_question 的 ui.custom）都是
                 // **交互型**：模型在等用户输入，属 Pending Work。路由成
@@ -7416,30 +7458,6 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
         // Pass-through / ignore: agent_start, turn_start/end, message_start/end,
         // summarization_retry_*.
         _ => {}
-    }
-}
-
-/// 工具结果的「原地打转」指纹：**逐字节相同**才算重复。这条护栏抓的是模型把同
-/// 一个调用连发几十次、返回一字不差（近似相同不算 —— 那说明它至少在改参数试）。
-fn tool_outcome_signature(tool_name: &str, args: &Value, content: &Value) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    tool_name.hash(&mut h);
-    args.to_string().hash(&mut h);
-    content.to_string().hash(&mut h);
-    h.finish()
-}
-
-/// 旁注里引用参数时只取前 160 字符：死循环的常见形态正是超长命令，整条回显会
-/// 把旁注本身变成新的上下文负担。
-fn tool_args_hint(args: &Value) -> String {
-    let s = args.to_string();
-    let mut chars = s.chars();
-    let head: String = chars.by_ref().take(160).collect();
-    if chars.next().is_some() {
-        format!("{head}…")
-    } else {
-        head
     }
 }
 
@@ -8050,6 +8068,30 @@ mod tests {
     }
 
     #[test]
+    fn pi_context_report_lines_parse_like_the_extension_emits_them() {
+        // 实测（pi --mode rpc + /context，pi-cc-extensions 2026-10）：
+        // "System prompt: 0 tokens\n...\nTools definition: 9.5k tokens\n...\nFree space: 246k tokens"
+        assert_eq!(
+            parse_pi_context_line("System prompt: 12.3k tokens"),
+            Some(("System prompt".to_string(), 12300))
+        );
+        assert_eq!(
+            parse_pi_context_line("Tool results: 846 tokens"),
+            Some(("Tool results".to_string(), 846))
+        );
+        // >=100k 时 formatTokens 走 Math.round → 整数 k。
+        assert_eq!(
+            parse_pi_context_line("Free space: 246k tokens"),
+            Some(("Free space".to_string(), 246_000))
+        );
+        // 不是报告行的一律拒（探针靠这个把别的 notify 放回 warning 通道）。
+        assert_eq!(parse_pi_context_line("Plan mode"), None);
+        assert_eq!(parse_pi_context_line("Done: 3 files"), None);
+        assert_eq!(parse_pi_context_line(": 5 tokens"), None);
+        assert_eq!(parse_pi_context_line("System prompt: tokens"), None);
+    }
+
+    #[test]
     fn permission_marker_recognizes_only_extension_select() {
         assert!(is_permission_ui_request(
             "select",
@@ -8098,49 +8140,6 @@ mod tests {
             classify_session_error("session restore task failed: no session file for 01a12b05"),
             "session_not_found"
         );
-    }
-
-    #[test]
-    fn loop_guard_nudges_then_trips_on_identical_tool_outcomes() {
-        let instance = PiInstance::new("test".into(), None, false);
-        let args = json!({ "command": "node -e probe" });
-        let result = json!("same output");
-        let other = json!("different output");
-
-        // 前两次不吭声（轮询类工具本来就可能连发两次一样的命令）。
-        assert!(instance
-            .observe_tool_outcome("bash", &args, &result)
-            .is_none());
-        assert!(instance
-            .observe_tool_outcome("bash", &args, &result)
-            .is_none());
-        // 第三次：给模型一个新尾巴。
-        let nudge = instance
-            .observe_tool_outcome("bash", &args, &result)
-            .expect("third identical outcome should nudge");
-        assert!(nudge.starts_with("【系统转达，非用户指令】"));
-        // 同一段重复只提醒一次。
-        assert!(instance
-            .observe_tool_outcome("bash", &args, &result)
-            .is_none());
-        assert!(instance
-            .observe_tool_outcome("bash", &args, &result)
-            .is_none());
-        // 第六次：判死，且计数清零 —— 下一轮拿一整份预算，不会被上轮余量当场掐掉。
-        assert!(instance
-            .observe_tool_outcome("bash", &args, &result)
-            .is_none());
-        {
-            let g = instance.loop_guard.lock().unwrap();
-            assert_eq!(g.tripped_streak, 6);
-            assert_eq!(g.streak, 0);
-        }
-        // 等待循环取走后，回合开头复位；换了结果就是另一条序列，从 1 重新数。
-        instance.begin_turn_loop_guard();
-        assert!(instance
-            .observe_tool_outcome("bash", &args, &other)
-            .is_none());
-        assert_eq!(instance.loop_guard.lock().unwrap().streak, 1);
     }
 
     #[test]

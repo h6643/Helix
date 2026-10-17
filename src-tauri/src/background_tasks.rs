@@ -6,8 +6,10 @@
 //! single mutating command, mirroring the extension's kill logic (main PID
 //! terminate + registry status flip).
 
+use crate::ssh::{apply_auth_env, detach_window, ssh_opts_for, SshAuth};
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::process::Command;
 
 fn tasks_file() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -130,6 +132,81 @@ pub fn tasks_kill(task_id: String) -> Value {
     } else {
         json!({ "ok": false, "error": format!("failed to terminate pid {pid}") })
     }
+}
+
+/// List background tasks from a **remote** machine's `~/.pi/agent/tasks.json`
+/// via SSH. Remote projects run pi on the remote host, so their background
+/// tasks are registered there — the local `tasks_list` can't see them.
+#[tauri::command]
+pub fn remote_tasks_list(
+    host: String,
+    port: u32,
+    username: String,
+    auth_type: Option<String>,
+    secret: Option<String>,
+) -> Result<Value, String> {
+    let port = if port == 0 { 22 } else { port };
+    let host = host.trim().to_string();
+    let username = username.trim().to_string();
+    if host.is_empty() || username.is_empty() {
+        return Err("host / username 不能为空".to_string());
+    }
+    let auth = SshAuth::new(auth_type, secret);
+    let opts = ssh_opts_for(&auth);
+    // 一次往返拿两样：tasks.json + 远端存活 pid 清单（`ps` 输出，跟在哨兵行
+    // 之后）。`cat` 不存在 / 没权限时用 `|| echo '[]'` 兜住，返回空数组而不是
+    // 错误；远端没有 `ps`（如 Windows OpenSSH）时哨兵后跟特殊标记，Rust 侧
+    // 就跳过对账（宁可保持 running，也不能把全部任务误判 failed）。
+    let script = concat!(
+        "(cat ~/.pi/agent/tasks.json 2>/dev/null || echo '[]');",
+        " echo;",
+        " echo '__HX_PIDS_7c2e__';",
+        " (ps -A -o pid= 2>/dev/null || echo '__HX_NO_PIDS__')",
+    );
+    let out = {
+        let mut c = Command::new("ssh");
+        c.args(&opts)
+            .arg("-p")
+            .arg(port.to_string())
+            .arg(format!("{username}@{host}"))
+            .arg(script);
+        apply_auth_env(&mut c, &auth);
+        detach_window(&mut c);
+        c.output()
+    }
+    .map_err(|e| format!("执行 ssh 失败: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let (json_part, pids_part) = match stdout.split_once("__HX_PIDS_7c2e__") {
+        Some((a, b)) => (a, Some(b)),
+        None => (stdout.as_ref(), None),
+    };
+    let mut tasks: Vec<Value> = serde_json::from_str(json_part.trim()).unwrap_or_default();
+    // 对账（与本地 tasks_list 同语义）：标记 running 但远端 pid 已消失的
+    // 就地改判 failed —— 否则远端任务结束后 status 永远停在 running，
+    // 前端「有运行中任务」的判断会永久撑开工作面板按钮。
+    if let Some(pids_raw) = pids_part {
+        let body = pids_raw.trim();
+        if !body.is_empty() && !body.starts_with("__HX_NO_PIDS__") {
+            let alive: std::collections::HashSet<i64> = body
+                .lines()
+                .filter_map(|l| l.trim().parse::<i64>().ok())
+                .collect();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            for t in tasks.iter_mut() {
+                if t.get("status").and_then(Value::as_str) == Some("running") {
+                    let pid = t.get("pid").and_then(Value::as_i64).unwrap_or(-1);
+                    if pid > 0 && !alive.contains(&pid) {
+                        t["status"] = json!("failed");
+                        t["finished_at"] = json!(now);
+                    }
+                }
+            }
+        }
+    }
+    Ok(json!({ "ok": true, "tasks": tasks }))
 }
 
 fn process_alive(pid: i64) -> bool {

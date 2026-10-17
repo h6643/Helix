@@ -95,8 +95,41 @@
   /* ── Font-scope tokens ──
      UI font + transcript size drive the app chrome (chat + settings).
      Editor font + size drive ONLY the code editor (CodeMirror).
-     They are deliberately independent so the two never bleed into each other. */
-  --helix-interface-font: var(--font-geist-sans);
+     They are deliberately independent so the two never bleed into each other.
+
+     界面字体：英文用 Ubuntu Mono（等宽），中文用宋体（SimSun）。
+     两者分工由 font-family 的逐字符回退机制自动完成——CSS 字体链按顺序查找
+     「含该字符字形」的第一个字体，所以英文字符命中 Ubuntu Mono、中文字符
+     因前者无 CJK 字形而继续往后落到 SimSun。
+
+     英文侧：Ubuntu Mono 的家族名是 "Ubuntu Mono"（本机
+     UbuntuMono[wght].ttf 是 variable font，一个字重可变文件，含 400/700
+     等字重，所以界面文字粗细正常——这正是选它而不选 JetBrains Mono
+     SemiBold 的原因：后者本机只装了 SemiBold(600) 一个字重，界面会整体
+     偏粗）。注册表与 PrivateFontCollection 读取均已确认该家族名。
+
+     中文侧：宋体的家族名是 "SimSun"（不是中文名「宋体」，CSS font-family
+     不接受中文家族名；系统注册表里登记为 "SimSun & NSimSun"）。
+     本机 simsun.ttc 位于 C:\Windows\Fonts，属系统自带，所有 Windows 都有。
+
+     注意 SimSun 是衬线体（宋体），与等宽的 Ubuntu Mono 混排时中英文基线
+     和笔画粗细差异较明显——这是用户主动选择的观感，非 bug。
+
+     背景（为何现在写死字体）：--font-geist-sans 时代外观设置里有一整套界面
+     字体下拉选项，用户反馈「改 UI 字体没用」——根因是 Monaco / JetBrains
+     Mono / Geist Mono 在本机均未安装（或家族名不匹配，用户装的是
+     "JetBrains Mono SemiBold"），CSS 里写 "JetBrains Mono" 匹配不到，浏览器
+     一律回退，几个等宽选项渲染结果看起来完全相同。于是去掉选择、写死字体。
+
+     回退顺序："Ubuntu Mono"（本机已装，英文实际生效）→
+     "JetBrains Mono SemiBold"（装过 JetBrains Mono 的机器）→ SimSun
+     （Windows 自带，中文实际生效）→ "Microsoft YaHei"（极少数没有宋体的
+     环境兜底）→ "PingFang SC"（macOS）→ sans-serif。
+
+     降级说明：若某台机器没装 Ubuntu Mono 也没装 JetBrains Mono，英文字符
+     会继续往后落到 SimSun / 微软雅黑，英文不再是等宽——可接受的降级。 */
+  --helix-interface-font: "Ubuntu Mono", "JetBrains Mono SemiBold",
+    SimSun, "Microsoft YaHei", "PingFang SC", sans-serif;
   --helix-transcript-size: 14px;
   --helix-font-size: 13px;
   --helix-mono: var(--font-geist-mono);
@@ -106,15 +139,20 @@
   --helix-surface-frame: color-mix(in oklch, var(--foreground) 9%, transparent);
 
   /* Context-usage category colors — match backend `session.context_breakdown`
-     payload (var(--context-usage-*), see upstream agent context_breakdown.py). */
+     payload (var(--context-usage-*), see upstream agent context_breakdown.py).
+     tool-results / other / free 是 pi `/context`（pi-cc-extensions）那套
+     分类专用：工具结果、其他占用、窗口剩余。 */
   --context-usage-system: oklch(0.72 0.02 250);
   --context-usage-tools: oklch(0.72 0.16 55);
+  --context-usage-tool-results: oklch(0.72 0.16 350);
   --context-usage-rules: oklch(0.70 0.15 160);
   --context-usage-skills: oklch(0.72 0.13 220);
   --context-usage-mcp: oklch(0.72 0.16 350);
   --context-usage-subagents: oklch(0.72 0.15 300);
   --context-usage-memory: oklch(0.70 0.13 190);
   --context-usage-conversation: oklch(0.72 0.14 250);
+  --context-usage-other: oklch(0.62 0.01 250);
+  --context-usage-free: oklch(0.45 0.01 250);
 }
 
 .dark {
@@ -559,7 +597,17 @@
 
 html, body {
   /* UI font scope: chat + settings inherit this. The code editor overrides
-     its own font via --helix-font-family on the CodeMirror element. */
+     its own font via --helix-font-family on the CodeMirror element.
+
+     这条规则此前规则体是空的（只留了注释），于是所有未显式设置 font-family
+     的 UI 都落到 JS 在 body 上写入的编辑器等宽字体上（helix-store.ts 的
+     `document.body.style.fontFamily = s.fontFamily`），界面文字变成等宽、
+     中文又被回退成另一个字体，中英字体割裂。
+
+     现在 --helix-interface-font 是「英文 Ubuntu Mono + 中文宋体(SimSun)」
+     的固定组合（见 :root 处的说明），界面不再提供字体选择；此处只负责把该
+     字体应用到 chrome（chat + settings）。 */
+  font-family: var(--helix-interface-font);
 }
 
 /* Flat workspace backdrop — solid base color, no gradients or texture
@@ -2155,6 +2203,30 @@ nav::-webkit-scrollbar-thumb:hover {
   background: color-mix(in oklch, var(--card) 88%, transparent);
   backdrop-filter: blur(20px) saturate(1.2);
   -webkit-backdrop-filter: blur(20px) saturate(1.2);
+}
+
+/* 对话输入框（主对话 agent-flow-panel + 旁路面板 byline-panel 共用
+   .chat-input）。此前该类在 CSS 里没有定义，字体完全继承 body；body
+   曾被 JS 写入编辑器等宽字体（'Geist Mono','Fira Code','Consolas',
+   monospace，不含中文字形），导致输入框里中英混排时英文走 Consolas、
+   中文回退成另一个字体，字重字宽全不一致。
+   这里显式钉住界面字体（--helix-interface-font，见 :root：英文 Ubuntu
+   Mono + 中文宋体 SimSun），不再随 body 字体漂移。 */
+.chat-input {
+  font-family: var(--helix-interface-font);
+}
+
+/* ── 外观 → 代码预览卡 ─────────────────────────────────────────────
+   背景与文字色由 shiki 主题提供（正是要预览的东西），在
+   code-theme-preview.tsx 里以内联 style 写到容器上，这里只做布局与字体，
+   不碰颜色——用 utility class 会被主题变量覆盖掉预览效果。 */
+.helix-md-preview-code {
+  font-family: var(--helix-mono);
+  font-size: var(--helix-font-size, 13px);
+}
+.helix-md-preview-code pre {
+  margin: 0;
+  background: transparent;
 }
 
 

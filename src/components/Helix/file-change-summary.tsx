@@ -122,7 +122,6 @@ export function FileChangeSummary({
   changes,
 }: {
   changes: PendingChange[];
-  hideHeader?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
 

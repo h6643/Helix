@@ -62,9 +62,6 @@ export interface ApiConfigSlice {
     providerId?: string,
   ) => void;
   setApiConfig: (config: Partial<ApiConfig>) => void;
-  getApiConfig: () => ApiConfig;
-  /** Find which profile owns a given model name (reverse-lookup). */
-  findProfileByModel: (model: string) => ApiProfile | undefined;
   /** Resolve which provider owns `model` **without mutating anything**: the
    *  provider's declared `models` array first, then the fetched per-provider
    *  list (providerModels), then the provider whose baseUrl matches
@@ -78,8 +75,6 @@ export interface ApiConfigSlice {
    *  inherit the last input-bar selection. */
   resolveModelProvider: (model: string) => ProviderConfig | undefined;
   addApiHistory: (config: ApiConfig) => void;
-  removeApiHistory: (index: number) => void;
-  selectApiHistory: (index: number) => void;
   addApiProfile: (
     name: string,
     config: ApiConfig,
@@ -124,8 +119,6 @@ export interface ApiConfigSlice {
   upsertProvider: (
     input: Omit<ProviderConfig, "id"> & { id?: string },
   ) => string;
-  /** Remove a provider; reselects activeModel if it belonged to the removed one. */
-  removeProvider: (id: string) => void;
   /**
    * Unified handler invoked by the model selector on switch.
    * 1) sets activeModel (which re-resolves apiConfig so Helix uses the new key);
@@ -236,14 +229,6 @@ export const createApiConfigSlice: StateCreator<
       }
       return { apiConfig, providers };
     }),
-  getApiConfig: () => get().apiConfig,
-
-  findProfileByModel: (model) => {
-    return get().apiProfiles.find(
-      (p) => (p.models || []).includes(model) || p.config.model === model,
-    );
-  },
-
   addApiHistory: (config) =>
     set((state) => {
       // A history entry represents one CONFIG = baseUrl + apiKey (the list is
@@ -266,18 +251,6 @@ export const createApiConfigSlice: StateCreator<
       }
       const newHistory = [config, ...state.apiHistory].slice(0, 20);
       return { apiHistory: newHistory };
-    }),
-
-  removeApiHistory: (index) =>
-    set((state) => ({
-      apiHistory: state.apiHistory.filter((_, i) => i !== index),
-    })),
-
-  selectApiHistory: (index) =>
-    set((state) => {
-      const config = state.apiHistory[index];
-      if (!config) return state;
-      return { apiConfig: { ...config } };
     }),
 
   addApiProfile: (
@@ -733,27 +706,6 @@ export const createApiConfigSlice: StateCreator<
       persistence.saveSetting("providers", next);
     });
     return id;
-  },
-
-  removeProvider: (id) => {
-    const providers = get().providers.filter((p) => p.id !== id);
-    set({ providers });
-    const active = get().activeModel;
-    const activeStillValid =
-      !!active && providers.some((p) => p.models.includes(active));
-    if (activeStillValid) {
-      // The model survived in another provider — re-anchor activeProviderId to it.
-      const owner = providers.find((p) => p.models.includes(active!));
-      if (owner && get().activeProviderId !== owner.id)
-        set({ activeProviderId: owner.id });
-    } else {
-      const first = providers[0];
-      if (first?.models?.length) get().setActiveModel(first.models[0]);
-      else set({ activeModel: null, activeProviderId: null });
-    }
-    import("@/lib/persist").then(({ persistence }) => {
-      persistence.saveSetting("providers", providers);
-    });
   },
 
   onModelSwitched: (model) => {

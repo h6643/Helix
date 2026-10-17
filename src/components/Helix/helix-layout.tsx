@@ -70,7 +70,12 @@ import {
   electronShell,
   electronGit,
 } from "@/lib/electron-bridge";
-import { isRemoteWorkDir, parseRemoteWorkDir } from "@/lib/remote-projects";
+import {
+  findServiceByRemoteWorkDir,
+  isRemoteWorkDir,
+  parseRemoteWorkDir,
+  toRemoteTarget,
+} from "@/lib/remote-projects";
 import { startScheduledTaskRunner } from "@/lib/scheduled-task-runner";
 import { isServeActive, getServeClient } from "@/lib/serve-gateway";
 import { resolveBackendSids } from "@/lib/session-map";
@@ -190,7 +195,7 @@ function PanelSuspense({ children }: { children: React.ReactNode }) {
 }
 
 // ── Resizable sidebar constants ──────────────────────────────────────────
-const SIDEBAR_MIN = 200;
+const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 500;
 const SIDEBAR_COLLAPSED = 48;
 const SIDEBAR_DEFAULT = 280;
@@ -570,7 +575,6 @@ export function HelixLayout() {
   }, [isRightDragging]);
 
   // State selectors (only re-render when this specific slice changes)
-  const uiFontSize = useHelixStore((s) => s.fontSize);
   const showSessionManager = useHelixStore((s) => s.showSessionManager);
   const showSettings = useHelixStore((s) => s.showSettings);
   const showSkillPanel = useHelixStore((s) => s.showSkillPanel);
@@ -740,14 +744,43 @@ export function HelixLayout() {
   // runningBgTasks 三个随之作废。
   const [bgTasksAll, setBgTasks] = useState<BgTask[]>([]);
   const helixSessionId = useGatewayStore((s) => s.helixSessionId);
+  // 工作面板里后台任务 section 的渲染门槛：口径与面板内部 inline 过滤一致
+  //（本对话 sid 的任务；无 sid 时全量）。没有任务就整节不渲染 —— 不留空态壳。
+  const hasVisibleBgTasks = helixSessionId
+    ? bgTasksAll.some((t) => t.session_id === helixSessionId)
+    : bgTasksAll.length > 0;
   const loadBgTasks = useCallback(async () => {
     if (!isElectron()) return;
     try {
       const api = window.electron;
       const res = await api?.backgroundTasks?.list?.();
-      if (res?.ok) setBgTasks(res.tasks || []);
+      let tasks: BgTask[] = res?.ok ? (res.tasks || []) : [];
+      // 远程项目：后台任务注册在远端机器的 ~/.pi/agent/tasks.json，
+      // 本机 tasks_list 读不到，需额外经 SSH 读远端并合并。
+      if (activeSessionWorkDir && isRemoteWorkDir(activeSessionWorkDir)) {
+        const svc = findServiceByRemoteWorkDir(
+          useHelixStore.getState().externalServices,
+          activeSessionWorkDir,
+        );
+        if (svc) {
+          try {
+            const target = await toRemoteTarget(svc);
+            const rRes = await api?.backgroundTasks?.remoteList?.({
+              host: target.host,
+              port: target.port,
+              username: target.username,
+              auth_type: target.authType,
+              secret: target.secret,
+            });
+            if (rRes?.ok && Array.isArray(rRes.tasks)) {
+              tasks = [...tasks, ...(rRes.tasks as BgTask[])];
+            }
+          } catch { /* remote unreachable — show local only */ }
+        }
+      }
+      setBgTasks(tasks);
     } catch { /* empty */}
-  }, []);
+  }, [activeSessionWorkDir]);
   useEffect(() => {
     if (!isElectron()) return;
     loadBgTasks();
@@ -1747,7 +1780,7 @@ export function HelixLayout() {
 
   const sidebarPixelWidth = sidebarCollapsed
     ? SIDEBAR_COLLAPSED
-    : sidebarWidth * (uiFontSize / 14);
+    : sidebarWidth;
   const titlebarPixelWidth =
     showSidebar && !showSettings ? sidebarPixelWidth : SIDEBAR_COLLAPSED;
 
@@ -2051,12 +2084,16 @@ export function HelixLayout() {
       >
         {!showSettings && !hideConversationActions && (
           <>
-            {/* 统一工作面板：更改（含提交/推送）、计划、子 Agent 收进同一个下拉。仅在有内容时显示。 */}
+            {/* 统一工作面板：更改（含提交/推送）、计划、子 Agent 收进同一个下拉。仅在有内容时显示。
+                后台任务只认「有正在跑的」撑开按钮 —— tasks.json 里的已结束任务永久堆积，
+                用 length>0 会让按钮变成常驻；已结束的历史任务仍可在其他内容撑开的面板里看到。
+                不分对话 / 本地 / 远程项目，远端任务已由 loadBgTasks 合并进来。 */}
             {(pendingPlanReview ||
               activePlan.length > 0 ||
               hasDelegations ||
               delegations.length > 0 ||
               subAgents.length > 0 ||
+              bgTasksAll.some((t) => t.status === "running") ||
               gitChangeStat) && (
               <div className="relative" ref={workPanelRef}>                <button
                   type="button"
@@ -2414,18 +2451,22 @@ export function HelixLayout() {
                         标题栏右上角那个带数量角标的按钮入口已删，工作面板是
                         唯一入口，所以直接嵌 BackgroundTasksPanel（inline 模式）
                         而不是自己再写一份只列本会话的行：运行中优先 + 已结束 +
-                        「其他来源」，每行都能看输出 / 刷新 / 终止；空态面板自己出。 */}
-                    <section className="p-1.5">
-                      <BackgroundTasksPanel
-                        inline
-                        tasks={bgTasksAll}
-                        activeSessionId={helixSessionId}
-                        onClose={() => {
-                          // inline 模式没有关闭按钮，这个回调不会触发
-                        }}
-                        onRefresh={loadBgTasks}
-                      />
-                    </section>
+                        「其他来源」，每行都能看输出 / 刷新 / 终止。
+                        没有本对话的任务时整节不渲染（hasVisibleBgTasks）——
+                        没任务就不要一直显示一个「后台任务」空壳。 */}
+                    {hasVisibleBgTasks && (
+                      <section className="p-1.5">
+                        <BackgroundTasksPanel
+                          inline
+                          tasks={bgTasksAll}
+                          activeSessionId={helixSessionId}
+                          onClose={() => {
+                            // inline 模式没有关闭按钮，这个回调不会触发
+                          }}
+                          onRefresh={loadBgTasks}
+                        />
+                      </section>
+                    )}
                 </div>
                 </div>,
                 document.body,

@@ -156,6 +156,19 @@ export function GlobalTooltip() {
     left: state.x,
     top: state.y,
     transform,
+    // width:max-content 让盒子按「不换行的完整内容宽度」收缩。
+    //
+    // 只用 max-width 是不够的：position:fixed 元素的默认宽度是
+    // shrink-to-fit = min(max(preferred_minimum, available), preferred)。
+    // white-space:pre-line 允许在任意位置折行（中文每个汉字都是合法断点），
+    // 于是 preferred_minimum 退化到「单个汉字 + padding」；当 available 被
+    // 算窄时（贴边的按钮、窄侧栏、或 WebView2 下 100vw 与可视区不一致），
+    // shrink-to-fit 就会取到那个极窄的 preferred_minimum——「关闭」被拆成
+    // 「关 / 闭」两行竖排（见用户反馈）。
+    //
+    // 显式声明 max-content 后，短提示（关关、复制、编辑）稳定保持一行，
+    // 只有内容真的超过 max-width（长说明文字）时才折行，不会溢出圆角框。
+    width: "max-content",
   };
 
   return createPortal(
@@ -165,8 +178,14 @@ export function GlobalTooltip() {
       style={style}
       // `whitespace-pre-line`（而不是 nowrap）：盒子宽度有 420px 上限，长文本在
       // nowrap 下会**溢出到圆角框外面**画出去（overflow 默认 visible），看起来像
-      // 渲染坏了。换行后长提示在框内折行，短提示仍然一行不变；下面的
-      // useLayoutEffect 按实际 offsetHeight 钳位，折高了自己会跟着缩回来。
+      // 渲染坏了。换行后长提示在框内折行；下面的 useLayoutEffect 按实际
+      // offsetHeight 钳位，折高了自己会跟着缩回来。
+      //
+      // 光有 pre-line + max-width 还不够：pre-line 允许中文逐字折行，
+      // position:fixed 的 shrink-to-fit 会把 preferred_minimum 退化到单字宽，
+      // 「关闭」这类两字提示会被拆成竖排（关 / 闭 两行）。配套的
+      // `width: max-content`（见上方 style）让盒子先按完整内容宽度取值，
+      // 只有超过 max-width 才真正折行。两者缺一不可。
       className="pointer-events-none z-[9999] max-w-[min(420px,calc(100vw-16px))] whitespace-pre-line break-words rounded-lg border border-border helix-popover-glass px-2 py-1 text-[10px] leading-relaxed text-foreground shadow-xl"
     >
       {state.text}

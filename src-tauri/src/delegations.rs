@@ -436,6 +436,102 @@ pub fn delegations_read_log(path: String, lines: Option<usize>) -> Value {
     json!({ "ok": true, "content": content })
 }
 
+/// 过期清理：删除 `delegation_live_root()` 下超过 TTL 的目录。
+///
+/// 判定规则：
+///   - 有 manifest.json 且 `started` 或 `completed` 时间戳超过 TTL → 删除
+///   - 没有 manifest.json 且目录修改时间超过 TTL → 删除
+///   - `tasks[0].status` 为终态（completed/failed/killed）且 `completed` 超过 TTL → 删除
+///
+/// 启动时调用一次，best-effort，不影响主流程。
+const DELEGATION_TTL_SECS: u64 = 24 * 60 * 60; // 24 小时
+
+pub fn cleanup_stale_delegations() {
+    let root = delegation_live_root();
+    if !root.exists() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cutoff = now.saturating_sub(DELEGATION_TTL_SECS);
+
+    let mut removed = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let manifest_path = dir.join("manifest.json");
+
+            // 尝试从 manifest 读时间戳；失败则回退到目录修改时间。
+            let should_remove = if manifest_path.is_file() {
+                if let Ok(raw) = std::fs::read_to_string(&manifest_path) {
+                    if let Ok(manifest) = serde_json::from_str::<Value>(&raw) {
+                        let started_ms = manifest
+                            .get("started")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let completed_ms = manifest
+                            .get("completed")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let status = manifest
+                            .pointer("/tasks/0/status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+
+                        let started_secs = (started_ms / 1000) as u64;
+                        let completed_secs = (completed_ms / 1000) as u64;
+                        let is_terminal = matches!(status, "completed" | "failed" | "killed");
+
+                        // 两个时间戳都拿不到（旧格式/字段缺失但 JSON 可解析）
+                        // = 不可判定，不删 —— 与下面「manifest 损坏不删」同一
+                        // 取向：宁可留一个孤儿目录，不可误删活跃数据。双 0 若
+                        // 交给下面的 `started_secs <= cutoff`，会恒真立即被删。
+                        if started_ms == 0 && completed_ms == 0 {
+                            false
+                        } else if is_terminal && completed_ms > 0 {
+                            completed_secs <= cutoff
+                        } else {
+                            started_secs <= cutoff
+                        }
+                    } else {
+                        false // manifest 损坏，不删
+                    }
+                } else {
+                    false
+                }
+            } else {
+                // 无 manifest — 用目录修改时间判定。读不到 mtime 时不删（与上
+                // 面同一条取向：不可判定≠过期）。
+                let modified = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs());
+                match modified {
+                    Some(secs) => secs <= cutoff,
+                    None => false,
+                }
+            };
+
+            if should_remove {
+                if std::fs::remove_dir_all(&dir).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    if removed > 0 {
+        eprintln!("[delegations] 已清理 {removed} 个过期 delegation 目录");
+    }
+}
+
 fn read_tail(path: &PathBuf, lines: usize) -> String {
     let Ok(content) = std::fs::read_to_string(path) else {
         return String::new();

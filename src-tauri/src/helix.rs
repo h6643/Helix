@@ -1983,9 +1983,77 @@ pub async fn pi_search_packages(
     .await
 }
 
+/// True when a semver spec is an *exact* version (`1.2.3`) rather than a
+/// range or tag. Mirrors pi's own `isExactNpmVersion`, which is
+/// `semver.valid(v) !== null`: only a plain full version counts. `^1.2.3`,
+/// `~1.2.3`, `1.x`, `*` and `latest` are all NOT pinned.
+fn is_exact_npm_version(version: &str) -> bool {
+    let v = version.trim();
+    let core = v.strip_prefix('v').unwrap_or(v);
+    // Strict semver core: MAJOR.MINOR.PATCH with numeric parts only
+    // (no pre-release / build metadata — those never appear in a pin).
+    let mut parts = core.split('.');
+    let ok = (0..3).all(|_| {
+        parts
+            .next()
+            .map(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false)
+    }) && parts.next().is_none();
+    ok
+}
+
+/// The pinned version declared for an npm package in settings.json's
+/// `packages` list, if any. pi only skips pinned packages in
+/// `updateConfiguredSources` (`if (!parsed.pinned)`), NOT in
+/// `pi install npm:<name>` — that path runs a bare `npm install <name>` and
+/// upgrades to latest regardless of what settings.json says. Helix's skill
+/// panel update button goes through `pi install`, so this is what lets us
+/// refuse an upgrade that would silently overwrite a local patch.
+fn pinned_npm_version(package: &str) -> Option<String> {
+    let settings = crate::config::read_pi_settings();
+    let empty = Vec::new();
+    let packages = settings
+        .get("packages")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    for entry in packages {
+        // Both plain string ("npm:foo@1.0.0") and object form
+        // ({source: "npm:foo@1.0.0", ...}) can carry a version.
+        let source = match entry {
+            Value::String(s) => s.as_str(),
+            Value::Object(o) => o.get("source").and_then(Value::as_str).unwrap_or(""),
+            _ => continue,
+        };
+        let Some(rest) = source.strip_prefix("npm:") else {
+            continue;
+        };
+        // Split on the last '@' so scoped names (@scope/name) survive.
+        // A leading '@' means no version was declared.
+        let Some(idx) = rest.rfind('@') else {
+            continue;
+        };
+        if idx == 0 {
+            continue;
+        }
+        let (name, version) = rest.split_at(idx);
+        let version = &version[1..];
+        if name == package && is_exact_npm_version(version) {
+            return Some(version.to_string());
+        }
+    }
+    None
+}
+
 /// Install a Pi package via `pi install npm:<package>`. For an installed
 /// package this upgrades it to the latest version. pi loads packages at
 /// process start, so a successful install restarts the agent.
+///
+/// Refuses to upgrade a package pinned to an exact version in settings.json.
+/// pi's own `update --extensions` skips pinned packages, but `pi install`
+/// runs a bare `npm install <name>` that upgrades to latest regardless — so
+/// without this guard the skill panel's update button would overwrite local
+/// patches (e.g. pi-permission's in-place edits, pi-cc-extensions' removed
+/// commands) even though the user pinned them to keep those patches.
 #[tauri::command]
 pub async fn pi_install_package(
     state: State<'_, Arc<AppState>>,
@@ -1993,6 +2061,13 @@ pub async fn pi_install_package(
 ) -> Result<Value, String> {
     if package.trim().is_empty() {
         return Err("package name cannot be empty".into());
+    }
+    if let Some(version) = pinned_npm_version(&package) {
+        return Err(format!(
+            "{package} 已固定在 v{version}（settings.json 里写的是精确版本），不执行升级。\
+             这样本地修改（就地补丁、删掉的命令）不会被覆盖。\
+             要升级请先编辑 ~/.pi/agent/settings.json 的 packages，改成目标版本号，再重试。"
+        ));
     }
     let install_id = format!("npm:{package}");
     let (program, base_args) = pi_gateway::pi_cli_strings();
@@ -2196,7 +2271,10 @@ pub async fn pi_check_updates() -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{glob_match, ingest_extension_source, merge_lite_wrappers, set_local_extension_enabled};
+    use super::{
+        glob_match, ingest_extension_source, is_exact_npm_version, merge_lite_wrappers,
+        set_local_extension_enabled,
+    };
     use serde_json::Value;
 
     fn m(pattern: &str, text: &str) -> bool {
@@ -2393,5 +2471,24 @@ mod tests {
             .filter_map(|i| i.get("name").and_then(Value::as_str).map(String::from))
             .collect();
         assert!(names.contains(&"cjk_tool".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn exact_version_only_is_pinned() {
+        // Mirrors pi's `semver.valid(v) !== null`: only a plain full version
+        // counts as pinned. Ranges and tags must NOT be treated as pinned.
+        assert!(is_exact_npm_version("1.0.4"));
+        assert!(is_exact_npm_version("0.9.9"));
+        assert!(is_exact_npm_version("2.12.0"));
+        assert!(is_exact_npm_version("v1.0.4"));
+        assert!(!is_exact_npm_version("^1.0.4"));
+        assert!(!is_exact_npm_version("~1.0.4"));
+        assert!(!is_exact_npm_version("1.x"));
+        assert!(!is_exact_npm_version("*"));
+        assert!(!is_exact_npm_version("latest"));
+        assert!(!is_exact_npm_version(""));
+        assert!(!is_exact_npm_version("1.0"));
+        assert!(!is_exact_npm_version("1.0.4.5"));
+        assert!(!is_exact_npm_version("1.0.4-beta"));
     }
 }

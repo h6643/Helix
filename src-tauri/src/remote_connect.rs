@@ -24,6 +24,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::state::AppState;
+use crate::ssh::{apply_auth_env, detach_window, ssh_opts_for, SshAuth};
 
 /// 本机 ssh -L 隧道子进程（`ssh -N -L ...`）。进程内 static，重复连接先杀旧。
 /// Helix 退出靠 OS 随控制台回收（Tauri 无干净的 process-exit 钩子，不强求）。
@@ -102,16 +103,9 @@ fn kill_tunnel() {
     *tunnel_target_state().lock().unwrap() = None;
 }
 
-/// 一条 `-o` 串：短超时 + 关 host key 检查 + 静默 + BatchMode（不弹密码窗）。
-fn ssh_opts() -> Vec<String> {
-    vec![
-        "-o".into(),
-        "ConnectTimeout=10".into(),
-        "-o".into(),
-        "StrictHostKeyChecking=no".into(),
-        "-o".into(),
-        "BatchMode=yes".into(),
-    ]
+/// 一条 `-o` 串：短超时 + 关 host key 检查 + 按认证方式追加选项（见 ssh.rs）。
+fn ssh_opts(auth: &SshAuth) -> Vec<String> {
+    ssh_opts_for(auth)
 }
 
 /// 把 bridge 所需的 node / pi 常见目录补进 PATH。非交互 ssh（`ssh host "cmd"`）
@@ -123,11 +117,16 @@ fn remote_path_prelude() -> String {
         .to_string()
 }
 
-/// Step 1+2：scp 拷 bridge 到远端 home，再 ssh 后台起 node。失败返回 Err。
+/// Step 1+2：把 bridge 拷到远端 home，再 ssh 后台起 node。失败返回 Err。
+///
+/// 传输用 `ssh "cat > 文件"` 管道而不是 scp：Windows 自带的 scp.exe 不支持
+/// SSH_ASKPASS（二进制里根本没有该字符串），密码认证下必挂；ssh.exe 支持。
+/// 先写到临时名再 mv：避免半截文件被旧 bridge 的同名进程读到。
 fn push_and_start_remote_bridge(
     host: &str,
     port: u32,
     username: &str,
+    auth: &SshAuth,
 ) -> Result<(), String> {
     let local_bridge = materialize_remote_bridge()?;
 
@@ -140,25 +139,45 @@ fn push_and_start_remote_bridge(
     //      新 bridge 绑 18800 失败。
     // 正确写法：**不引号**，让远端 shell 把 `remote-bridge[.]js` 展开成真实文件名
     // `remote-bridge.js`；会话 shell 自己的原始命令行里仍是带括号的串，不会被匹配。
-    let _ = Command::new("ssh")
-        .args(&ssh_opts())
-        .arg("-p")
-        .arg(port.to_string())
-        .arg(format!("{username}@{host}"))
-        .arg("pkill -f remote-bridge[.]js || true")
-        .output();
+    let opts = ssh_opts(auth);
+    let _ = {
+        let mut c = Command::new("ssh");
+        c.args(&opts)
+            .arg("-p")
+            .arg(port.to_string())
+            .arg(format!("{username}@{host}"))
+            .arg("pkill -f remote-bridge[.]js || true");
+        apply_auth_env(&mut c, auth);
+        detach_window(&mut c);
+        c.output()
+    };
 
-    let scp_out = Command::new("scp")
-        .args(&ssh_opts())
-        .arg("-P")
-        .arg(port.to_string())
-        .arg(&local_bridge)
-        .arg(format!("{username}@{host}:~/remote-bridge.js"))
-        .output()
-        .map_err(|e| format!("执行 scp 失败: {e}"))?;
-    if !scp_out.status.success() {
-        let stderr = String::from_utf8_lossy(&scp_out.stderr);
-        return Err(format!("scp remote-bridge.js 到远端失败: {}", stderr.trim()));
+    let file_bytes = std::fs::read(&local_bridge)
+        .map_err(|e| format!("读本地 bridge 失败: {e}"))?;
+    let push_out = {
+        let mut c = Command::new("ssh");
+        c.args(&opts)
+            .arg("-p")
+            .arg(port.to_string())
+            .arg(format!("{username}@{host}"))
+            .arg("cat > ~/remote-bridge.js.part && mv ~/remote-bridge.js.part ~/remote-bridge.js");
+        apply_auth_env(&mut c, auth);
+        detach_window(&mut c);
+        c.stdin(std::process::Stdio::piped()).spawn()
+    };
+    let mut push_child = push_out.map_err(|e| format!("执行 ssh 推 bridge 失败: {e}"))?;
+    {
+        use std::io::Write;
+        if let Some(si) = push_child.stdin.as_mut() {
+            let _ = si.write_all(&file_bytes);
+        }
+    }
+    let push_status = push_child
+        .wait_with_output()
+        .map_err(|e| format!("推 bridge 到远端失败: {e}"))?;
+    if !push_status.status.success() {
+        let stderr = String::from_utf8_lossy(&push_status.stderr);
+        return Err(format!("推送 remote-bridge.js 到远端失败: {}", stderr.trim()));
     }
 
     // 后台起 bridge（nohup + &，ssh 跑完即退，bridge 留在远端）。
@@ -170,14 +189,18 @@ fn push_and_start_remote_bridge(
         remote_path_prelude(),
         BRIDGE_PORT,
     );
-    let out = Command::new("ssh")
-        .args(&ssh_opts())
-        .arg("-p")
-        .arg(port.to_string())
-        .arg(format!("{username}@{host}"))
-        .arg(start_cmd)
-        .output()
-        .map_err(|e| format!("执行 ssh 失败: {e}"))?;
+    let out = {
+        let mut c = Command::new("ssh");
+        c.args(&opts)
+            .arg("-p")
+            .arg(port.to_string())
+            .arg(format!("{username}@{host}"))
+            .arg(start_cmd);
+        apply_auth_env(&mut c, auth);
+        detach_window(&mut c);
+        c.output()
+    }
+    .map_err(|e| format!("执行 ssh 失败: {e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!("远端起 bridge 失败: {}", stderr.trim()));
@@ -194,6 +217,7 @@ fn open_tunnel(
     port: u32,
     username: &str,
     local_port: u32,
+    auth: &SshAuth,
 ) -> Result<(), String> {
     kill_tunnel();
 
@@ -201,24 +225,23 @@ fn open_tunnel(
     let forward = format!("{local_port}:127.0.0.1:{BRIDGE_PORT}");
     let port_str = port.to_string();
     let userhost = format!("{username}@{host}");
-    let args: Vec<&str> = vec![
-        "-N",
-        "-p",
-        &port_str,
-        "-o",
-        "ExitOnForwardFailure=yes",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "BatchMode=yes",
-        "-L",
-        &forward,
-        &userhost,
-    ];
+    let opts = ssh_opts(auth);
+    let mut args: Vec<String> = opts.iter().map(|s| s.as_str().to_string()).collect();
+    args.extend([
+        "-N".into(),
+        "-p".into(),
+        port_str,
+        "-o".into(),
+        "ExitOnForwardFailure=yes".into(),
+        "-L".into(),
+        forward,
+        userhost,
+    ]);
     #[cfg(windows)]
     {
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW，不弹黑窗
     }
+    apply_auth_env(&mut cmd, auth);
     cmd.args(&args);
 
     let child = cmd
@@ -272,6 +295,8 @@ pub fn remote_connect(
     port: u32,
     username: String,
     remote_path: String,
+    auth_type: Option<String>,
+    secret: Option<String>,
 ) -> Result<Value, String> {
     let port = if port == 0 { 212 } else { port };
     let remote_path = if remote_path.trim().is_empty() {
@@ -287,18 +312,19 @@ pub fn remote_connect(
     }
     let host = host.trim().to_string();
     let username = username.trim().to_string();
+    let auth = SshAuth::new(auth_type, secret);
 
-    // 先验证 SSH 可达（复用 ssh_connect 的一次性探测）。
-    crate::ssh::connect(&host, port, &username, "key", "").map_err(|e| {
+    // 先验证 SSH 可达（复用 ssh_connect 的一次性探测，错误分类全）。
+    crate::ssh::connect(&host, port, &username, &auth).map_err(|e| {
         format!("SSH 到 {host}:{port} 失败: {e}")
     })?;
 
     let local_port = pick_local_port()?;
 
     // Step 1+2：远端 side。
-    push_and_start_remote_bridge(&host, port, &username)?;
+    push_and_start_remote_bridge(&host, port, &username, &auth)?;
     // Step 3：本机隧道。
-    open_tunnel(&host, port, &username, local_port)?;
+    open_tunnel(&host, port, &username, local_port, &auth)?;
     // Step 4+5：写配置 + 重启。
     let arc: Arc<AppState> = Arc::clone(&state);
     write_remote_config(&arc, local_port, &remote_path)?;
@@ -345,6 +371,8 @@ pub fn remote_list_paths(
     username: String,
     path: String,
     include_hidden: Option<bool>,
+    auth_type: Option<String>,
+    secret: Option<String>,
 ) -> Result<Value, String> {
     let port = if port == 0 { 212 } else { port };
     let path = if path.trim().is_empty() { "~".to_string() } else { path.trim().to_string() };
@@ -365,14 +393,20 @@ pub fn remote_list_paths(
         flags = flags,
         missing = NOT_A_DIR,
     );
-    let out = Command::new("ssh")
-        .args(&ssh_opts())
-        .arg("-p")
-        .arg(port.to_string())
-        .arg(format!("{username}@{host}"))
-        .arg(ls_cmd)
-        .output()
-        .map_err(|e| format!("执行 ssh 失败: {e}"))?;
+    let auth = SshAuth::new(auth_type, secret);
+    let opts = ssh_opts(&auth);
+    let out = {
+        let mut c = Command::new("ssh");
+        c.args(&opts)
+            .arg("-p")
+            .arg(port.to_string())
+            .arg(format!("{username}@{host}"))
+            .arg(ls_cmd);
+        apply_auth_env(&mut c, &auth);
+        detach_window(&mut c);
+        c.output()
+    }
+    .map_err(|e| format!("执行 ssh 失败: {e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!("列目录失败: {}", stderr.trim()));
@@ -406,15 +440,22 @@ fn shell_quote(s: &str) -> String {
 /// npm 全局候选也和 `remote-bridge.js` 的 `resolvePiCli()` 保持同一组路径。否则
 /// 会出现「体检说 pi 在，真连上却 spawn 失败」——那体检就白做了。
 #[tauri::command]
-pub fn remote_preflight(host: String, port: u32, username: String) -> Result<Value, String> {
+pub fn remote_preflight(
+    host: String,
+    port: u32,
+    username: String,
+    auth_type: Option<String>,
+    secret: Option<String>,
+) -> Result<Value, String> {
     let port = if port == 0 { 212 } else { port };
     let host = host.trim().to_string();
     let username = username.trim().to_string();
     if host.is_empty() || username.is_empty() {
         return Err("host / username 不能为空".to_string());
     }
+    let auth = SshAuth::new(auth_type, secret);
     // 先要 SSH 通（复用 ssh_connect 的探测，它的错误分类比这里现写一份全）。
-    crate::ssh::connect(&host, port, &username, "key", "")
+    crate::ssh::connect(&host, port, &username, &auth)
         .map_err(|e| format!("SSH 到 {host}:{port} 失败: {e}"))?;
 
     // 只用 POSIX 语法（远端登录 shell 可能是 sh，不保证有 bashism）。
@@ -429,14 +470,19 @@ pub fn remote_preflight(host: String, port: u32, username: String) -> Result<Val
         " if [ -f \"$f\" ]; then echo \"HX_PI_CLI_JS=$f\"; fi; done;",
         " true",
     );
-    let out = Command::new("ssh")
-        .args(&ssh_opts())
-        .arg("-p")
-        .arg(port.to_string())
-        .arg(format!("{username}@{host}"))
-        .arg(format!("{}{}", remote_path_prelude(), probe))
-        .output()
-        .map_err(|e| format!("执行 ssh 失败: {e}"))?;
+    let opts = ssh_opts(&auth);
+    let out = {
+        let mut c = Command::new("ssh");
+        c.args(&opts)
+            .arg("-p")
+            .arg(port.to_string())
+            .arg(format!("{username}@{host}"))
+            .arg(format!("{}{}", remote_path_prelude(), probe));
+        apply_auth_env(&mut c, &auth);
+        detach_window(&mut c);
+        c.output()
+    }
+    .map_err(|e| format!("执行 ssh 失败: {e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!("远端体检失败: {}", stderr.trim()));

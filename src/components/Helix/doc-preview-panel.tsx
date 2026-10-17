@@ -55,7 +55,6 @@ import type {
   PDFDocumentProxy,
   RenderTask,
 } from "pdfjs-dist";
-import { useHelixStore } from "@/stores/helix-store";
 
 interface DocPreviewPanelProps {
   /** 文件绝对路径（文件树给的就是绝对路径）。 */

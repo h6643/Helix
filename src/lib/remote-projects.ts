@@ -27,7 +27,44 @@
  */
 
 import { helixApi } from "@/lib/electron-bridge";
+import { useHelixStore } from "@/stores/helix-store";
 import type { ExternalService } from "@/stores/helix-store";
+
+/** 一条远程目标：地址三元组 + 认证描述（secret 已由调用方解密成明文）。 */
+export interface RemoteTarget {
+  host: string;
+  port: number;
+  username: string;
+  /** 缺省 = 免密（ssh-agent/默认密钥，BatchMode）；兼容旧数据没有该字段。 */
+  authType?: "password" | "key";
+  /** password = 明文密码；key = 私钥文件路径。 */
+  secret?: string;
+}
+
+/** 从 ExternalService 解出明文 secret（存储层可能加密）。失败返回空串。 */
+async function resolveSecret(svc: ExternalService): Promise<string> {
+  if (!svc.secret) return "";
+  if (!svc.secretEncrypted) return svc.secret;
+  try {
+    const plain = await window.electron?.secure?.decrypt?.(svc.secret);
+    return plain ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** 拼出带明文凭据的 RemoteTarget（只传给后端 IPC，不落盘不回显）。 */
+export async function toRemoteTarget(
+  svc: ExternalService,
+): Promise<RemoteTarget> {
+  return {
+    host: svc.host,
+    port: svc.port || 22,
+    username: svc.username ?? "",
+    authType: svc.authType,
+    secret: await resolveSecret(svc),
+  };
+}
 
 /** 后端 `remote_tunnel_status` 的返回形状（见 remote_connect.rs）。 */
 export interface RemoteTunnelStatus {
@@ -117,7 +154,7 @@ export async function fetchRemoteStatus(): Promise<RemoteTunnelStatus | null> {
  * @param remotePath 远端项目目录（`~` 表示 home）
  */
 export async function connectRemoteProject(
-  svc: Pick<ExternalService, "host" | "port" | "username">,
+  svc: RemoteTarget,
   remotePath?: string,
 ): Promise<{ localPort?: number }> {
   const api = window.electron?.helix;
@@ -127,6 +164,8 @@ export async function connectRemoteProject(
     port: svc.port || 22,
     username: svc.username ?? "",
     remote_path: remotePath?.trim() || "~",
+    auth_type: svc.authType,
+    secret: svc.secret,
   });
   return { localPort: r?.local_port };
 }
@@ -144,7 +183,7 @@ export async function disconnectRemoteProject(): Promise<void> {
  * SSH 不通时后端返回 Err（这里原样抛出，让 UI 显示原因）。
  */
 export async function preflightRemoteProject(
-  svc: Pick<ExternalService, "host" | "port" | "username">,
+  svc: RemoteTarget,
 ): Promise<RemotePreflightResult> {
   const api = window.electron?.helix;
   if (!api?.remotePreflight) throw new Error("远程体检 IPC 不可用");
@@ -152,6 +191,8 @@ export async function preflightRemoteProject(
     host: svc.host,
     port: svc.port || 22,
     username: svc.username ?? "",
+    auth_type: svc.authType,
+    secret: svc.secret,
   })) as RemotePreflightResult;
 }
 
@@ -162,7 +203,7 @@ export async function preflightRemoteProject(
  * 前端因此只需做字符串裁剪就能「上一步」，写进 `pi.remote_cwd` 的也永远是绝对路径。
  */
 export async function listRemotePaths(
-  svc: Pick<ExternalService, "host" | "port" | "username">,
+  svc: RemoteTarget,
   path: string,
   includeHidden?: boolean,
 ): Promise<{ cwd: string; paths: string[] }> {
@@ -174,6 +215,8 @@ export async function listRemotePaths(
     username: svc.username ?? "",
     path: path?.trim() || "~",
     include_hidden: !!includeHidden,
+    auth_type: svc.authType,
+    secret: svc.secret,
   });
   return {
     cwd: typeof r?.cwd === "string" ? r.cwd : path,
@@ -203,6 +246,35 @@ export function remoteAvailable(): boolean {
 // 所有对话变成孤儿（哪个远程行都不认它）。`user@host:port` 是这台机器的事实，
 // 换行、改名、重加都不受影响。
 const REMOTE_WORKDIR_PREFIX = "remote://";
+
+/**
+ * 连接成功后，把「草稿态新对话」的项目身份设成刚连的这台远程项目。
+ *
+ * 为什么需要它：连上隧道只让**网关**多了一条远端通道，而「这条对话在哪台机器」
+ * 由会话自己的 workDir 说（`remote://…` 虚拟键，见上面的身份层）。连接前它是上一个
+ * 身份（本机目录或空），用户回到输入框发的第一条消息于是按 `session/new` 的 `cwd`
+ * 在**本机** spawn —— 表现为「选了远程项目，却在本机对话」。
+ *
+ * 只写草稿态（currentSessionId === null）：正在进行的对话 cwd 已由它自己的 jsonl
+ * 定死，改身份只会让界面显示的项目和实际干活的项目分家。要换项目就显式走远程行
+ * 的「新建对话」（sidebar.handleNewProjectChat 的远程分支）。
+ *
+ * @returns 是否写入了身份。false = 当前有活动对话，未改（调用方应提示用户）。
+ */
+export function adoptRemoteDraftWorkDir(
+  svc: Pick<ExternalService, "host" | "port" | "username">,
+  remotePath?: string,
+): boolean {
+  if (useHelixStore.getState().currentSessionId) return false;
+  const st = useHelixStore.getState();
+  st.setNoActiveConversation(false);
+  // 远程键不是本机目录，绝不能进 selectedWorkDir（会流进 fs/git IPC 的 cwd）。
+  st.setSelectedWorkDir(null);
+  useHelixStore.setState({
+    activeSessionWorkDir: remoteWorkDirForService(svc, remotePath),
+  });
+  return true;
+}
 
 /** 远程项目的稳定身份键（与服务器列表行的 id 无关）。 */
 function remoteTargetKey(

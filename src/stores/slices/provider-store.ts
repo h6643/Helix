@@ -17,13 +17,11 @@ interface ProviderConfig {
 interface ProviderState {
   providers: ProviderConfig[];
   activeModel: string | null;
-  setProviders: (providers: ProviderConfig[]) => void;
   setActiveModel: (model: string | null) => void;
 }
 
 export const useProviderStore = create<ProviderState>((set) => ({
   providers: [],
   activeModel: null,
-  setProviders: (providers) => set({ providers }),
   setActiveModel: (model) => set({ activeModel: model }),
 }));
