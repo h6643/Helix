@@ -17,16 +17,9 @@ pub fn export_slides_png(
     state: State<'_, Arc<AppState>>,
     file_path: String,
 ) -> Result<Value, String> {
-    #[cfg(not(windows))]
-    {
-        let _ = (&state, &file_path);
-        return Err("原生 PPT 导出仅支持 Windows".to_string());
-    }
-    #[cfg(windows)]
-    return export_slides_png_windows(state, &file_path);
+    export_slides_png_windows(state, &file_path)
 }
 
-#[cfg(windows)]
 const EXPORT_PS1: &str = r#"
 param([string]$Src, [string]$OutDir)
 $ErrorActionPreference = 'Stop'

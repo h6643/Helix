@@ -9925,9 +9925,9 @@ export function AgentFlowPanel() {
           </div>
         )}
 
-        {/* Single textarea — no highlight overlay (WebKitGTK renders textarea text
-                via native Pango, not WebKit's CSS engine, so a separate highlight div
-                can never align glyphs pixel-perfectly on Linux). */}
+        {/* Single textarea — no highlight overlay (native textarea rendering
+                can never align glyphs pixel-perfectly with a separate highlight
+                div). */}
         <textarea
           ref={inputRef}
           value={input}

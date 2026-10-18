@@ -18,8 +18,8 @@ import { loadLanguage } from "@uiw/codemirror-extensions-langs";
 import CodeMirror from "@uiw/react-codemirror";
 import { FileCode2, AlertTriangle } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { DiffBody } from "./file-change-summary";
 import { DocPreviewPanel } from "./doc-preview-panel";
+import { DiffBody } from "./file-change-summary";
 import { electronFS } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -65,18 +65,29 @@ const REVEAL_HIGHLIGHT_MS = 2400;
 // 一次最多高亮多少行（整文件重写的 diff 会有上千行，装饰逐行建太贵）。
 const REVEAL_MAX_LINES = 200;
 
-// Map a file extension to a CodeMirror language id (the keys accepted by
-// `@uiw/codemirror-extensions-langs` loadLanguage).
+// Map a file extension to a CodeMirror language id.
+//
+// ⚠️ 右列必须是 `@uiw/codemirror-extensions-langs` **实际导出**的 id
+// （`langNames` 数组里逐字存在），不是语言的标准名字。此前这张表大量使用
+// 标准名（typescript / javascript / rust / csharp / ruby / shell …），而该包
+// 用的是缩写 id（ts / js / rs / cs / rb / sh …）。`loadLanguage` 对不存在的
+// id **返回 null 而不是抛错**，旧代码 `ext ? [...] : [...]` 于是静默地把语言
+// 扩展丢掉 —— .ts / .js / .rs / .py / .sh 这些最常见的文件全都无高亮，
+// 且不报任何错。实测本表 62 项里有 26 项是坏的。
 const EXT_LANG: Record<string, string> = {
-  ts: "typescript",
+  ts: "ts",
   tsx: "tsx",
-  js: "javascript",
+  mts: "ts",
+  cts: "ts",
+  js: "js",
   jsx: "jsx",
-  mjs: "javascript",
-  cjs: "javascript",
+  mjs: "js",
+  cjs: "js",
   json: "json",
+  json5: "json",
+  jsonc: "json",
   py: "python",
-  rs: "rust",
+  rs: "rs",
   go: "go",
   java: "java",
   c: "c",
@@ -85,15 +96,16 @@ const EXT_LANG: Record<string, string> = {
   cc: "cpp",
   cxx: "cpp",
   hpp: "cpp",
-  cs: "csharp",
-  rb: "ruby",
+  cs: "cs",
+  rb: "rb",
   php: "php",
   swift: "swift",
-  kt: "kotlin",
+  kt: "kt",
+  kts: "kt",
   scala: "scala",
-  sh: "shell",
-  bash: "shell",
-  zsh: "shell",
+  sh: "sh",
+  bash: "sh",
+  zsh: "sh",
   yml: "yaml",
   yaml: "yaml",
   toml: "toml",
@@ -111,31 +123,27 @@ const EXT_LANG: Record<string, string> = {
   dart: "dart",
   lua: "lua",
   r: "r",
-  pl: "perl",
-  ex: "elixir",
-  exs: "elixir",
-  erl: "erlang",
-  hs: "haskell",
-  m: "objectivec",
-  mm: "objectivec",
-  proto: "protobuf",
-  graphql: "graphql",
-  gql: "graphql",
-  dockerfile: "dockerfile",
-  makefile: "makefile",
-  cmake: "cmake",
+  pl: "pl",
+  erl: "erl",
+  hs: "hs",
+  m: "m",
+  mm: "m",
+  proto: "proto",
   ini: "ini",
-  conf: "nginx",
-  log: "log",
+  properties: "properties",
+  cmake: "cmake",
   txt: "text",
   gitignore: "text",
-  env: "shell",
+  env: "sh",
 };
 
 function langFromName(name: string): string {
   const lower = name.toLowerCase();
-  if (lower === "dockerfile" || lower === "makefile") return lower;
-  const ext = lower.includes(".") ? lower.split(".").pop()! : "";
+  const base = lower.split(/[\\/]/).pop() ?? lower;
+  // 无扩展名的约定文件名（Dockerfile / Makefile）—— 包里没有这两个语言，
+  // 落到 text 即可，不要编造 id（loadLanguage 对未知 id 返回 null）。
+  if (base === "dockerfile" || base === "makefile") return "text";
+  const ext = base.includes(".") ? base.split(".").pop()! : "";
   return EXT_LANG[ext] || "text";
 }
 
@@ -291,9 +299,16 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
     });
     // revealLineField 提供「跳转定位」的行高亮（见文件头注释）。
     if (!active) return [highlight, revealLineField];
-    const ext = loadLanguage(
-      langFromName(active.name) as Parameters<typeof loadLanguage>[0],
-    );
+    // loadLanguage 对包里不存在的 id 返回 null（不抛错）。此前这张表里 26 项
+    // 用的是语言标准名而非包的实际缩写 id，于是 .ts / .js 等全部静默无高亮。
+    // 这里在开发期把 null 显式暴露成警告，避免同类问题再无声复发。
+    const id = langFromName(active.name);
+    const ext = loadLanguage(id as Parameters<typeof loadLanguage>[0]);
+    if (!ext && id !== "text" && import.meta.env.DEV) {
+      console.warn(
+        `[code-editor] loadLanguage("${id}") 返回 null —— ${id} 不是 @uiw/codemirror-extensions-langs 的合法 id，${active.name} 将无语法高亮`,
+      );
+    }
     return ext ? [highlight, revealLineField, ext] : [highlight, revealLineField];
   }, [active]);
 

@@ -2,7 +2,7 @@
 
 import { Check, ChevronDown } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
-import { useLockScrollOnOpen } from "./settings-hooks";
+import { useAnchoredPopup, useLockScrollOnOpen } from "./settings-hooks";
 import { Button } from "@/components/ui/button";
 
 // 设置界面基础组件：每个 SettingGroup 渲染为一张卡片，
@@ -203,6 +203,8 @@ interface PopupSelectOption {
   label: string;
   value: string | number;
   hint?: string;
+  /** 标签按该字体渲染（如字体选择器：每项用自身字体显示）。 */
+  fontFamily?: string;
 }
 
 interface PopupSelectProps {
@@ -216,7 +218,7 @@ interface PopupSelectProps {
 }
 
 /**
- * 自定义下拉选择。原生 `<select>` 的弹出列表在 WebKitGTK 下不可靠
+ * 自定义下拉选择。原生 `<select>` 的弹出列表在部分 webview 引擎下不可靠
  * （配色风格选择器因此改用 HTML 列表），这里做成通用组件：触发器 +
  * 固定定位的 HTML 弹出列表，点击外部 / Escape 关闭，选中项高亮打勾，
  * 展开样式与「配色风格」选择器保持一致。
@@ -231,17 +233,19 @@ export function PopupSelect({
   disabled = false,
 }: PopupSelectProps) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{
-    left: number;
-    top: number;
-    width: number;
-    maxHeight: number;
-  } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
+  // 展开期间跟随触发器：滚动 / resize / 触发器尺寸变化都会重新贴合。
+  const pos = useAnchoredPopup(open, btnRef, popRef, {
+    width: popupWidth,
+  });
 
   const current = options.find((o) => String(o.value) === value);
   const currentLabel = current?.label ?? placeholder;
+  // 选中项若声明了 fontFamily（字体选择器），触发器里的标签也用该字体渲染。
+  const currentFontStyle = current?.fontFamily
+    ? ({ fontFamily: current.fontFamily } as const)
+    : undefined;
 
   // 点击外部 / Escape 关闭。
   useEffect(() => {
@@ -269,51 +273,8 @@ export function PopupSelect({
     };
   }, [open]);
 
-  // 锚定在触发器下方、右对齐；宽度与触发器一致。
-  useEffect(() => {
-    if (!open) return;
-    const btn = btnRef.current;
-    if (!btn) return;
-    const r = btn.getBoundingClientRect();
-    const w = r.width || popupWidth;
-    // 向下展开时的可用空间（留 8px 底部边距）
-    const downMaxH = Math.max(120, window.innerHeight - r.bottom - 8);
-    setPos({
-      left: r.right - w,
-      top: r.bottom + 4,
-      width: w,
-      maxHeight: downMaxH,
-    });
-  }, [open, popupWidth]);
-
-  useEffect(() => {
-    if (!open || !pos || !popRef.current) return;
-    const pr = popRef.current.getBoundingClientRect();
-    let top = pos.top;
-    let maxHeight = pos.maxHeight;
-    // 弹窗底部超出视口 且 向下空间确实不够（<200px）→ 翻到触发器上方。
-    // 动态 maxHeight 已限制弹窗高度，轻微超出（几像素舍入）不应触发翻转。
-    const downSpaceTooSmall = pos.maxHeight < 200;
-    if (
-      pr.bottom > window.innerHeight - 8 &&
-      downSpaceTooSmall &&
-      btnRef.current
-    ) {
-      const br = btnRef.current.getBoundingClientRect();
-      top = Math.max(8, br.top - pr.height - 4);
-      // 向上展开时的可用空间（留 8px 顶部边距）
-      maxHeight = Math.max(120, br.top - 8);
-    }
-    const left = Math.max(
-      8,
-      Math.min(pos.left, window.innerWidth - pr.width - 8),
-    );
-    popRef.current.style.top = `${top}px`;
-    popRef.current.style.left = `${left}px`;
-    popRef.current.style.maxHeight = `${maxHeight}px`;
-    // 同步回 state 以防后续重渲染覆盖 inline style
-    setPos((prev) => (prev ? { ...prev, top, maxHeight } : prev));
-  }, [open, pos]);
+  // 锚定在触发器下方、右对齐；宽度与触发器一致。定位与翻转逻辑都在
+  // useAnchoredPopup 里（它还会在触发器移动时重新贴合）。
 
   // 展开期间锁定背景滚动容器，避免 fixed 弹窗与触发器错位（见 useLockScrollOnOpen）。
   useLockScrollOnOpen(open, btnRef);
@@ -327,7 +288,9 @@ export function PopupSelect({
         onClick={() => setOpen((v) => !v)}
         className={`${className} flex items-center justify-between gap-2 text-left border border-border rounded-lg px-3 py-1.5 disabled:opacity-50 disabled:cursor-not-allowed hover:border-foreground/25 transition-colors`}
       >
-        <span className="truncate">{currentLabel}</span>
+        <span className="truncate" style={currentFontStyle}>
+          {currentLabel}
+        </span>
         <ChevronDown
           className={`size-3.5 shrink-0 text-muted-foreground/60 transition-transform ${open ? "rotate-180" : ""}`}
         />
@@ -362,7 +325,9 @@ export function PopupSelect({
                 }`}
               >
                 <span className="flex-1 min-w-0">
-                  <span className="block truncate">{o.label}</span>
+          <span className="block truncate" style={o.fontFamily ? { fontFamily: o.fontFamily } : undefined}>
+            {o.label}
+          </span>
                   {o.hint && (
                     <span className="block text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 truncate">
                       {o.hint}

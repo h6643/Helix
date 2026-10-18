@@ -2,7 +2,7 @@
  * API Key encryption.
  *
  * Primary mechanism: Electron `safeStorage` (OS keychain — DPAPI on Windows,
- * Keychain on macOS, libsecret on Linux), invoked over IPC from the main
+ * Keychain on macOS), invoked over IPC from the main
  * process. The OS key is bound to the user account, so a DB dump alone can't
  * recover the key. Ciphertext from safeStorage is stored with an `ss:`
  * marker so we can tell it apart from the legacy Web Crypto format below.

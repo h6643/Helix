@@ -125,7 +125,7 @@ const NAV_GROUPS: NavGroup[] = [
     title: "集成",
     items: [
       { id: "hook", label: "Hook", icon: Workflow },
-      { id: "archive", label: "任务", icon: Archive },
+      { id: "archive", label: "归档", icon: Archive },
     ],
   },
 ];
@@ -2748,7 +2748,7 @@ export function ApiSettings({
                 </button>
               }
             >
-              任务
+              归档
             </PageHeader>
 
             {archives.length === 0 ? (

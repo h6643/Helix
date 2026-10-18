@@ -55,7 +55,7 @@ function normalizeCategories(
   categories: ContextBreakdown[],
 ): Array<ContextBreakdown & { estimatedTokens: number }> {
   if (!used || categories.length === 0) return [];
-  const visible = categories.filter((c) => c.tokens > 0);
+  const visible = categories.filter((c) => c.tokens > 0 && c.id !== "free");
   const estimatedTotal = visible.reduce((s, c) => s + c.tokens, 0);
   // The jsonl chars/4 estimate only counts message text blocks, not the
   // system prompt / tool schemas that dominate the real `used` figure. When
@@ -88,15 +88,15 @@ interface ContextUsageData {
 /**
  * pi 自己的 `/context`（pi-cc-extensions）报告 —— 网关 `session/context_report`
  * 就是去问 pi 要的这份，与 pi CLI 里 `/context` 弹框完全同一份数。
- * 分类固定是：系统提示 / 记忆文件 / 技能 / 工具定义 / 工具结果 / 对话上下文，
- * 再加「其他」与「剩余空间」（id = "free"，是窗口余量，不计入已用）。
+ * 分类固定是：系统提示 / 记忆文件 / 技能 / 工具定义 / 工具结果 / 对话上下文 + 其他。
+ * 「剩余空间」（id = "free"，窗口余量，不计入已用）在前端直接过滤掉：
+ * 已用部分的条形铺到哪，右边空出来的就是余量，不需要单列一行。
  */
 interface ContextReportData {
   source: "pi-context" | "unavailable";
   context_max: number;
   context_used: number;
   context_percent: number;
-  free_space?: number;
   categories: ContextBreakdown[];
 }
 
@@ -119,7 +119,7 @@ function ContextUsageBar({
   categories: ContextBreakdown[];
   /**
    * true = pi `/context` 口径：段宽按「每个 part 占整个上下文窗口的比例」算，
-   * 剩余空间段自然把条形铺满整窗（part 之和 + 剩余 = 窗口）。
+   * 已用各段铺到哪儿，右边没铺满的部分就是窗口余量（不单列剩余空间段）。
    * false（默认）= 旧口径：段宽按 part 之间的相对占比摊到已用填充里。
    */
   windowBasis?: boolean;
@@ -128,7 +128,9 @@ function ContextUsageBar({
   // Segment widths are proportional to each category's share, normalized to the
   // used fill — so the bar always reads as used/total regardless of whether the
   // category tokens come from the backend or the local session stats.
-  const catTotal = categories.reduce((s, c) => s + c.tokens, 0) || 1;
+  // 「剩余空间」不是一类占用：条形只画已用的各段，右边没铺满的部分即余量。
+  const visible = categories.filter((c) => c.id !== "free");
+  const catTotal = visible.reduce((s, c) => s + c.tokens, 0) || 1;
   const basis = windowBasis && total > 0 ? total : catTotal;
 
   return (
@@ -143,19 +145,14 @@ function ContextUsageBar({
       </div>
       {/* Segmented bar */}
       <div className="h-2 w-full bg-muted rounded-full overflow-hidden flex">
-        {categories.map((cat) => {
+        {visible.map((cat) => {
           const catPercent = windowBasis
-            ? // 窗口口径：每段直接是「占整窗的比例」，剩余那段刚好补满右缘。
+            ? // 窗口口径：每段直接是「占整窗的比例」，已用段右侧自然留出余量。
               (cat.tokens / basis) * 100
             : // 旧口径：段与段之间按相对占比，整体只铺满「已用」那一截。
               (cat.tokens / catTotal) * percentage;
           if (catPercent <= 0) return null;
-          // 剩余空间段吃掉右缘余量：各段百分比四舍五入后右缘常留一条空白槽，
-          // 看着像"窗口没用满"。按 id 认，不按位置——位置会随空分类移动。
-          const width =
-            cat.id === "free"
-              ? `${Math.max(100 - usedShareBefore(categories, cat.id, basis), 0)}%`
-              : `${Math.max(catPercent, 0.5)}%`;
+          const width = `${Math.max(catPercent, 0.5)}%`;
           return (
             <div
               key={cat.id}
@@ -171,20 +168,6 @@ function ContextUsageBar({
       </div>
     </div>
   );
-}
-
-/** `beforeId` 之前各段累计占的百分比（窗口口径），供剩余空间段补齐右缘用。 */
-function usedShareBefore(
-  categories: ContextBreakdown[],
-  beforeId: string,
-  basis: number,
-): number {
-  let sum = 0;
-  for (const c of categories) {
-    if (c.id === beforeId) break;
-    sum += (c.tokens / basis) * 100;
-  }
-  return sum;
 }
 
 // ---- Panel (detailed breakdown popover) ----
@@ -218,13 +201,14 @@ function ContextUsagePanel({
   // Raw per-toolset schema estimates; they describe schema size, not the exact
   // provider token cost, so they remain unnormalized.
   const toolsetList = toolsets ?? [];
-  // pi `/context` 口径：part 之和 + 剩余空间 = 窗口，段宽按整窗比例算，
-  // 每行再标「占窗口百分比」——和 pi CLI 里 `/context` 弹框同一式样。
+  // pi `/context` 口径：段宽按整窗比例算（不再补「剩余空间」段），每行再标
+  // 「占窗口百分比」——和 pi CLI 里 `/context` 弹框同一式样。
   const reportMax =
     report?.source === "pi-context" ? report.context_max || 0 : 0;
+  // 「剩余空间」（id = "free"）不渲染：它是窗口余量，不是一类占用。
   const piParts =
     report?.source === "pi-context"
-      ? (report.categories ?? []).filter((c) => c.tokens > 0)
+      ? (report.categories ?? []).filter((c) => c.tokens > 0 && c.id !== "free")
       : [];
   const piStyle = piParts.length > 0 && reportMax > 0;
   const normalizedCategories = piStyle
@@ -266,36 +250,27 @@ function ContextUsagePanel({
             暂无上下文分类数据
           </div>
         ) : (
-          normalizedCategories.map((item) => {
-            const isFree = item.id === "free";
-            return (
-              <div key={item.id} className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <span
-                    className="w-2 h-2 rounded-sm"
-                    style={{ backgroundColor: item.color }}
-                  />
-                  <span
-                    className={
-                      isFree
-                        ? "text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground"
-                        : "text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground"
-                    }
-                  >
-                    {item.label}
-                  </span>
-                </div>
-                <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground tabular-nums">
-                  ~{formatTokens(item.tokens)}
-                  {piStyle && (
-                    <span className="ml-1.5 text-muted-foreground/70">
-                      {windowPercent(item.tokens)}%
-                    </span>
-                  )}
+          normalizedCategories.map((item) => (
+            <div key={item.id} className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <span
+                  className="w-2 h-2 rounded-sm"
+                  style={{ backgroundColor: item.color }}
+                />
+                <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground">
+                  {item.label}
                 </span>
               </div>
-            );
-          })
+              <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground tabular-nums">
+                ~{formatTokens(item.tokens)}
+                {piStyle && (
+                  <span className="ml-1.5 text-muted-foreground/70">
+                    {windowPercent(item.tokens)}%
+                  </span>
+                )}
+              </span>
+            </div>
+          ))
         )}
       </div>
       {aggregateOnly && (

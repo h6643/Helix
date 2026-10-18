@@ -140,6 +140,10 @@ import {
   type TerminalSlice,
 } from "./slices/terminal-slice";
 import { createToastSlice, type ToastSlice } from "./slices/toast-slice";
+import {
+  DEFAULT_CODE_FONT,
+  normalizeCodeFont,
+} from "@/lib/code-fonts";
 import { helixApi, sendRpc } from "@/lib/electron-bridge";
 import {
   isElectron,
@@ -1654,7 +1658,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // UI
   // Panel state — in slices/panel-slice.ts
   editorTheme: "light" as const,
-  fontFamily: "'Geist Mono', 'Fira Code', 'Consolas', monospace" as const,
+  fontFamily: DEFAULT_CODE_FONT,
   fontSize: 14 as const,
   transcriptFontSize: 16,
   themeStyle:
@@ -2827,10 +2831,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     set({ fontFamily });
     // Code-editor-only font: applied to CodeMirror via CSS var, NOT to body,
     // so it never leaks into the chat/settings UI (per the font-scope split).
+    // 变量名沿用 --helix-font-family（CodeMirror 消费它），但语义已扩展为
+    // **所有等宽代码区**共用——globals.css 里 --helix-font-code 的声明也
+    // 指向同一个值，两者刻意写成同一个 fallback 链。
     document.documentElement.style.setProperty(
       "--helix-font-family",
       fontFamily,
     );
+    document.documentElement.style.setProperty("--helix-font-code", fontFamily);
     localStorage.setItem("helix-font-family", fontFamily);
     import("@/lib/persist").then(({ persistence }) =>
       persistence.saveSetting("fontFamily", fontFamily),
@@ -5241,11 +5249,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         files: get().files,
         openTabs: get().openTabs,
         fontFamily:
-          fontFamily ||
-          (typeof localStorage !== "undefined"
-            ? localStorage.getItem("helix-font-family")
-            : null) ||
-          get().fontFamily,
+          normalizeCodeFont(
+            fontFamily ||
+              (typeof localStorage !== "undefined"
+                ? localStorage.getItem("helix-font-family")
+                : null),
+          ) || get().fontFamily,
         fontSize:
           fontSize ||
           (typeof localStorage !== "undefined"
@@ -5551,6 +5560,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const s = useHelixStore.getState();
       document.documentElement.style.setProperty(
         "--helix-font-family",
+        s.fontFamily,
+      );
+      // 同一个值也写 --helix-font-code（diff / markdown 代码块走它）。
+      document.documentElement.style.setProperty(
+        "--helix-font-code",
         s.fontFamily,
       );
       // NOTE: 不写 document.body.style.fontFamily。fontFamily 是**代码编辑器**

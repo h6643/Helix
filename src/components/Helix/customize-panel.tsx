@@ -13,6 +13,7 @@ import React, { useState, useCallback, useEffect } from "react";
 import { PopupSelect } from "./settings-ui";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { CODE_FONT_OPTIONS } from "@/lib/code-fonts";
 import { useHelixStore, DEFAULT_SHORTCUTS } from "@/stores/helix-store";
 
 interface CustomizePanelProps {
@@ -344,12 +345,15 @@ function AppearanceSection() {
     setFontSize,
   } = useHelixStore();
 
-  const fontOptions = [
-    { value: "Inter", label: "Inter" },
-    { value: "SF Pro", label: "SF Pro" },
-    { value: "system-ui", label: "System UI" },
-    { value: "monospace", label: "Monospace" },
-  ];
+  // 旧版在这里维护了一份自己的选项（Inter / SF Pro / system-ui / monospace），
+  // 写入的是同一个 store 字段。那四项都不是等宽字体，选项本身就是错的：选
+  // Inter 会让代码区变成比例字体。现在与「外观 → 代码字体」共用同一份清单
+  // （src/lib/code-fonts.ts），每项都是真正的等宽字体且 Windows 上可用。
+  const fontOptions = CODE_FONT_OPTIONS.map(({ label, value, fontFamily }) => ({
+    value,
+    label,
+    fontFamily,
+  }));
 
   return (
     <div className="space-y-6">

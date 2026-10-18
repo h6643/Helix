@@ -15,16 +15,14 @@
  */
 
 import { memo, useEffect, useState } from "react";
+import { codeThemesFor } from "@/lib/themes";
+import { useHelixStore } from "@/stores/helix-store";
 
 // GitHub's lower-contrast dark palette — the vivid `github-dark-default`
 // tokens read harsh at small code size. Shared by the diff renderer. The
 // light-mode comment remap bumps `#6e7781` (borderline unreadable for shell
 // comments) to GitHub's darker muted gray `#57606a`. Keyed per theme so the
 // bump only applies in light.
-const SHIKI_THEMES = {
-  dark: "github-dark-dimmed",
-  light: "github-light-default",
-} as const;
 const SHIKI_COLOR_REPLACEMENTS: Record<string, Record<string, string>> = {
   "github-light-default": { "#6e7781": "#57606a" },
 };
@@ -115,6 +113,11 @@ export const HighlightedCode = memo(function HighlightedCode({
 
   const trimmed = code.replace(/^\n+/, "").trimEnd();
 
+  // 高亮主题跟随「配色风格」（lib/themes.ts 的 codeThemesFor）。主题对要
+  // 进缓存 key：换风格后必须重新高亮，否则会拿到上一套配色的旧 HTML。
+  const themeStyle = useHelixStore((s) => s.themeStyle);
+  const themes = codeThemesFor(themeStyle);
+
   useEffect(() => {
     if (
       !trimmed ||
@@ -128,7 +131,7 @@ export const HighlightedCode = memo(function HighlightedCode({
     }
 
     let cancelled = false;
-    const key = `${language}\u0000${trimmed}`;
+    const key = `${language}\u0000${themes.light}\u0000${themes.dark}\u0000${trimmed}`;
     const apply = (rendered: string) => {
       if (!cancelled) setHtml(codeInnerHtml(rendered));
     };
@@ -146,7 +149,7 @@ export const HighlightedCode = memo(function HighlightedCode({
         loadShiki().then((shiki) =>
           shiki.codeToHtml(trimmed, {
             lang: language,
-            themes: SHIKI_THEMES,
+            themes: { light: themes.light, dark: themes.dark },
             defaultColor: "light-dark()",
             colorReplacements: SHIKI_COLOR_REPLACEMENTS,
           }),
@@ -161,7 +164,7 @@ export const HighlightedCode = memo(function HighlightedCode({
     return () => {
       cancelled = true;
     };
-  }, [language, trimmed]);
+  }, [language, trimmed, themes]);
 
   if (html) {
     return (

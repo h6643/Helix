@@ -132,7 +132,14 @@
     SimSun, "Microsoft YaHei", "PingFang SC", sans-serif;
   --helix-transcript-size: 14px;
   --helix-font-size: 13px;
-  --helix-mono: var(--font-geist-mono);
+  /* 代码区专用等宽字体（编辑器 / diff / markdown 代码块共用）。
+     默认栈与 store 的 fontFamily 初值一致（src/lib/code-fonts.ts），且同样只
+     含 Windows 自带 + 本机已装的字体。两处刻意写成同一条 fallback 链：JS 的
+     setProperty 一旦没跑（比如 localStorage 为空、anti-flash 脚本早于 React），
+     CSS 这条兜底也能给出正确的字体，不会掉回 Geist Mono。 */
+  --helix-font-code: "Cascadia Code", "JetBrains Mono SemiBold", Consolas,
+    "Lucida Console", monospace;
+  --helix-mono: var(--helix-font-code);
   --helix-surface-light: color-mix(in oklch, var(--primary) 4%, var(--card));
   --helix-surface-shadow: color-mix(in oklch, var(--primary) 16%, transparent);
   --helix-surface-highlight: color-mix(in oklch, white 40%, transparent);
@@ -610,6 +617,25 @@ html, body {
   font-family: var(--helix-interface-font);
 }
 
+/* CodeMirror 编辑器字体。
+   为什么不能只靠 React 的 style.fontFamily：code-editor-panel.tsx 把
+   `fontFamily: var(--helix-font-family, ...)` 写在 CodeMirror 的**外层包裹
+   div** 上，但 CodeMirror 的 base theme（@codemirror/view）自己就给
+   `.cm-scroller` 写了 `font-family: monospace`——那是元素自身的声明，优先级
+   高于从外层继承。结果字形全部落在 monospace（系统默认，通常 Consolas /
+   Cascadia），「代码字体」设置对编辑器完全无效。
+
+   与 .helix-md-preview-code pre 是同一个坑（Tailwind preflight 对 pre/code
+   也是元素级声明），所以修法一致：在真正画字的元素上重新声明。
+
+   选择器用 .cm-scroller 单类 + !important：CodeMirror 用 StyleModule 注入
+   带随机类名（.ͼ…）的样式表，类名每次构建都变、无法可靠写进 globals.css；
+   .cm-scroller 是它文档化的稳定类名，且必须加 !important 才能压过 StyleModule
+   的注入样式。 */
+.cm-scroller {
+  font-family: var(--helix-font-family, monospace) !important;
+}
+
 /* Flat workspace backdrop — solid base color, no gradients or texture
    (dsh-desktop language: planes are separated by 1px borders, not glow). */
 .helix-app-backdrop {
@@ -653,8 +679,8 @@ h1, h2, h3, h4, h5, h6 {
 .helix-md {
   /* 防止继承全局负字距(-0.006em)与 Geist 字形替换(cv11/ss01/ss03)导致
      西文/数字被挤压或连笔粘连；中文不受影响，仅重置排版类属性。
-     另：显式关闭 WebKitGTK 的 text-autospace 自动 CJK-Latin 间距——其实现
-     在部分 WebKitGTK 版本表现异常（字间距被错误裁剪 → 字重叠），
+     另：显式关闭 text-autospace 的自动 CJK-Latin 间距——其实现
+     在部分引擎上表现异常（字间距被错误裁剪 → 字重叠），
      text-spacing-trim 交给 Chromium 132+ 的渐进增强即可。 */
   text-autospace: none;
   -webkit-text-autospace: none;
@@ -1565,9 +1591,14 @@ pre code.hljs {
   box-shadow: none;
   /* 重置 .helix-md code 的行内规则泄漏：line-height:1 会让代码块行距=字号（行行贴死），
      font-size:0.8em 会与 pre>div 的 0.85em 叠乘成 0.68em 小字。inherit 让代码块
-     跟随卡片自己的 0.85em 字号与 1.8 行高。 */
+     跟随卡片自己的 0.85em 字号与 1.8 行高。
+
+     font-family 不再用 inherit：.helix-md 的父级是 --helix-interface-font
+     （Ubuntu Mono + 宋体，那是界面字体），代码块会跟着它变。显式读
+     --helix-font-code，「代码字体」设置才真正管到对话里的代码块。 */
   line-height: inherit;
   font-size: inherit;
+  font-family: var(--helix-font-code);
 }
 
 /* shiki token lines — keep each `.line` on its own row so the emitted
@@ -1580,10 +1611,9 @@ pre code.hljs {
 /* shiki dual-theme tokens: shiki (defaultColor: 'light-dark()') emits each
    token with BOTH an inline `color: light-dark(...)` AND the custom properties
    `--shiki-light` / `--shiki-dark`. The inline `light-dark()` form only works
-   on engines that support it (Chromium); the Linux WebKitGTK build predates
-   `light-dark()` and drops the invalid declaration, leaving tokens monochrome.
-   This rule maps the custom properties to `color` so highlighting renders on
-   every engine, switching on Helix's `.dark` class (not the OS scheme). */
+   on engines that support it; this rule maps the custom properties to `color`
+   so highlighting renders on every engine, switching on Helix's `.dark` class
+   (not the OS scheme). */
 .helix-md pre code span {
   color: var(--shiki-light, inherit);
 }
@@ -1602,7 +1632,7 @@ pre code.hljs {
 /* ── diff 视图：+ 绿 / - 红 / @@ 色块（参考上游桌面版 chat-diff-*） ──
    行级背景按设计稿走整行色带（无圆角），文字色固定亮暗两套，保证任何主题下可读。 */
 .helix-md .helix-diff-content {
-  font-family: var(--font-mono);
+  font-family: var(--helix-font-code);
   font-size: 0.85em;
   line-height: 1.5;
   padding: 4px 0;
@@ -2215,20 +2245,6 @@ nav::-webkit-scrollbar-thumb:hover {
 .chat-input {
   font-family: var(--helix-interface-font);
 }
-
-/* ── 外观 → 代码预览卡 ─────────────────────────────────────────────
-   背景与文字色由 shiki 主题提供（正是要预览的东西），在
-   code-theme-preview.tsx 里以内联 style 写到容器上，这里只做布局与字体，
-   不碰颜色——用 utility class 会被主题变量覆盖掉预览效果。 */
-.helix-md-preview-code {
-  font-family: var(--helix-mono);
-  font-size: var(--helix-font-size, 13px);
-}
-.helix-md-preview-code pre {
-  margin: 0;
-  background: transparent;
-}
-
 
 /* ── Boot splash（全屏毛玻璃启动画面）───────────────────────────────
    与应用整体主题解耦：无论用户选择浅色/深色皮肤，启动画面始终走同一套

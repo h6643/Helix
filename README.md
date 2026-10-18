@@ -37,14 +37,14 @@
 - **系统通知**：`desktop_notify.rs` 在没有 Helix 窗口处于前台时弹 Windows toast（审批 / 澄清弹窗到达、回合完成 / 出错、定时任务派发、人工接管），单点拥有「何时弹」这条事实。前四类里只有「人工接管」（Agent 把侧栏浏览器页交给人登录/验证）这个事实只存在于界面，所以由前端经 `helix_notify_scene` 报上来 —— 场景名严格解析，开关与前台判定仍全在 Rust，前端不自判时机。开关真相在 `config.yaml` 的 `notifications:` 块，每次弹之前现读，改完即生效。设置「常规 · 通知」末尾还有一行**系统侧**的真相：`helix_notification_status` 读注册表（`PushNotifications\ToastEnabled` 总闸 + `Notifications\Settings\<AUMID>\Enabled` 按身份，缺省都算开）答「日志写着 show=ok 却没看见」那类问题，按钮 `helix_open_notification_settings` 跳 `ms-settings:notifications`；AUMID 跟着插件的判断走 —— dev 下它不给 toast 设身份、系统兜底成 PowerShell，界面就明说查的是 PowerShell，不拿 Helix 的名字冒充。
 - **工具审批（pi-permission 桥）**：`approval_policy.rs` 把审批档位（询问 / 自动 / 完全访问）写进 `@zhushanwen/pi-permission` 扩展的 `settings.json` `permission` 键 —— 真正阻断工具执行的只有该扩展的 `tool_call` 钩子。审批卡带倒计时：超时 `approvalTimeoutSec` 可在设置「常规」页调（30–3600 秒，默认 300），弹窗打开即起算、到期无操作自动拒绝（fail-closed，不放行）。注意本机装的是就地补丁版扩展（另含 `approve` 档移除、AI 不抢答），`pi update --extensions` 会还原补丁，更新后需重新打。
 - **应用自动更新**：`tauri-plugin-updater` 读 GitHub Release 的 `latest.json`（minisign 签名校验）；启动静默检查 + 帮助菜单「检查更新」，发现新版本弹可点击的 toast，单击即下载安装（Windows 上装完自动重启）。CI 在 tag 构建时签名并生成 `latest.json`。
-- **代理**：`proxy.rs` 为应用出口流量、渲染层、模型 / MCP 请求统一设置 HTTP 代理（跨 WebKitGTK / WebView2 / WKWebView）。
+- **代理**：`proxy.rs` 为应用出口流量、渲染层、模型 / MCP 请求统一设置 HTTP 代理（WebView2）。
 
 ---
 
 ## 技术栈
 
 - **前端**：React 19、TypeScript、Vite（端口 1430）、Tailwind CSS 4、Zustand（slices 分域）、CodeMirror、xterm、shiki、KaTeX、React Markdown、lucide-react、Radix UI。
-- **后端**：Rust、Tauri 2、tokio、reqwest（rustls）、serde + serde_yaml、`tauri-plugin-opener / dialog / notification / single-instance / updater`；Windows 下 `windows` 0.61（ConPTY），Linux 下 `webkit2gtk`（渲染层代理）。
+- **后端**：Rust、Tauri 2、tokio、reqwest（rustls）、serde + serde_yaml、`tauri-plugin-opener / dialog / notification / single-instance / updater`；`windows` 0.61（ConPTY / 终端）。
 - **智能体引擎**：外部 Pi 编码智能体（`@earendil-works/pi-coding-agent`），以 `pi --mode rpc` 的 JSONL stdio 协议运行。
 - **UI 基础**：shadcn/ui 风格组件（`components.json`：`new-york`、lucide、Tailwind CSS 变量）。
 
@@ -83,7 +83,7 @@
 
 | 模块 | 职责 |
 | --- | --- |
-| `main.rs` | 二进制入口（Linux 软件渲染自举）→ `helix_lib::run()` |
+| `main.rs` | 二进制入口 → `helix_lib::run()` |
 | `lib.rs` | 建窗、装 Tauri 插件、系统托盘、`invoke_handler` 注册全部命令 |
 | `pi_gateway.rs` | 多实例 `pi --mode rpc` 适配器（spawn / 回收 / 裁剪 / 子代理映射） |
 | `gateway.rs` | 子进程生命周期辅助 |
@@ -119,7 +119,6 @@
 
 - Node.js 20
 - Rust 工具链（`stable`，MSRV 1.77.2 —— 由 tauri 2.11 自身声明决定）
-- Tauri 系统依赖（Linux 需要 WebKitGTK 等）
 - 本地可用的 Pi 智能体环境与配置（模型、API key、MCP 等放在 Pi 数据目录；Pi CLI 路径可通过 `config.yaml` 的 `pi.cli_path` 或 `HELIX_PI_CLI` 环境变量指定）
 
 ### 常用命令

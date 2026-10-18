@@ -318,12 +318,9 @@ fn toast_aumid(exe_dir: &str, identifier: &str) -> String {
 
 /// 读 HKCU 下的一个 DWORD。键或值不存在都返回 None —— Windows 只在用户**手动**
 /// 关掉时才写这个值，所以「查不到」的正确解释是「没人关过」，不是出错。
-#[cfg(windows)]
 fn hkcu_dword(subkey: &str, value: &str) -> Option<u32> {
     use windows::core::PCWSTR;
-    use windows::Win32::System::Registry::{
-        RegGetValueW, HKEY, HKEY_CURRENT_USER, RRF_RT_DWORD,
-    };
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_DWORD};
 
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let sub = wide(subkey);
@@ -344,21 +341,10 @@ fn hkcu_dword(subkey: &str, value: &str) -> Option<u32> {
     status.is_ok().then_some(buf)
 }
 
-#[cfg(not(windows))]
-fn hkcu_dword(_subkey: &str, _value: &str) -> Option<u32> {
-    None
-}
-
-/// 打开系统的通知设置页。Windows 走 ms-settings URI；其它系统没有可跳转的
-/// 通知面板，明说而不是默默开一个无关的窗口。
+/// 打开系统的通知设置页。
 #[tauri::command]
 pub fn helix_open_notification_settings() -> Value {
-    #[cfg(windows)]
     let target = "ms-settings:notifications";
-    #[cfg(target_os = "macos")]
-    let target = "x-apple.systempreferences:com.apple.preference.notifications";
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let target = "";
 
     if target.is_empty() {
         return json!({ "ok": false, "error": "当前系统没有可跳转的通知设置页" });

@@ -38,18 +38,10 @@ tauri-plugin-updater = "~2.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 dirs = "6"
-libc = "0.2"
 sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
 aes-gcm = "0.10"
-# 浏览器导入（browser_import.rs）：读本机 Chrome/Edge 的 SQLite（Login Data /
-# History）用 rusqlite bundled（不依赖系统 SQLite）；Chrome v10 密码是
-# AES-128-CBC + HMAC-SHA256，CBC 链直接在 aes 的裸块 API 上手写（cbc crate 已
-# 迁到 cipher 0.5，与本仓库钉死的 aes 0.8 / cipher 0.4 不兼容）。
-rusqlite = { version = "0.32", features = ["bundled"] }
-aes = "0.8"
-hmac = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["time", "sync", "io-util", "macros", "process"] }
@@ -125,9 +117,3 @@ windows = { version = "0.61", features = [
 # controller()` 返回的 ICoreWebView2Controller 才 cast 得进我们手上的类型；装上两个
 # 版本就是两套同名 COM 包装 struct，接口指针互不认。
 webview2-com = "0.38"
-
-# Linux-only: renderer HTTP proxy via the WebKitGTK default WebContext
-# (WebsiteDataManager.set_network_proxy_settings). Gated so the crate never
-# compiles this dependency on non-Linux targets.
-[target.'cfg(target_os = "linux")'.dependencies]
-webkit2gtk = "2"

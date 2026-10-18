@@ -44,7 +44,6 @@ use std::thread;
 use std::time::Duration;
 use tauri::Emitter;
 
-#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 /// 子进程句柄。
@@ -7706,8 +7705,8 @@ fn pi_cli_override() -> Option<(PathBuf, PathBuf, &'static str)> {
     }
 }
 
-/// Candidate npm global prefix dirs: data_dir/npm (Linux/macOS style) and
-/// %APPDATA%/npm on Windows, which is npm's actual default there.
+/// Candidate npm global prefix dirs: %APPDATA%/npm (npm's actual default on
+/// Windows) and data_dir/npm as a fallback.
 fn npm_global_prefixes() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(dir) = std::env::var("APPDATA") {
@@ -7731,7 +7730,6 @@ fn pi_node(install_dir: &PathBuf) -> PathBuf {
     }
 }
 
-#[cfg(windows)]
 pub fn pi_cli_args() -> (Command, Vec<String>) {
     match resolve_pi_cli() {
         Some((node, cli_js, _source)) => {
@@ -7751,7 +7749,6 @@ pub fn pi_cli_args() -> (Command, Vec<String>) {
 /// answer came from (`config:pi.cli_path` / `env:HELIX_PI_CLI` /
 /// `npm-global` / `path-shim`). Written to the spawn log on every spawn so
 /// "which pi am I running?" is never a guessing game again.
-#[cfg(windows)]
 pub fn pi_cli_debug_summary() -> String {
     match resolve_pi_cli() {
         Some((node, cli_js, source)) => format!(
@@ -7763,30 +7760,6 @@ pub fn pi_cli_debug_summary() -> String {
         None => "pi cli = NOT FOUND (tried HELIX_PI_CLI, config.yaml pi.cli_path, \
                  npm global prefix, PATH shim)"
             .to_string(),
-    }
-}
-
-#[cfg(not(windows))]
-pub fn pi_cli_args() -> (Command, Vec<String>) {
-    if let Some((node, cli_js, _source)) = pi_cli_override() {
-        let mut command = Command::new(&node);
-        let cli_js = cli_js.to_string_lossy().into_owned();
-        command.arg(&cli_js);
-        return (command, vec![cli_js]);
-    }
-    (Command::new("pi"), vec![])
-}
-
-#[cfg(not(windows))]
-pub fn pi_cli_debug_summary() -> String {
-    match pi_cli_override() {
-        Some((node, cli_js, source)) => format!(
-            "pi cli = {} [source: {}; node: {}]",
-            cli_js.display(),
-            source,
-            node.display()
-        ),
-        None => "pi cli = `pi` from PATH".to_string(),
     }
 }
 
@@ -7846,7 +7819,7 @@ fn remote_cwd_override() -> Option<String> {
 /// 为什么必须落盘：`session/prompt` 只带 session_id，不带 cwd；实例被空闲回收后
 /// 重新 spawn 时，网关得能再次判断「这个会话是远程的，目录在远端 `/home/...`」，
 /// 否则它会在**本机**把远程会话拉起来 —— 同样的对话，跑到另一台机器、另一个目录
-/// 上去。远端绝对路径本身没有可辨识的特征（`/home/x` 在 Linux 本机也合法），所以
+/// 上去。远端绝对路径本身没有可辨识的特征，所以
 /// 只能显式记。
 ///
 /// 存在数据目录的 `remote-sessions.json`，与 `workdir.json` 同级。

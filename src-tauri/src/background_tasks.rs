@@ -210,38 +210,20 @@ pub fn remote_tasks_list(
 }
 
 fn process_alive(pid: i64) -> bool {
-    #[cfg(windows)]
-    {
-        // OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION: succeeds only
-        // for an existing process. Err = gone.
-        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid as u32).is_ok() }
-    }
-    #[cfg(not(windows))]
-    {
-        // kill(pid, 0): ESRCH = gone, EPERM = alive but owned elsewhere.
-        unsafe {
-            libc::kill(pid as i32, 0) == 0
-                || std::io::Error::last_os_error().raw_os_error() == Some(13)
-        }
-    }
+    // OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION: succeeds only
+    // for an existing process. Err = gone.
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid as u32).is_ok() }
 }
 
 fn kill_pid(pid: i64) -> bool {
-    #[cfg(windows)]
-    {
-        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-        unsafe {
-            let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid as u32) else {
-                return false;
-            };
-            let ok = TerminateProcess(handle, 1).is_ok();
-            let _ = windows::Win32::Foundation::CloseHandle(handle);
-            ok
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        unsafe { libc::kill(pid as i32, libc::SIGTERM) == 0 }
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid as u32) else {
+            return false;
+        };
+        let ok = TerminateProcess(handle, 1).is_ok();
+        let _ = windows::Win32::Foundation::CloseHandle(handle);
+        ok
     }
 }

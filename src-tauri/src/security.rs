@@ -1,10 +1,9 @@
 //! `secure:*`, `shell:*` and `dialog:*` commands.
 //! Port of `electron/ipc/security.js` + the shell/dialog handlers in main.js.
 //!
-//! safeStorage is replaced by a machine-bound AES-GCM key (Linux libsecret is
-//! unavailable in many desktop environments; a key file under userData with
-//! 0600 perms gives equivalent single-user protection). The ciphertext format
-//! is `b64(nonce) + ":" + b64(ciphertext)`.
+//! safeStorage is replaced by a machine-bound AES-GCM key: a hidden key file
+//! under userData gives equivalent single-user protection. The ciphertext
+//! format is `b64(nonce) + ":" + b64(ciphertext)`.
 
 use crate::state::{user_data_dir, AppState};
 use aes_gcm::aead::{Aead, KeyInit};
@@ -36,17 +35,9 @@ fn new_key(dir: &std::path::Path, path: &std::path::Path) -> [u8; 32] {
     let mut rng = rand::thread_rng();
     rng.fill_bytes(&mut key);
     let _ = std::fs::create_dir_all(dir);
-    // Persist with 0600 so only the owner can read it.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::write(path, &key);
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = std::fs::write(path, key);
-    }
+    // Persist as a hidden file so it doesn't show up in Explorer (an AES
+    // key in plain sight invites the user to delete it).
+    let _ = std::fs::write(path, &key);
     key
 }
 
@@ -144,9 +135,6 @@ pub fn exec() -> Result<(), String> {
 // ── dialogs ───────────────────────────
 
 // ── 注意：三个对话框命令必须是 async 且用回调式 API ──
-// Linux 上 `blocking_pick_folder()` 从同步命令（主线程）调用时，对话框不会
-// 显示、应用卡住（tauri-apps/plugins-workspace#956）。这里改用回调式
-// pick_folder / pick_file / save_file + oneshot channel，让主线程保持事件循环。
 
 #[tauri::command]
 pub async fn open_directory(app: AppHandle, default_path: Option<String>) -> Option<String> {

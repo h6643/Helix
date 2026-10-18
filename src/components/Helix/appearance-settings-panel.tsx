@@ -2,8 +2,7 @@
 
 import { Check, ChevronDown } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
-import { CodeThemePreview } from "./code-theme-preview";
-import { useLockScrollOnOpen } from "./settings-hooks";
+import { useAnchoredPopup, useLockScrollOnOpen } from "./settings-hooks";
 import {
   SettingRow,
   SettingGroup,
@@ -13,13 +12,14 @@ import {
   Toggle,
 } from "./settings-ui";
 import { Button } from "@/components/ui/button";
+import { CODE_FONT_OPTIONS } from "@/lib/code-fonts";
 import { THEME_SELECT_GROUPS } from "@/lib/themes";
 import { useHelixStore } from "@/stores/helix-store";
 
 /**
  * Custom theme picker. Native `<select>` + `<optgroup>` popups are unreliable
- * in WebKitGTK (the 3rd group can silently disappear from the popup), so the
- * options render as an HTML list instead of a GTK ComboBox popup.
+ * in some webview engines (the 3rd group can silently disappear from the
+ * popup), so the options render as an HTML list instead.
  */
 function ThemeStylePicker({
   value,
@@ -29,10 +29,11 @@ function ThemeStylePicker({
   onChange: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   const selectedRef = useRef<HTMLButtonElement | null>(null);
+  // 与 PopupSelect 共用：滚动 / resize 时重新贴合，不再只在展开那一帧定位。
+  const pos = useAnchoredPopup(open, btnRef, popRef, { width: 160 });
 
   // 展开期间锁定背景滚动容器，避免 fixed 弹层与触发器错位。
   useLockScrollOnOpen(open, btnRef);
@@ -68,24 +69,7 @@ function ThemeStylePicker({
   }, [open]);
 
   // Anchor below the trigger, right-aligned; flip above if it would overflow.
-  useEffect(() => {
-    if (!open) return;
-    const btn = btnRef.current;
-    if (!btn) return;
-    const r = btn.getBoundingClientRect();
-    // popup 与触发器同宽（w-40 = 160px），右对齐后两者左缘也对齐。
-    const left = Math.max(8, r.right - 160);
-    setPos({ left, top: r.bottom + 4 });
-  }, [open]);
-
-  useEffect(() => {
-    if (!open || !popRef.current) return;
-    const pr = popRef.current.getBoundingClientRect();
-    if (pr.bottom > window.innerHeight - 8 && btnRef.current) {
-      const br = btnRef.current.getBoundingClientRect();
-      popRef.current.style.top = `${Math.max(8, br.top - pr.height - 4)}px`;
-    }
-  }, [open, pos]);
+  // （定位交给 useAnchoredPopup，它会在滚动 / resize 时持续重新贴合。）
 
   // 打开时自动滚动到当前选中的主题，而不是每次都从列表顶部开始。
   useEffect(() => {
@@ -172,14 +156,11 @@ function ThemeStylePicker({
   );
 }
 
-const FONT_OPTIONS = [
-  { label: "默认", value: "'Geist Mono', 'Fira Code', 'Consolas', monospace" },
-  { label: "Monaco", value: "Monaco, monospace" },
-  { label: "JetBrains Mono", value: '"JetBrains Mono", monospace' },
-  { label: "Fira Code", value: '"Fira Code", monospace' },
-  { label: "Consolas", value: "Consolas, monospace" },
-  { label: "SF Mono", value: '"SF Mono", monospace' },
-];
+const FONT_OPTIONS = CODE_FONT_OPTIONS.map(({ label, value, fontFamily }) => ({
+  label,
+  value,
+  fontFamily,
+}));
 
 const fontSelect = (
   value: string,
@@ -281,9 +262,6 @@ export function AppearanceSettingsPanel({
           </SettingRow>
         </SettingGroup>
       </div>
-
-      {/* 代码预览：浅色 / 深色两张并排卡，各自固定一套 shiki 主题 */}
-      <CodeThemePreview />
 
       {/* 界面：标题和描述在卡片上方，卡片内放 UI 字体/字号 */}
       <div className="pt-1">

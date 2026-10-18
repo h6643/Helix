@@ -7,9 +7,7 @@
 //!
 //! 生效路径（修改后需重启应用）：
 //! - 渲染层 webview：`lib.rs` 启动时用 `builder.proxy_url(load_proxy_url())`
-//!   注入（Windows WebView2 → `--proxy-server`，macOS WKWebView 同理）。
-//!   Linux WebKitGTK 另走 `apply_webview_proxy` 的 WebsiteDataManager，
-//!   留空时设 `NoProxy`。
+//!   注入（WebView2 → `--proxy-server`）。
 //! - Rust 侧出口 HTTP：`proxy_aware_client()` / `proxy_aware_blocking_client()`
 //!   （需要 build 前配 redirect / UA / timeout 时用 `*_builder()` 变体），供
 //!   page_fetch / vision / 模型列表 / npm 检查 / 生图使用。留空 = 直连。
@@ -187,34 +185,6 @@ fn save_proxy_url(url: &str) -> Result<(), String> {
         .map_err(|e| format!("写入代理配置失败: {e}"))?;
     let _ = std::fs::remove_file(proxy_path());
     Ok(())
-}
-
-/// 渲染层（WebKitGTK 主窗口）代理。**仅 Linux 生效** —— Windows WebView2 /
-/// macOS WKWebView 走 `lib.rs` 启动时的 `builder.proxy_url()`，不走这里。
-pub fn apply_webview_proxy() {
-    #[cfg(target_os = "linux")]
-    {
-        use webkit2gtk::{
-            NetworkProxyMode, NetworkProxySettings, WebContext, WebContextExt,
-            WebsiteDataManagerExt,
-        };
-        let url = load_proxy_url();
-        let Some(context) = WebContext::default() else {
-            return;
-        };
-        let Some(manager) = context.website_data_manager() else {
-            return;
-        };
-        if url.is_empty() {
-            // 留空 = 直连：显式 NoProxy，不读取系统环境变量。
-            manager.set_network_proxy_settings(NetworkProxyMode::NoProxy, None);
-        } else {
-            // 本地回环绕过，保证 dev server / 本地 MCP 不受影响。
-            let hosts: Vec<&str> = NO_PROXY_STR.split(',').map(str::trim).collect();
-            let mut settings = NetworkProxySettings::new(Some(&url), &hosts);
-            manager.set_network_proxy_settings(NetworkProxyMode::Custom, Some(&mut settings));
-        }
-    }
 }
 
 /// 设置面板读取当前代理配置。

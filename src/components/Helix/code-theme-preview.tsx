@@ -18,16 +18,11 @@
  * 当前界面（<html> 上的 .dark）生效的那张卡，右上角标注「当前生效」。
  */
 
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { ThemedToken } from "shiki";
 import { SettingGroup } from "./settings-ui";
-
-// 与 shiki-code.tsx 保持同一套主题，避免「预览看到的」和「实际代码块」
-// 是两套配色。深色用 github-dark-dimmed（低对比，小字号下不刺眼）。
-const PREVIEW_THEME = {
-  light: "github-light-default",
-  dark: "github-dark-dimmed",
-} as const;
+import { codeThemesFor, type CodeThemePair } from "@/lib/themes";
+import { useHelixStore } from "@/stores/helix-store";
 
 /** 预览样例：刻意覆盖字符串 / 关键字 / 属性名 / 数字 / 类型名，好看出发色差异。 */
 const PREVIEW_CODE = `const themePreview: ThemeConfig = {
@@ -74,9 +69,11 @@ async function tokenize(
 const CodePreviewCard = memo(function CodePreviewCard({
   mode,
   isCurrent,
+  themes,
 }: {
   mode: "light" | "dark";
   isCurrent: boolean;
+  themes: CodeThemePair;
 }) {
   const [data, setData] = useState<{
     lines: ThemedToken[][];
@@ -88,7 +85,7 @@ const CodePreviewCard = memo(function CodePreviewCard({
     let cancelled = false;
 
     loadShiki()
-      .then((shiki) => tokenize(shiki, PREVIEW_THEME[mode]))
+      .then((shiki) => tokenize(shiki, themes[mode]))
       .then((result) => {
         if (!cancelled) setData(result);
       })
@@ -99,7 +96,7 @@ const CodePreviewCard = memo(function CodePreviewCard({
     return () => {
       cancelled = true;
     };
-  }, [mode]);
+  }, [mode, themes]);
 
   return (
     <div className="flex-1 min-w-0">
@@ -113,7 +110,7 @@ const CodePreviewCard = memo(function CodePreviewCard({
             {mode === "light" ? "浅色预览" : "深色预览"}
           </h5>
           <p className="ui-text-sm2 text-muted-foreground/70 mt-0.5">
-            {PREVIEW_THEME[mode]}
+            {mode === "light" ? themes.lightLabel : themes.darkLabel}
           </p>
         </div>
         {isCurrent && (
@@ -142,7 +139,9 @@ const CodePreviewCard = memo(function CodePreviewCard({
             <CodeBody lines={data.lines} />
           </div>
         ) : (
-          <pre className="h-full overflow-auto m-0 px-3 py-2 ui-text-sm2 text-foreground/80 font-mono whitespace-pre">
+          <pre
+            className="helix-md-preview-code h-full overflow-auto m-0 px-3 py-2 ui-text-sm2 text-foreground/80 whitespace-pre"
+          >
             {PREVIEW_CODE}
           </pre>
         )}
@@ -215,6 +214,10 @@ function useCurrentTheme(): "light" | "dark" {
 export function CodeThemePreview() {
   const current = useCurrentTheme();
 
+  // 跟随「配色风格」：风格变了，预览卡跟着换成配套的代码主题。
+  const themeStyle = useHelixStore((s) => s.themeStyle);
+  const themes = useMemo(() => codeThemesFor(themeStyle), [themeStyle]);
+
   // 结构与其他分组一致：标题 + 说明独立在卡片上方（用 px-4 与卡片内容
   // 左缘对齐），下面紧跟一张撑满列宽的 SettingGroup 卡片。
   //
@@ -232,8 +235,16 @@ export function CodeThemePreview() {
       </div>
       <SettingGroup>
         <div className="p-4 flex flex-col sm:flex-row gap-4">
-          <CodePreviewCard mode="light" isCurrent={current === "light"} />
-          <CodePreviewCard mode="dark" isCurrent={current === "dark"} />
+          <CodePreviewCard
+            mode="light"
+            isCurrent={current === "light"}
+            themes={themes}
+          />
+          <CodePreviewCard
+            mode="dark"
+            isCurrent={current === "dark"}
+            themes={themes}
+          />
         </div>
       </SettingGroup>
     </div>

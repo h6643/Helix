@@ -678,7 +678,7 @@ function buildTauriAPI(): ElectronAPI {
   };
 
   // ── top-level fields ────────────────────────────────────────────────────
-  api.platform = "linux";
+  api.platform = "win32";
   api.isElectron = true;
 
   return api as unknown as ElectronAPI;

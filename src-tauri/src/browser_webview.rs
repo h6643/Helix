@@ -1154,7 +1154,7 @@ fn browser_legacy_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 ///
 /// 注意：密码自动保存**没有**开（WebView2 需要显式
 /// `ICoreWebView2Profile::SetIsPasswordAutosaveEnabled`），`Default\Login Data`
-/// 只是 Chromium 建的空表。
+/// 只是 Chromium 建的空表 —— 登录态靠 cookie / IndexedDB 持久，不靠密码库。
 fn browser_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
@@ -1167,20 +1167,11 @@ fn browser_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     }
 }
 
-/// 内置浏览器的 profile 目录（`<UDF>/EBWebView/Default`）——密码导入与书签
-/// 合并都写这里（browser_import.rs）。目录可能还不存在（从没开过浏览器），
-/// 调用方按需 create_dir_all。
-pub(crate) fn browser_default_profile_dir(
-    app: &AppHandle,
-) -> Result<std::path::PathBuf, String> {
-    Ok(browser_data_dir(app)?.join("Default"))
-}
-
 /// 关掉所有浏览器子窗口并等待它们真正消失（ WebView2 后台进程还要再占一会儿
 /// 文件句柄，所以窗口消失后再补一拍）。返回被关掉的窗口 label 列表。
 ///
-/// 改写 profile 里的 SQLite / JSON（Login Data、Bookmarks）之前必须走这里：
-/// WebView2 持有这些文件的句柄，Windows 上被占用的文件写不进去。
+/// 改写 profile 里的 SQLite / JSON 之前必须走这里：WebView2 持有这些文件的
+/// 句柄，Windows 上被占用的文件写不进去。
 pub(crate) async fn close_all_browser_windows(app: &AppHandle) -> Vec<String> {
     let labels: Vec<String> = {
         let reg = registry();

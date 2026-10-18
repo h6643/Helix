@@ -69,8 +69,8 @@ export function normalizeAcpContent(
   const cleaned = stripSystemReminder
     ? text.replace(SYSTEM_REMINDER_RE, "")
     : text;
-  // Strip invisible transport control chars that overlap lines in WebKitGTK's
-  // pre-wrap (lone CR = progress-bar carriage-return; ANSI CSI sequences).
+  // Strip invisible transport control chars that overlap lines in pre-wrap
+  // (lone CR = progress-bar carriage-return; ANSI CSI sequences).
   // Visible text, emoji and <system-reminder> are preserved.
   const sanitized = sanitizeControlChars(cleaned);
   // 剔掉泄进文本流的 chat-template 特殊 token（`<|...|>`）。这是传输层
@@ -93,7 +93,7 @@ export function normalizeAcpContentRaw(content: unknown): string {
   return normalizeAcpContent(content, { stripSystemReminder: false });
 }
 
-// Remove control characters that cause line overlap in WebKitGTK (Tauri on Linux):
+// Remove control characters that cause line overlap in the webview:
 //  - CR not followed by LF -> LF (prevents "carriage return to line start" overlap)
 //  - ANSI CSI escape sequences (\x1b[...m / cursor moves) -> removed (rendered as garbage)
 function sanitizeControlChars(s: string): string {

@@ -211,8 +211,8 @@ pub fn delete(state: State<'_, Arc<AppState>>, file_path: String) -> Result<Valu
     let resolved = safe_path(&state, &file_path).ok_or_else(outside_err)?;
     // VS Code-style delete: move to trash (recoverable), not permanent unlink.
     // Tauri plugin-dialog doesn't expose trash; fall back to trash-rs semantics:
-    // we remove the file/dir permanently but that's a deliberate trade-off for
-    // the Linux-first build. Keep the error contract identical.
+    // we remove the file/dir permanently but that's a deliberate trade-off.
+    // Keep the error contract identical.
     if resolved.is_dir() {
         std::fs::remove_dir_all(&resolved).map_err(|e| e.to_string())?;
     } else {

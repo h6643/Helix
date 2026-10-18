@@ -4,7 +4,6 @@ mod app;
 mod approval_policy;
 mod background_tasks;
 mod browser_webview;
-mod browser_import;
 mod config;
 mod delegations;
 mod desktop_notify;
@@ -117,9 +116,7 @@ pub fn run() {
 
             // Main window is created manually here (config has "create": false)
             // so we can attach the HTTP proxy to the renderer at creation time.
-            // proxy_url is cross-platform: WebKitGTK (Linux) / WebView2
-            // --proxy-server (Windows) / WKWebView (macOS). Empty → no override
-            // (Linux explicitly sets NoProxy below in apply_webview_proxy).
+            // proxy_url is empty → no override (direct connection).
             let proxy_url = crate::proxy::load_proxy_url();
             for window_config in app.config().app.windows.iter() {
                 let mut builder =
@@ -160,9 +157,6 @@ pub fn run() {
             pi_extensions::install_browser_extension();
             pi_extensions::remove_legacy_browser_extension();
 
-            // Apply the HTTP proxy to the renderer (WebKitGTK default context)
-            // BEFORE the gateway spawns so the webview fetches already honor it.
-            crate::proxy::apply_webview_proxy();
             std::thread::spawn(move || {
                 if let Err(e) = pi_gateway::spawn(&app_state) {
                     eprintln!("[Helix] pi agent failed to start: {e}");
@@ -420,8 +414,6 @@ pub fn run() {
             browser_webview::browser_handoff_config,
             browser_webview::browser_set_handoff_config,
             browser_webview::browser_read_upload_file,
-            browser_import::browser_import_detect,
-            browser_import::browser_import_passwords,
             // git
             git::status,
             git::diff,

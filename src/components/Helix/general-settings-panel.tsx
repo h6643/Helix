@@ -691,7 +691,7 @@ export function GeneralSettingsPanel() {
           </SettingRow>
           <SettingRow
             label="人工接管通知"
-            hint="Agent 把右侧栏浏览器页交给你登录/过验证码时显示系统通知；锁页时长在 设置 → 浏览器 → 人工接管 里配"
+            hint="Agent把右侧栏浏览器页交给你登录/过验证码时显示系统通知；锁页时长在设置 → 浏览器 → 人工接管里配"
           >
             <Toggle
               enabled={notifyPrefs.handoffEnabled}

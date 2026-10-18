@@ -81,13 +81,8 @@ pub fn apply_auth_env(cmd: &mut Command, auth: &SshAuth) {
 
 /// Windows 上 ssh 子进程不弹黑窗。
 pub fn detach_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    #[cfg(not(windows))]
-    let _ = cmd;
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 }
 
 pub fn connect(

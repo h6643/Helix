@@ -295,6 +295,59 @@ export function applyHelixPalette(styleId: string | null | undefined): void {
   }
 }
 
+/**
+ * 配色风格 → 代码高亮主题（浅色 / 深色各一套 shiki 主题 id）。
+ *
+ * 「配色风格」选的是界面皮肤（Catppuccin 风味），之前与代码高亮完全脱钩：
+ * 预览卡写死 github-light-default / github-dark-dimmed，卡片下方还印着裸
+ * 主题 id，看上去像在报字体名。这里把两者接上——每个风格给出与其观感
+ * 配套的一对代码主题，用户换风格时预览卡同步换色。
+ *
+ * default（奶油）保持与 shiki-code.tsx 的 SHIKI_THEMES 完全一致：
+ * 实际对话里的代码块就用这一对，预览必须与之一致，否则预览毫无参考价值。
+ */
+export interface CodeThemePair {
+  light: string;
+  dark: string;
+  /** 卡副标题用的中文主题名（不暴露裸 id，避免被误读成字体）。 */
+  lightLabel: string;
+  darkLabel: string;
+}
+
+const CODE_THEMES: Record<string, CodeThemePair> = {
+  [DEFAULT_THEME_STYLE]: {
+    light: "github-light-default",
+    dark: "github-dark-dimmed",
+    lightLabel: "GitHub 浅色",
+    darkLabel: "GitHub 深色",
+  },
+  "ctp-terracotta-light": {
+    light: "catppuccin-latte",
+    dark: "github-dark-dimmed",
+    lightLabel: "Catppuccin Latte",
+    darkLabel: "GitHub 深色",
+  },
+  "ctp-generic-dark": {
+    light: "github-light-default",
+    dark: "vitesse-black",
+    lightLabel: "GitHub 浅色",
+    darkLabel: "Vitesse Black",
+  },
+  "ctp-royal-velvet": {
+    light: "vitesse-light",
+    dark: "catppuccin-mocha",
+    lightLabel: "Vitesse Light",
+    darkLabel: "Catppuccin Mocha",
+  },
+};
+
+const DEFAULT_CODE_THEMES = CODE_THEMES[DEFAULT_THEME_STYLE];
+
+/** 取某风格对应的代码主题对；未知/空 id 回落到默认那一对。 */
+export function codeThemesFor(styleId: string | null | undefined): CodeThemePair {
+  return (styleId && CODE_THEMES[styleId]) || DEFAULT_CODE_THEMES;
+}
+
 /** Dropdown option groups for the appearance panel. */
 export const THEME_SELECT_GROUPS: {
   label: string;

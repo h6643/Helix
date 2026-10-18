@@ -1,330 +1,12 @@
-//! Interactive PTY-backed terminal for the Tauri build.
+//! Interactive terminal for the Tauri build (Windows plain-pipe backend).
 //!
 //! The renderer uses xterm.js and talks to these commands through the Tauri
 //! bridge. Output is pushed back as `terminal:data` string events.
 
 use serde_json::{json, Value};
 
-#[cfg(unix)]
-use std::collections::HashMap;
-#[cfg(unix)]
-use std::io::Error as IoError;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-#[cfg(unix)]
-use std::path::Path;
-#[cfg(unix)]
-use std::process::Command;
-#[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
-use std::sync::{Arc, Mutex, OnceLock};
-#[cfg(unix)]
-use std::thread;
-#[cfg(unix)]
-use std::time::Duration;
-#[cfg(unix)]
-use tauri::Emitter;
-
-#[cfg(unix)]
-struct TerminalSession {
-    master: std::os::unix::io::RawFd,
-    pid: libc::pid_t,
-    stop: Arc<AtomicBool>,
-}
-
-// Multiple simultaneous PTY sessions, keyed by the renderer-assigned tab id.
-#[cfg(unix)]
-static TERMINAL: OnceLock<Mutex<HashMap<u32, TerminalSession>>> = OnceLock::new();
-
-#[cfg(unix)]
-fn terminal_state() -> &'static Mutex<HashMap<u32, TerminalSession>> {
-    TERMINAL.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[cfg(unix)]
-fn last_os_error(action: &str) -> String {
-    format!("{action}: {}", IoError::last_os_error())
-}
-
-#[cfg(unix)]
-fn open_pty() -> Result<(std::os::unix::io::RawFd, std::os::unix::io::RawFd), String> {
-    let mut master = 0;
-    let mut slave = 0;
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    if rc != 0 {
-        return Err(last_os_error("openpty"));
-    }
-    Ok((master, slave))
-}
-
-#[cfg(unix)]
-fn configure_slave(slave: std::os::unix::io::RawFd) -> Result<(), String> {
-    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
-    if unsafe { libc::tcgetattr(slave, &mut termios) } != 0 {
-        return Err(last_os_error("tcgetattr"));
-    }
-    unsafe { libc::cfmakeraw(&mut termios) };
-    termios.c_iflag |= libc::ICRNL | libc::IXON;
-    termios.c_oflag |= libc::OPOST | libc::ONLCR;
-    termios.c_lflag |= libc::ISIG;
-    if unsafe { libc::tcsetattr(slave, libc::TCSANOW, &mut termios) } != 0 {
-        return Err(last_os_error("tcsetattr"));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_nonblocking(fd: std::os::unix::io::RawFd) -> Result<(), String> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(last_os_error("fcntl F_GETFL"));
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(last_os_error("fcntl F_SETFL"));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_window_size(fd: std::os::unix::io::RawFd, cols: u16, rows: u16) -> Result<(), String> {
-    let ws = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ as libc::c_ulong, &ws) } != 0 {
-        return Err(last_os_error("TIOCSWINSZ"));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn spawn_shell(
-    cwd: Option<String>,
-    master: std::os::unix::io::RawFd,
-    slave: std::os::unix::io::RawFd,
-) -> Result<libc::pid_t, String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    let mut cmd = Command::new(&shell);
-    cmd.arg("-i");
-    if let Some(cwd) = cwd {
-        if !cwd.trim().is_empty() && Path::new(&cwd).is_dir() {
-            cmd.current_dir(&cwd);
-        }
-    }
-    cmd.env("TERM", "xterm-256color");
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::setsid() < 0 {
-                return Err(IoError::last_os_error());
-            }
-            if libc::ioctl(slave, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
-                return Err(IoError::last_os_error());
-            }
-            for target in [0, 1, 2] {
-                if libc::dup2(slave, target) < 0 {
-                    return Err(IoError::last_os_error());
-                }
-            }
-            if slave > 2 {
-                libc::close(slave);
-            }
-            libc::close(master);
-            Ok(())
-        });
-    }
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to spawn {shell}: {e}"))?;
-    Ok(child.id() as libc::pid_t)
-}
-
-#[cfg(unix)]
-fn emit_terminal_data(id: u32, data: &[u8]) {
-    let text = String::from_utf8_lossy(data).into_owned();
-    let _ = crate::state::app_handle().emit("terminal:data", json!({ "id": id, "data": text }));
-}
-
-#[cfg(unix)]
-fn reap_child(pid: libc::pid_t) {
-    loop {
-        let rc = unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
-        if rc < 0 {
-            let err = IoError::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-        }
-        break;
-    }
-}
-
-#[cfg(unix)]
-fn cleanup_session(id: u32, pid: libc::pid_t, master: std::os::unix::io::RawFd) {
-    let mut guard = terminal_state().lock().unwrap();
-    if let Some(session) = guard.remove(&id) {
-        if session.pid == pid {
-            unsafe {
-                let _ = libc::kill(-pid, libc::SIGKILL);
-                libc::close(master);
-            }
-            reap_child(pid);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn kill_session(id: u32) {
-    let mut guard = terminal_state().lock().unwrap();
-    if let Some(session) = guard.remove(&id) {
-        session.stop.store(true, Ordering::Relaxed);
-        unsafe {
-            let _ = libc::kill(-session.pid, libc::SIGKILL);
-            libc::close(session.master);
-        }
-        reap_child(session.pid);
-    }
-}
-
-#[cfg(unix)]
-fn write_all(fd: std::os::unix::io::RawFd, bytes: &[u8]) -> Result<(), String> {
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let n = unsafe { libc::write(fd, bytes[offset..].as_ptr().cast(), bytes.len() - offset) };
-        if n < 0 {
-            let err = IoError::last_os_error();
-            let code = err.raw_os_error().unwrap_or(-1);
-            if code == libc::EAGAIN || code == libc::EWOULDBLOCK {
-                thread::sleep(Duration::from_millis(10));
-                continue;
-            }
-            return Err(last_os_error("write"));
-        }
-        offset += n as usize;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn read_loop(id: u32, master: std::os::unix::io::RawFd, pid: libc::pid_t, stop: Arc<AtomicBool>) {
-    let mut buf = [0u8; 8192];
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            return;
-        }
-        let mut pfd = libc::pollfd {
-            fd: master,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let rc = unsafe { libc::poll(&mut pfd, 1, 250) };
-        if rc < 0 {
-            let err = IoError::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            break;
-        }
-        if rc == 0 {
-            continue;
-        }
-        if pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
-            continue;
-        }
-
-        loop {
-            let n = unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) };
-            if n > 0 {
-                emit_terminal_data(id, &buf[..n as usize]);
-                continue;
-            }
-            if n == 0 {
-                cleanup_session(id, pid, master);
-                return;
-            }
-            let err = IoError::last_os_error();
-            let code = err.raw_os_error().unwrap_or(-1);
-            if code == libc::EAGAIN || code == libc::EWOULDBLOCK {
-                break;
-            }
-            if !stop.load(Ordering::Relaxed) {
-                cleanup_session(id, pid, master);
-            }
-            return;
-        }
-    }
-    if !stop.load(Ordering::Relaxed) {
-        cleanup_session(id, pid, master);
-    }
-}
-
-#[cfg(unix)]
-#[tauri::command]
-pub fn terminal_start(
-    id: u32,
-    cols: Option<u16>,
-    rows: Option<u16>,
-    cwd: Option<String>,
-) -> Result<Value, String> {
-    let cols = cols.unwrap_or(80).max(2);
-    let rows = rows.unwrap_or(24).max(2);
-
-    let (master, slave) = open_pty()?;
-    configure_slave(slave)?;
-    set_nonblocking(master)?;
-    set_window_size(master, cols, rows)?;
-    let pid = spawn_shell(cwd, master, slave)?;
-    unsafe { libc::close(slave) };
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let reader_stop = Arc::clone(&stop);
-    terminal_state()
-        .lock()
-        .unwrap()
-        .insert(id, TerminalSession { master, pid, stop });
-    thread::spawn(move || read_loop(id, master, pid, reader_stop));
-    Ok(json!({ "ok": true }))
-}
-
-#[cfg(unix)]
-#[tauri::command]
-pub fn terminal_write(id: u32, data: String) -> Result<(), String> {
-    let guard = terminal_state().lock().unwrap();
-    match guard.get(&id) {
-        Some(session) => write_all(session.master, data.as_bytes()),
-        None => Err("Terminal is not running".to_string()),
-    }
-}
-
-#[cfg(unix)]
-#[tauri::command]
-pub fn terminal_resize(id: u32, cols: u16, rows: u16) -> Result<(), String> {
-    let guard = terminal_state().lock().unwrap();
-    match guard.get(&id) {
-        Some(session) => set_window_size(session.master, cols.max(2), rows.max(2)),
-        None => Err("Terminal is not running".to_string()),
-    }
-}
-
-#[cfg(unix)]
-#[tauri::command]
-pub fn terminal_kill(id: u32) -> Result<Value, String> {
-    kill_session(id);
-    Ok(json!({ "ok": true }))
-}
-
 // ===========================================================================
-// Windows backend — plain-pipe process (no ConPTY).
+// Plain-pipe process backend (no ConPTY).
 //
 // ConPTY (CreatePseudoConsole + PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE) is broken
 // on this machine: any console app attached to a pseudo console exits with
@@ -347,41 +29,28 @@ pub fn terminal_kill(id: u32) -> Result<Value, String> {
 // by the Mutex.
 // ===========================================================================
 
-#[cfg(windows)]
 use std::collections::HashMap;
-#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(windows)]
 use std::sync::{Arc, Mutex, OnceLock};
-#[cfg(windows)]
 use std::thread;
-#[cfg(windows)]
 use tauri::Emitter;
-#[cfg(windows)]
 use windows::core::{PCWSTR, PWSTR};
-#[cfg(windows)]
 use windows::Win32::Foundation::{
     CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
 };
-#[cfg(windows)]
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
-#[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-#[cfg(windows)]
 use windows::Win32::System::Pipes::CreatePipe;
-#[cfg(windows)]
 use windows::Win32::System::Threading::{
     CreateProcessW, TerminateProcess, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
     STARTF_USESTDHANDLES, STARTUPINFOW,
 };
 
-#[cfg(windows)]
 fn emit_terminal_data(id: u32, data: &[u8]) {
     let text = String::from_utf8_lossy(data).into_owned();
     let _ = crate::state::app_handle().emit("terminal:data", json!({ "id": id, "data": text }));
 }
 
-#[cfg(windows)]
 struct WindowsTerminalSession {
     h_in_write: HANDLE,
     h_out_read: HANDLE,
@@ -392,20 +61,15 @@ struct WindowsTerminalSession {
 // `HANDLE` is pointer-backed and not `Send`/`Sync` in windows 0.51+, but the
 // values are just OS handles that are safe to move between threads; all access
 // is serialized by the `Mutex` below.
-#[cfg(windows)]
 unsafe impl Send for WindowsTerminalSession {}
-#[cfg(windows)]
 unsafe impl Sync for WindowsTerminalSession {}
 
-#[cfg(windows)]
 static WINDOWS_TERMINAL: OnceLock<Mutex<HashMap<u32, WindowsTerminalSession>>> = OnceLock::new();
 
-#[cfg(windows)]
 fn windows_terminal_state() -> &'static Mutex<HashMap<u32, WindowsTerminalSession>> {
     WINDOWS_TERMINAL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-#[cfg(windows)]
 fn kill_session(id: u32) {
     let mut guard = windows_terminal_state().lock().unwrap();
     if let Some(session) = guard.remove(&id) {
@@ -420,7 +84,6 @@ fn kill_session(id: u32) {
     }
 }
 
-#[cfg(windows)]
 fn read_loop(id: u32, h_out_read: usize, stop: Arc<AtomicBool>) {
     // windows 0.61 的 `HANDLE` 是 `*mut c_void`（非 Send），不能直接 move 进
     // `thread::spawn` 的闭包；这里以 `usize` 传句柄，进函数再还原。
@@ -440,7 +103,6 @@ fn read_loop(id: u32, h_out_read: usize, stop: Arc<AtomicBool>) {
     }
 }
 
-#[cfg(windows)]
 #[tauri::command]
 pub fn terminal_start(
     id: u32,
@@ -560,7 +222,6 @@ pub fn terminal_start(
     }
 }
 
-#[cfg(windows)]
 #[tauri::command]
 pub fn terminal_write(id: u32, data: String) -> Result<(), String> {
     let guard = windows_terminal_state().lock().unwrap();
@@ -589,7 +250,6 @@ pub fn terminal_write(id: u32, data: String) -> Result<(), String> {
     }
 }
 
-#[cfg(windows)]
 #[tauri::command]
 pub fn terminal_resize(id: u32, cols: u16, rows: u16) -> Result<(), String> {
     // 普通管道无窗口尺寸语义——接受但忽略。
@@ -597,68 +257,14 @@ pub fn terminal_resize(id: u32, cols: u16, rows: u16) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(windows)]
 #[tauri::command]
 pub fn terminal_kill(id: u32) -> Result<Value, String> {
     kill_session(id);
     Ok(json!({ "ok": true }))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn pty_receives_shell_output() {
-        let (master, slave) = open_pty().expect("openpty");
-        configure_slave(slave).expect("configure slave");
-        set_nonblocking(master).expect("nonblocking master");
-        let pid = spawn_shell(None, master, slave).expect("spawn shell");
-        unsafe { libc::close(slave) };
-
-        let _ = write_all(master, b"printf terminal-ok\n");
-        let mut output = String::new();
-        let mut buf = [0u8; 4096];
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-
-        while std::time::Instant::now() < deadline && !output.contains("terminal-ok") {
-            let mut pfd = libc::pollfd {
-                fd: master,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let rc = unsafe { libc::poll(&mut pfd, 1, 200) };
-            if rc > 0 && pfd.revents & libc::POLLIN != 0 {
-                loop {
-                    let n = unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) };
-                    if n > 0 {
-                        output.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
-                    } else {
-                        let err = IoError::last_os_error();
-                        let code = err.raw_os_error().unwrap_or(-1);
-                        if code != libc::EAGAIN && code != libc::EWOULDBLOCK {
-                            break;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        unsafe {
-            let _ = libc::kill(-pid, libc::SIGKILL);
-            libc::close(master);
-        }
-        reap_child(pid);
-        assert!(
-            output.contains("terminal-ok"),
-            "expected shell output, got: {output}"
-        );
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_tests {
     use super::*;
     // PeekNamedPipe 仅测试轮询用；生产 read_loop 用阻塞 ReadFile。
     use windows::Win32::System::Pipes::PeekNamedPipe;

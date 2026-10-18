@@ -79,13 +79,7 @@ fn app_version() -> String {
 }
 
 fn platform() -> String {
-    if cfg!(windows) {
-        "win32".to_string()
-    } else if cfg!(target_os = "macos") {
-        "darwin".to_string()
-    } else {
-        "linux".to_string()
-    }
+    "win32".to_string()
 }
 
 // ── commands ───────────────────────────

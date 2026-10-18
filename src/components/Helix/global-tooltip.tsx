@@ -15,7 +15,7 @@ interface TipState {
  *
  * Every icon button in the app previously relied on the browser-native
  * `title` attribute, which the OS renders in its own un-themable style
- * (yellow box on Windows, grey box on Linux/WebKitGTK) — it never follows
+ * (a yellow box on Windows) — it never follows
  * the Catppuccin/shadcn tokens. Those `title=` attributes have been renamed
  * to `data-tip=` across the codebase; this single component reads them via
  * event delegation and renders one portal tooltip styled with the app's
