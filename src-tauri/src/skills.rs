@@ -25,6 +25,17 @@ fn pi_user_skills_dir() -> PathBuf {
         .join("skills")
 }
 
+/// `~/.agents/skills/` — pi 的「跨 agent」用户级技能根（package-manager.js
+/// `addAutoDiscoveredResources` 里的 `userAgentsSkillsDir`）。这一根**不受项目
+/// 信任门控**，终端 `pi` 和 Helix 拉起的 gateway 都会无条件加载；而它不在
+/// `~/.pi/agent/` 下，所以 Helix 原来那套扫描完全看不到它。
+fn user_agents_skills_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".agents")
+        .join("skills")
+}
+
 /// `~/.pi/agent/npm/` — pi's package store (`pi install` target).
 fn pi_npm_dir() -> PathBuf {
     dirs::home_dir()
@@ -129,6 +140,9 @@ pub fn helix_delete_dir(dir_path: String) -> bool {
 
 /// List every SKILL.md directory pi actually loads:
 ///   ~/.pi/agent/skills/<skill>/ (and <category>/<skill>/) — user root
+///   ~/.agents/skills/<skill>/ — pi 的跨 agent 用户根（无条件加载）
+///   <work_dir>(及向上到 git 根的各层)/.agents/skills + <work_dir>/.pi/skills
+///     — 项目根，只在信任档位为 always 时才加载（与 gateway 的 `--approve` 一致）
 ///   ~/.pi/agent/npm/node_modules/<pkg>/<pi.skills paths>/… — package-bundled
 /// Directories starting with `.` are listed with `isBuiltin: true`.
 #[tauri::command]
@@ -146,8 +160,26 @@ pub fn helix_list_skills() -> Vec<SkillEntry> {
     // 否则技能面板 / 输入框 "/" 菜单看不到这些已安装技能。
     collect_settings_skills(&mut out);
 
+    // ── .agents/skills（用户根 + 受信任门控的项目根）──
+    collect_agents_skills(&mut out);
+
     // ── Skills bundled with pi npm packages ──
     collect_package_skills(&mut out);
+
+    // 同一个技能目录可能被多个根重复命中（例如 settings.json 把根指回 .agents）。
+    // pi 自己按 canonicalize 后的正文路径去重，这里跟上，避免面板出现两行。
+    let mut seen: Vec<PathBuf> = Vec::with_capacity(out.len());
+    out.retain(|s| {
+        let real = Path::new(&s.path)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(s.path.replace('\\', "/")));
+        if seen.iter().any(|p| *p == real) {
+            false
+        } else {
+            seen.push(real);
+            true
+        }
+    });
 
     out.sort_by_key(|a| a.name.to_lowercase());
     out
@@ -238,7 +270,26 @@ fn ensure_skill_dir_allowed(skill_dir: &Path) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("技能目录不可访问: {e}"))?;
     let npm = pi_npm_dir().join("node_modules");
-    let mut roots: Vec<PathBuf> = vec![pi_user_skills_dir(), npm];
+    let mut roots: Vec<PathBuf> = vec![pi_user_skills_dir(), npm, user_agents_skills_dir()];
+    // 项目侧根（.agents/skills 与 .pi/skills）也允许启停，与列表面向同一套根。
+    if let Some(cwd) = crate::state::app_state()
+        .map(|s| s.work_dir.read().unwrap().clone())
+        .or_else(|| dirs::home_dir())
+    {
+        roots.push(cwd.join(".pi").join("skills"));
+        let git_root = find_git_repo_root(&cwd);
+        let mut dir = cwd.as_path();
+        loop {
+            roots.push(dir.join(".agents").join("skills"));
+            if git_root.as_deref() == Some(dir) {
+                break;
+            }
+            match dir.parent() {
+                Some(p) if p != dir => dir = p,
+                _ => break,
+            }
+        }
+    }
     if let Some(settings_path) = pi_settings_path() {
         if let Ok(raw) = std::fs::read_to_string(settings_path) {
             if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) {
@@ -438,6 +489,70 @@ pub fn helix_set_skill_model_invocation(
 /// additional skill roots pi loads).
 fn pi_settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".pi").join("agent").join("settings.json"))
+}
+
+/// 扫描 pi 的 `.agents/skills` 体系，与 package-manager.js
+/// `addAutoDiscoveredResources` 对齐：
+/// - 用户根 `~/.agents/skills/`：无条件加载（不受信任门控）。
+/// - 项目根：从 work_dir 向上每层的 `.agents/skills/`，碰到 git 根就停；
+///   另外 `work_dir/.pi/skills/` 也是项目技能根。这些都只在项目被信任时
+///   才加载 —— Helix 的 gateway 靠 `--approve` / `--no-approve` 决定，跟
+///   `configured_project_trust()` 一致。不跟上就会出现「终端 pi 看得到、
+///   Helix 面板看不到」（或反过来）的不一致。
+fn collect_agents_skills(out: &mut Vec<SkillEntry>) {
+    // 用户根（agents）
+    if let Ok(top) = std::fs::read_dir(user_agents_skills_dir()) {
+        collect_skills_from_dir(top, out, "agents", false);
+    }
+
+    let cwd = crate::state::app_state()
+        .map(|s| s.work_dir.read().unwrap().clone())
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+
+    // 项目根只在信任档位为 always 时生效（跟 gateway 的 `--approve` 同步）。
+    if crate::pi_advanced::configured_project_trust() != "always" {
+        return;
+    }
+
+    // work_dir/.pi/skills
+    let pi_project_skills = cwd.join(".pi").join("skills");
+    if let Ok(top) = std::fs::read_dir(&pi_project_skills) {
+        collect_skills_from_dir(top, out, "agents", false);
+    }
+
+    // 向上各层的 .agents/skills，到 git 根为止（collectAncestorAgentsSkillDirs）。
+    let git_root = find_git_repo_root(&cwd);
+    let user_agents = user_agents_skills_dir();
+    let mut dir = cwd.as_path();
+    loop {
+        let cand = dir.join(".agents").join("skills");
+        if cand != user_agents {
+            if let Ok(top) = std::fs::read_dir(&cand) {
+                collect_skills_from_dir(top, out, "agents", false);
+            }
+        }
+        if git_root.as_deref() == Some(dir) {
+            break;
+        }
+        match dir.parent() {
+            Some(p) if p != dir => dir = p,
+            _ => break,
+        }
+    }
+}
+
+/// 从 `start` 向上找第一个含 `.git` 的目录（package-manager.js 的 findGitRepoRoot）。
+fn find_git_repo_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = start;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        match dir.parent() {
+            Some(p) if p != dir => dir = p,
+            _ => return None,
+        }
+    }
 }
 
 /// Scan each directory listed in settings.json's `skills` array, mirroring
