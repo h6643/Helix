@@ -4629,9 +4629,10 @@ export function AgentFlowPanel() {
       const pendingAssistantRowIdRef = { current: null as number | null };
       const streamCappedRef = { current: false };
       const thinkingCappedRef = { current: false };
-      // 本次运行的 provider 原始错误（pi `errorMessage`，经 session/complete
-      // 透传）。只在「run 结束但没有任何可见内容」时用来分类显示——正常回复
-      // 不该因为一次上游错误就把错误挂在正文里。
+      // 本次运行的 provider 原始错误（pi `errorMessage` / error 事件，经
+      // session/complete 或 method=error 透传）。run 收尾时无条件并进可见正文：
+      // 无正文时作为兜底内容，已有正文时追加在末尾——上游任何报错都必须让用户
+      // 看见，不能只留在日志或执行步骤里。
       const runErrorRef = { current: "" };
       const pendingTextRef = { current: null as string | null };
       const pendingThinkingRef = { current: null as string | null };
@@ -5521,6 +5522,7 @@ export function AgentFlowPanel() {
           reasoning?: unknown;
           error?: unknown;
           message?: unknown;
+          fatal?: unknown;
         };
         // 映射产物：直接 JSON.stringify 入队，由流式解析器按 type 字段做运行时
         // 判定。判别联合覆盖所有分支的 type 与字段，content 的 unknown 是
@@ -5536,7 +5538,7 @@ export function AgentFlowPanel() {
           | { type: "tool_prepare_unblocked"; toolCallId: string; at: number }
           | { type: "done"; content: unknown; reasoning?: string }
           | { type: "usage_update"; size: number; used: number }
-          | { type: "error"; content: unknown };
+          | { type: "error"; content: unknown; fatal?: boolean };
         const mapHelixEvent = (method: string, params: RpcEventPayload): MappedHelixEvent | null => {
           if (method === "usage:prompt-complete") {
             return {
@@ -5780,8 +5782,11 @@ export function AgentFlowPanel() {
               typeof params?.reasoning === "string" ? params.reasoning : "";
             // 上游 provider 的原始错误（`errorMessage`）。空正文 + 有错误时用它
             // 分类显示，不再只有一句「模型未返回任何可见内容」。
-            runErrorRef.current =
-              typeof params?.error === "string" ? params.error : "";
+            // 只增不减：回合 error 事件可能先到，session/complete 本身不带
+            // error 字段时不能把刚记下的真实错误清空。
+            if (typeof params?.error === "string" && params.error.trim()) {
+              runErrorRef.current = params.error;
+            }
             return {
               type: "done",
               content: textBufferRef.current,
@@ -5790,7 +5795,11 @@ export function AgentFlowPanel() {
             };
           }
           if (method === "error") {
-            return { type: "error", content: params?.message || "后端错误" };
+            return {
+              type: "error",
+              content: params?.message || "后端错误",
+              fatal: params?.fatal === true,
+            };
           }
           return null;
         };
@@ -6348,10 +6357,24 @@ export function AgentFlowPanel() {
                 // notify 是扩展主动对用户说话 → 落成对话流里的状态行；其余
                 // （setStatus 心跳、模型告警）仍只进调试日志，避免刷屏。
                 const raw = params?.raw as
-                  { method?: string; notifyType?: string } | undefined;
+                  | { method?: string; type?: string; notifyType?: string }
+                  | undefined;
                 const text =
                   typeof params?.message === "string" ? params.message : "";
-                if (raw?.method === "notify" && text) {
+                if (
+                  (raw?.method === "extension_error" ||
+                    raw?.type === "extension_error") &&
+                  text
+                ) {
+                  // 扩展加载/运行错误以前只写调试日志，用户完全看不到；现在至少
+                  // 以 error toast 呈现，避免"某个扩展坏了却毫无反馈"。
+                  useHelixStore.getState().showToast({
+                    type: "error",
+                    title: "扩展错误",
+                    description: text,
+                    duration: 10000,
+                  });
+                } else if (raw?.method === "notify" && text) {
                   // pi-hermes-memory 的 session backfill 每次会话启动都会播报
                   // 「🧠 Session backfill complete: ...」例行状态，对用户无意义，
                   // 在前端直接静默（其余扩展播报以 toast 呈现）。
@@ -7918,6 +7941,12 @@ export function AgentFlowPanel() {
                   (typeof parsed.reasoning === "string"
                     ? parsed.reasoning
                     : "");
+                // 本 run 收到的最后一条错误原文（fatal / 中游 / session_info_update
+                // / session/complete 透传都汇总到这里）。收尾时必须出现在正文里，
+                // 否则上游真实报错会被空 done 或"未返回任何可见内容"覆盖。
+                const runErrorText = normalizeAcpContent(
+                  runErrorRef.current,
+                ).trim();
                 const completedSteps = stepsRef.current;
                 // done 可能和最后一个 text 分片同批到达（rAF 还没触发），
                 // 先把积压的 pending 块冲刷进 responseBlocksRef，再清空——
@@ -7942,13 +7971,15 @@ export function AgentFlowPanel() {
                     !!content ||
                     !!reasoning ||
                     completedSteps.length > 0 ||
-                    responseBlocksRef.current.length > 0,
+                    responseBlocksRef.current.length > 0 ||
+                    !!runErrorText,
                 });
                 if (
                   content ||
                   reasoning ||
                   completedSteps.length > 0 ||
-                  responseBlocksRef.current.length > 0
+                  responseBlocksRef.current.length > 0 ||
+                  runErrorText
                 ) {
                   // Some models place reasoning inside <think:ID>...</think:ID> tags as part of the final text.
                   if (!reasoning) {
@@ -7985,6 +8016,14 @@ export function AgentFlowPanel() {
                       content = reasoning;
                       reasoning = "";
                     }
+                  }
+                  // 错误必须落进可见正文：无正文时用错误原文兜底，已有正文时
+                  // 追加在末尾。不再按状态码分类后只显示泛化文案——用户要看到
+                  // 上游原话（例如 "502 ... Billing daily count exceeded"）。
+                  if (runErrorText && !content.includes(runErrorText)) {
+                    content = content.trim()
+                      ? `${content}\n\n⚠️ 模型返回错误：\n\n${runErrorText}`
+                      : `⚠️ 模型返回错误：\n\n${runErrorText}`;
                   }
                   // Detect scheduled-task declarations in AI output. Don't auto-create —
                   // collect them and show a confirm dialog so the user approves first.
@@ -8191,6 +8230,13 @@ export function AgentFlowPanel() {
                   ];
                 });
               } else if (parsed.type === "error") {
+                // 无论哪类错误，先把原文记在本 run 的错误快照里。收尾时
+                // （done / synth-done）即使没有任何可见正文，也必须把它显示
+                // 出来——上游 502 / 额度不足这类错误只以 error 事件到达，
+                // 不能因为"中游可恢复"或"已有步骤"就被吞掉。
+                const errText =
+                  normalizeAcpContent(parsed.content).trim() || "后端错误";
+                runErrorRef.current = errText;
                 // error 事件分两类，处理必须分开：
                 // ① 终止性（prompt 通道关闭 / session.evicted 等路径入队前已置
                 //    queueDone=true）→ run 到头，按原有逻辑清空并落盘收尾。
@@ -8199,23 +8245,26 @@ export function AgentFlowPanel() {
                 //    清空、随后又继续输出"的根因）。内容原样保留，只记录错误
                 //    步骤，并把兜底定时器武装到 20s：重试后的内容事件会把它重新
                 //    武装回 300s；后端若真的不再输出，20s 后 synth-done 收尾。
+                //    fatal 错误（后端已判回合失败）同样走这里收尾，但兜底缩短
+                //    到 2s，避免错误已确定却还要空等 20s。
                 if (!queueDone) {
                   debug("[HelixTrace] mid-run soft error — keep streaming", {
-                    content: String(parsed.content ?? "").slice(0, 200),
+                    content: errText.slice(0, 200),
                     textLen: textBufferRef.current?.length ?? 0,
                     reasoningLen: thoughtBufferRef.current?.length ?? 0,
+                    fatal: parsed.fatal === true,
                   });
                   uiSteps((prev) => [
                     ...prev,
                     {
                       id: generateId(),
                       type: "error",
-                      content: parsed.content,
+                      content: errText,
                       timestamp: Date.now(),
                     },
                   ]);
                   storeActions.addExecutionStep({ type: "error" });
-                  scheduleSynthDone(20000);
+                  scheduleSynthDone(parsed.fatal === true ? 2000 : 20000);
                   resetIdleTimer();
                 } else {
                   const content = textBufferRef.current;
@@ -8234,8 +8283,14 @@ export function AgentFlowPanel() {
                   // condition as the done path above (Zustand store write can trigger
                   // a re-render before React useState batches flush).
                   uiRB([]);
+                  // 已流出的部分内容照常保留，但错误原文必须追加在正文后面，
+                  // 不能因为"有内容"就把错误藏起来。
+                  const contentWithError =
+                    errText && !content.includes(errText)
+                      ? `${content}${content ? "\n\n" : ""}⚠️ 模型返回错误：\n\n${errText}`
+                      : content;
                   if (
-                    content ||
+                    contentWithError ||
                     reasoning ||
                     errorSteps.length > 0 ||
                     // 读私有累加器而非投影 state（rAF 入队的最后一批块可能还没
@@ -8250,7 +8305,7 @@ export function AgentFlowPanel() {
                     const fileChanges = [...byFile.values()];
                     const msgId = curState.addChatMessage({
                       role: "assistant",
-                      content,
+                      content: contentWithError,
                       reasoning: reasoning || undefined,
                       steps: errorSteps.length ? errorSteps : undefined,
                       fileChanges: fileChanges.length ? fileChanges : undefined,
@@ -8258,20 +8313,6 @@ export function AgentFlowPanel() {
                       blocks: responseBlocksRef.current.length
                         ? responseBlocksRef.current
                         : undefined,
-                      sessionId: activeSessionId,
-                    });
-                    curState.setChatMessageStreaming(msgId, false);
-                    if (activeSessionId) {
-                      useHelixStore
-                        .getState()
-                        .persistSessionNow(activeSessionId);
-                    }
-                  } else if (parsed.content) {
-                    // Pure error with no streamed content — surface it as an assistant message
-                    const curState = useHelixStore.getState();
-                    const msgId = curState.addChatMessage({
-                      role: "assistant",
-                      content: "⚠️ " + parsed.content,
                       sessionId: activeSessionId,
                     });
                     curState.setChatMessageStreaming(msgId, false);
@@ -8295,12 +8336,15 @@ export function AgentFlowPanel() {
                       {
                         id: errId,
                         type: "error",
-                        content: parsed.content,
+                        content: errText,
                         timestamp: Date.now(),
                       },
                     ];
                   });
                   storeActions.addExecutionStep({ type: "error" });
+                  // 已经作为正文落盘；清掉快照，避免万一还有迟到的 done 再追加
+                  // 一遍同样的错误。
+                  runErrorRef.current = "";
                 }
               } else if (parsed.type === "plan") {
                 const id = generateId();

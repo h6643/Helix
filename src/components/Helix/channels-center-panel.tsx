@@ -81,10 +81,7 @@ export function ChannelsCenterPanel({ onClose }: { onClose: () => void }) {
           <div className={`${box} flex items-start gap-2 px-4 py-3`}>
             <Cable className="mt-0.5 size-4 shrink-0 text-muted-foreground/60" />
             <div className={`${textSm} leading-relaxed text-muted-foreground/80`}>
-              pi-connect 扩展的渠道状态与签到（WorkBuddy · Trae · Qoder）。
-              命令在一次性 pi 进程中执行，不占用当前会话；应用启动时已在
-              后台查询，打开面板优先显示上次结果，过期后自动在后台刷新，
-              也可随时手动「刷新」。
+              pi-connect 扩展的渠道状态与签到（WorkBuddy · Trae · Qoder）
             </div>
           </div>
 
