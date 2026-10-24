@@ -50,7 +50,6 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
     // Panel toggles
     "toggle-command-palette": () => state.toggleCommandPalette(),
 
-    "toggle-skill-panel": () => state.toggleSkillPanel(),
     "toggle-scheduled-tasks-panel": () => state.toggleScheduledTasksPanel(),
     "toggle-terminal": () => {
       // 云端对话没有本机终端可开（与标题栏/文件树/命令面板同一判定），快捷键
@@ -135,7 +134,6 @@ export function KeyboardShortcuts() {
     setActiveTab,
     markTabSaved,
     customShortcuts,
-    toggleSkillPanel,
     toggleScheduledTasksPanel,
   } = storeState;
 
@@ -162,13 +160,6 @@ export function KeyboardShortcuts() {
           handler();
           return;
         }
-      }
-
-      // Ctrl+Shift+P: Toggle skill panel
-      if (isMod && e.shiftKey && e.key === "P") {
-        e.preventDefault();
-        toggleSkillPanel();
-        return;
       }
 
       // Ctrl+Shift+T: Toggle scheduled tasks panel
@@ -264,7 +255,6 @@ export function KeyboardShortcuts() {
       setActiveTab,
       markTabSaved,
       customShortcuts,
-      toggleSkillPanel,
       toggleScheduledTasksPanel,
     ],
   );

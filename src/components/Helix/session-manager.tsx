@@ -95,9 +95,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
       a.download = `helix-session-${session.label || session.id}.${ext}`;
       a.click();
       URL.revokeObjectURL(url);
-      useHelixStore
-        .getState()
-        .showToast({ type: "success", title: "导出成功" });
     } catch (e) {
       console.error("Export failed:", e);
       useHelixStore.getState().showToast({ type: "error", title: "导出失败" });
@@ -143,9 +140,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
         .replace(/[T:]/g, "-")}.html`;
       a.click();
       URL.revokeObjectURL(url);
-      useHelixStore
-        .getState()
-        .showToast({ type: "success", title: "已导出 pi 原生 HTML" });
     } catch (e) {
       console.error("Export pi html failed:", e);
       useHelixStore.getState().showToast({
@@ -167,10 +161,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
       a.download = `helix-sessions-all-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      useHelixStore.getState().showToast({
-        type: "success",
-        title: `已导出 ${sessions.length} 个会话`,
-      });
     } catch (e) {
       console.error("Export all failed:", e);
       useHelixStore

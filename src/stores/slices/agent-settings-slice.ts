@@ -16,15 +16,8 @@ export interface AgentSettingsSlice {
   /** 保留期（天）：savedAt 早于 now - 该天数才进候选。 */
   autoArchiveRetentionDays: number;
   reasoningEffort: ReasoningEffortLevel;
-  personality: string;
-  fastMode: boolean;
-  // 集成终端 Shell（仅新会话生效）：Windows 下 Bash 工具用此 shell。
-  // 'auto' = 自动优先 Git Bash，找不到回退 cmd.exe；'cmd' = 始终用 cmd.exe；
-  // 'pwsh' = PowerShell 7；'powershell' = PowerShell 5。
-  terminalShell: "auto" | "cmd" | "pwsh" | "powershell";
 
   setReasoningEffort: (v: ReasoningEffortLevel) => void;
-  setPersonality: (v: string) => void;
   setAutoArchiveOldTasks: (v: boolean) => void;
   setAutoArchiveRetentionDays: (v: number) => void;
 }
@@ -41,12 +34,8 @@ export const createAgentSettingsSlice: StateCreator<
   autoArchiveOldTasks: false,
   autoArchiveRetentionDays: 7,
   reasoningEffort: "medium",
-  personality: "helpful",
-  fastMode: false,
-  terminalShell: "auto", // 自动：优先 Git Bash，找不到回退 cmd.exe
 
   setReasoningEffort: (v) => set({ reasoningEffort: v }),
-  setPersonality: (v) => set({ personality: v }),
   setAutoArchiveOldTasks: (v) => set({ autoArchiveOldTasks: v }),
   setAutoArchiveRetentionDays: (v) => set({ autoArchiveRetentionDays: v }),
 });

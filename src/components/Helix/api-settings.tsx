@@ -3,7 +3,6 @@
 import {
   Settings,
   Sun,
-  Plug,
   Archive,
   ArchiveRestore,
   ChevronLeft,
@@ -12,7 +11,6 @@ import {
   GripVertical,
   Globe,
   Keyboard,
-  Bot,
   Activity,
   Workflow,
   RefreshCw,
@@ -20,6 +18,7 @@ import {
   Folder,
   Brain,
   Compass,
+  Puzzle,
 } from "lucide-react";
 import React, {
   useState,
@@ -28,21 +27,19 @@ import React, {
   useRef,
   useMemo,
 } from "react";
-import { AgentsSettings } from "./agents-settings";
 import { AppearanceSettingsPanel } from "./appearance-settings-panel";
 import { BrowserSettingsPanel } from "./browser-settings";
 import { ChannelModelSettings } from "./channel-model-settings";
 import { GeneralSettingsPanel } from "./general-settings-panel";
 import { HookSettings } from "./hook-settings";
-import { ImageModelSettings } from "./image-model-settings";
-import { McpEditorForm, type McpFormData } from "./mcp-editor-form";
 import { MemorySettingsPanel } from "./memory-settings";
 import { PageHeader, PopupSelect, SettingGroup } from "./settings-ui";
 import { ShortcutsPage } from "./shortcuts-page";
+import { SkillPanel } from "./skill-panel";
 import { TokenUsagePanel } from "./usage-stats";
 import { VisionModelSettings } from "./vision-model-settings";
 import { Button } from "@/components/ui/button";
-import { isElectron, helixApi, electronApp } from "@/lib/electron-bridge";
+import { isElectron } from "@/lib/electron-bridge";
 import { persistence } from "@/lib/persist";
 import { getAllProviders, getBaseUrl } from "@/lib/providers";
 import { useGatewayStore } from "@/stores/gateway-store";
@@ -81,12 +78,11 @@ type SettingsPage =
   | "appearance"
   | "api"
   | "shortcuts"
-  | "mcp"
+  | "plugins"
   | "archive"
   | "hook"
   | "usage"
   | "help"
-  | "agents"
   | "memory"
   | "browser"
 
@@ -114,9 +110,8 @@ const NAV_GROUPS: NavGroup[] = [
     title: "配置",
     items: [
       { id: "api", label: "模型", icon: Globe },
-      { id: "mcp", label: "MCP", icon: Plug },
+      { id: "plugins", label: "扩展管理", icon: Puzzle },
       { id: "usage", label: "用量", icon: Activity },
-      { id: "agents", label: "子智能体", icon: Bot },
       { id: "memory", label: "记忆", icon: Brain },
       { id: "browser", label: "浏览器", icon: Compass },
     ],
@@ -136,116 +131,6 @@ const archiveProjectName = (workDir: string | null): string => {
   const parts = workDir.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || workDir;
 };
-
-// 网关 config.yaml `mcp_servers:` 块的 wire 形状：app 侧 McpServerConfig
-// （command: string[] / environment）与网关条目（command: string / args /
-// env / env_passthrough，外加合井保存时原样带回的未知标量键）的并集。
-// 只用于 mcpConfig.list/save 的读写边界。
-interface GatewayMcpServerWire {
-  type?: "local" | "remote";
-  command?: string | string[];
-  url?: string;
-  args?: unknown[];
-  environment?: Record<string, string>;
-  env?: Record<string, string>;
-  enabled?: boolean;
-  cwd?: string;
-  timeout?: number;
-  headers?: Record<string, string>;
-  envPassthrough?: boolean;
-  env_passthrough?: boolean;
-  description?: string;
-  exposure?: "codemode" | "deferred" | "direct" | "hidden";
-  toolExposure?: Record<string, string>;
-  [key: string]: unknown;
-}
-
-// mcpConfig.list 的返回值 / mcpConfig.save 的参数在 d.ts 里标的是 app 侧
-// McpServerConfig 记录，但运行时字段是网关 wire 形状（command 可能是字符串、
-// 带 args/env），Rust 端也接受任意 YAML 映射。这两个 wrapper 只做类型边界
-// 收窄，值原样透传。
-// pi 的 exposure / toolExposure：表单（多行文本）与 wire（对象）互转。
-// 每行「工具名或 glob=exposure」；空行与没有 = 的行丢弃。
-const MCP_EXPOSURES = ["codemode", "deferred", "direct", "hidden"] as const;
-type McpExposure = (typeof MCP_EXPOSURES)[number];
-
-function advancedFromWire(entry: object): {
-  description: string;
-  exposure: McpExposure;
-  toolExposureText: string;
-  timeoutText: string;
-} {
-  const e = entry as Record<string, unknown>;
-  const exposure = (MCP_EXPOSURES as readonly string[]).includes(
-    String(e.exposure ?? ""),
-  )
-    ? (e.exposure as McpExposure)
-    : "codemode";
-  const toolExposureText =
-    e.toolExposure && typeof e.toolExposure === "object"
-      ? Object.entries(e.toolExposure as Record<string, unknown>)
-          .map(([k, v]) => `${k}=${v}`)
-          .join("\n")
-      : "";
-  return {
-    description: typeof e.description === "string" ? e.description : "",
-    exposure,
-    toolExposureText,
-    timeoutText: typeof e.timeout === "number" ? String(e.timeout) : "",
-  };
-}
-
-/** 表单 → wire：只写非空项，空值不覆盖旧值（调用方按 merge 处理）。 */
-function advancedToWire(form: McpFormData): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  if (form.description.trim()) out.description = form.description.trim();
-  out.exposure = form.exposure;
-  const toolExposure: Record<string, string> = {};
-  for (const line of form.toolExposureText.split("\n")) {
-    const i = line.indexOf("=");
-    if (i > 0 && line.slice(i + 1).trim())
-      toolExposure[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-  }
-  if (Object.keys(toolExposure).length > 0) out.toolExposure = toolExposure;
-  const timeout = Number(form.timeoutText.trim());
-  if (form.timeoutText.trim() && Number.isFinite(timeout) && timeout > 0)
-    out.timeout = Math.round(timeout);
-  return out;
-}
-
-// 服务器工具数的小标签（只给连上的服务器显示；工具数 = pi 实际拿到的）
-const mcpToolCountLabel = (count: number | undefined) =>
-  typeof count === "number" ? ` · ${count} 工具` : "";
-
-type McpConfigApi = {
-  list: (includeEnv?: boolean) => Promise<{
-    ok: boolean;
-    servers?: Record<string, import("@/stores/helix-types").McpServerConfig>;
-    error?: string;
-  }>;
-  save: (
-    servers: Record<string, import("@/stores/helix-types").McpServerConfig>,
-  ) => Promise<{ ok: boolean; error?: string }>;
-};
-
-const listGatewayMcp = async (
-  api: McpConfigApi,
-): Promise<{ ok: boolean; servers?: Record<string, GatewayMcpServerWire>; error?: string }> => {
-  const r: { ok: boolean; servers?: unknown; error?: string } = await api.list();
-  return {
-    ok: r.ok,
-    servers: r.servers as Record<string, GatewayMcpServerWire> | undefined,
-    error: r.error,
-  };
-};
-
-const saveGatewayMcp = (
-  api: McpConfigApi,
-  servers: Record<string, GatewayMcpServerWire>,
-): Promise<{ ok: boolean; error?: string }> =>
-  api.save(
-    servers as Record<string, import("@/stores/helix-types").McpServerConfig>,
-  );
 
 const formatArchiveDate = (ts: number): string => {
   const d = new Date(ts);
@@ -301,9 +186,6 @@ export function ApiSettings({
     persistToStorage,
     setAvailableModels,
     availableModels,
-    mcpServers,
-    removeMcpServer,
-    toggleMcpServer,
   } = useHelixStore();
 
   const settingsPage = useHelixStore((s) => s.settingsPage);
@@ -547,15 +429,13 @@ export function ApiSettings({
   // 后端白名单里收了 video/audio（pi 现在只认 image），留位不丢数据。
   const [pickedInputImage, setPickedInputImage] = useState(false);
   const [pickedInputVideo, setPickedInputVideo] = useState(false);
-  type ModelTab = "main" | "vision" | "image" | `channel:${string}`;
+  type ModelTab = "main" | "vision" | `channel:${string}`;
   const [modelTab, setModelTab] = useState<ModelTab>("main");
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
 
-  // Vision / Image model config (loaded from config.yaml via Tauri or localStorage)
+  // Vision model config (loaded from config.yaml via Tauri or localStorage)
   const [visionModelName, setVisionModelName] = useState("");
   const [visionHasApiKey, setVisionHasApiKey] = useState(false);
-  const [imageModelName, setImageModelName] = useState("");
-  const [imageHasApiKey, setImageHasApiKey] = useState(false);
 
   useEffect(() => {
     const loadVisionImage = async () => {
@@ -570,22 +450,10 @@ export function ApiSettings({
             }
           }
         } catch { /* empty */ }
-        try {
-          const imageApi = window.electron?.image;
-          if (imageApi?.getConfig) {
-            const r = await imageApi.getConfig();
-            if (r?.ok && r.config) {
-              setImageModelName(r.config.model || "");
-              setImageHasApiKey(!!r.config.apiKey);
-            }
-          }
-        } catch { /* empty */ }
       } else {
         try {
           const vs = localStorage.getItem("helix-vision-model");
           if (vs) { const d = JSON.parse(vs); setVisionModelName(d.model || ""); setVisionHasApiKey(!!d.apiKey); }
-          const is = localStorage.getItem("helix-image-model");
-          if (is) { const d = JSON.parse(is); setImageModelName(d.model || ""); setImageHasApiKey(!!d.apiKey); }
         } catch { /* empty */ }
       }
     };
@@ -725,164 +593,6 @@ export function ApiSettings({
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [showModelDropdown]);
-
-  // MCP state
-  const [editingMcpName, setEditingMcpName] = useState<string | null>(null);
-  const [isAddingMcp, setIsAddingMcp] = useState(false);
-  const [mcpSaving, setMcpSaving] = useState(false);
-  const [mcpSaveState, setMcpSaveState] = useState<null | "ok" | "err">(null);
-  const [mcpSaveErr, setMcpSaveErr] = useState<string | null>(null);
-  const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir);
-  const [defaultMcpCwd, setDefaultMcpCwd] = useState("");
-  useEffect(() => {
-    let alive = true;
-    electronApp
-      .getDataRoot()
-      .then((info) => {
-        if (alive && info?.dataRoot) {
-          setDefaultMcpCwd(`${info.dataRoot.replace(/[\\/]+$/, "")}/sessions`);
-        }
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
-  const resolveDefaultMcpCwd = useCallback(
-    () => selectedWorkDir || defaultMcpCwd || "",
-    [selectedWorkDir, defaultMcpCwd],
-  );
-  const [mcpForm, setMcpForm] = useState<McpFormData>({
-    name: "",
-    type: "local",
-    command: "",
-    url: "",
-    args: "",
-    description: "",
-    exposure: "codemode",
-    toolExposureText: "",
-    timeoutText: "",
-  });
-  const mcpServerNames = Object.keys(mcpServers);
-  const [mcpStatus, setMcpStatus] = useState<Record<string, string>>({});
-  // 同一份状态响应里的附加信息：工具数与连接错误原因。
-  // 单独一份 state，是为了不改 mcpStatus 的两个渲染点（它们只认字符串）。
-  const [mcpStatusDetail, setMcpStatusDetail] = useState<
-    Record<string, { toolCount?: number; error?: string }>
-  >({});
-  // Gateway MCP servers — read-only view of config.yaml `mcp_servers` (loaded
-  // by the gateway at startup; separate from the app-managed list above, which
-  // is persisted locally and sent per-session via session/new).
-  const [gatewayMcp, setGatewayMcp] = useState<
-    Record<string, GatewayMcpServerWire>
-  >({});
-  const [gatewayMcpLoaded, setGatewayMcpLoaded] = useState(false);
-  // Name of a gateway (config.yaml mcp_servers) server being edited — opens
-  // the shared McpEditorForm with its config; null = not editing.
-  const [gatewayEditing, setGatewayEditing] = useState<string | null>(null);
-
-  // MCP status - read the REAL runtime connection state from the backend via
-  // `mcp.servers.status` (session-independent; covers both config.yaml servers
-  // and session-injected servers). Replaces the old tools/list tool-name probe.
-  // （此前这里还订阅 helixSessionId 放在 fetchMcpStatus 依赖里——回调体从未
-  //  读过它，exhaustive-deps 判定为多余依赖后一并移除。）
-  const [mcpStatusAttempt, setMcpStatusAttempt] = useState(0);
-  const fetchMcpStatus = useCallback(async () => {
-    try {
-      const result = (await helixApi()!.send("mcp.servers.status", {})) as
-        | {
-            servers?: Array<{
-              name?: string;
-              state?: string;
-              status?: string;
-              connected?: boolean;
-              toolCount?: number;
-              tools?: unknown;
-              error?: string;
-            }>;
-            timeout?: boolean;
-          }
-        | null;
-      const servers = result?.servers || [];
-      const status: Record<string, string> = {};
-      const detail: Record<string, { toolCount?: number; error?: string }> = {};
-      for (const s of servers) {
-        if (!s?.name) continue;
-        status[s.name] =
-          s.state || s.status || (s.connected ? "connected" : "configured");
-        const count =
-          typeof s.toolCount === "number"
-            ? s.toolCount
-            : Array.isArray(s.tools)
-              ? s.tools.length
-              : undefined;
-        if (typeof count === "number" || (s.error && typeof s.error === "string")) {
-          detail[s.name] = {
-            toolCount: count,
-            error: typeof s.error === "string" && s.error ? s.error : undefined,
-          };
-        }
-      }
-      setMcpStatus(status);
-      setMcpStatusDetail(detail);
-      setMcpStatusAttempt(0); // success resets the retry counter
-    } catch {
-      // Transient failure (WS not ready, RPC timeout): keep last status and
-      // schedule a retry instead of wiping to {} (which shows "检测中" forever).
-      setMcpStatusAttempt((a) => a + 1);
-    }
-  }, []);
-
-  // Run on mount + whenever session id / server list changes.
-  useEffect(() => {
-    fetchMcpStatus();
-  }, [fetchMcpStatus]);
-
-  // Bounded retry with backoff (2s, 4s, 8s, 16s, 32s) after a failed probe.
-  useEffect(() => {
-    if (mcpStatusAttempt === 0) return;
-    if (mcpStatusAttempt > 5) return;
-    const delay = 2000 * Math.pow(2, mcpStatusAttempt - 1);
-    const t = setTimeout(() => {
-      fetchMcpStatus();
-    }, delay);
-    return () => clearTimeout(t);
-  }, [mcpStatusAttempt, fetchMcpStatus]);
-
-  // Gentle polling so status reflects late MCP discovery / reconnects without
-  // needing to reopen the settings page. Session-independent: runs whenever the
-  // gateway is reachable.
-  useEffect(() => {
-    const t = setInterval(() => {
-      fetchMcpStatus();
-    }, 15000);
-    return () => clearInterval(t);
-  }, [fetchMcpStatus]);
-
-  // Load gateway MCP servers from config.yaml (Tauri IPC)
-  const reloadGatewayMcp = useCallback(async () => {
-    if (!isElectron()) {
-      setGatewayMcpLoaded(true);
-      return;
-    }
-    try {
-      const api = window.electron?.mcpConfig;
-      if (!api?.list) {
-        setGatewayMcpLoaded(true);
-        return;
-      }
-      const r = await listGatewayMcp(api);
-      if (r?.ok && r.servers) setGatewayMcp(r.servers || {});
-    } catch {
-      // settings page must not break on IPC failure
-    } finally {
-      setGatewayMcpLoaded(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    reloadGatewayMcp();
-  }, [reloadGatewayMcp]);
 
   // Archive state
   const [archives, setArchives] = useState<
@@ -1065,7 +775,6 @@ export function ApiSettings({
         // which reads providerModels[activeProvider.id] — can't see it, dropping
         // the fetched list to just the single declared model.
         setAvailableModels(models, localConfig.baseUrl);
-        showToast({ type: "success", title: `获取到 ${models.length} 个模型` });
       }
     } catch (error) {
       showToast({
@@ -1383,320 +1092,14 @@ export function ApiSettings({
   // latest `handleSaveApi` (avoids stale-closure issues across re-renders).
   saveApiRef.current = handleSaveApi;
 
-  // ── MCP handlers ─────────────────────────────────────────────────────────
-  const mcpArgText = useCallback((v: unknown) => {
-    if (typeof v === "string") return v;
-    if (v === null || v === undefined) return "";
-    try {
-      return JSON.stringify(v);
-    } catch {
-      return String(v);
-    }
-  }, []);
-
-  const resetMcpForm = useCallback(() => {
-    setMcpForm({
-      name: "",
-      type: "local",
-      command: "",
-      url: "",
-      args: "",
-      description: "",
-      exposure: "codemode",
-      toolExposureText: "",
-      timeoutText: "",
-    });
-  }, []);
-
-  const handleSaveMcp = useCallback(async () => {
-    const name = mcpForm.name.trim();
-    if (!name) {
-      setMcpSaveState("err");
-      setMcpSaveErr("请填写服务器名称");
-      return;
-    }
-    if (mcpForm.type === "local" && !mcpForm.command.trim()) {
-      setMcpSaveState("err");
-      setMcpSaveErr("请填写启动命令");
-      return;
-    }
-    if (mcpForm.type === "remote" && !mcpForm.url.trim()) {
-      setMcpSaveState("err");
-      setMcpSaveErr("请填写 URL");
-      return;
-    }
-    const api = window.electron?.mcpConfig;
-    if (!api?.save) {
-      setMcpSaveState("err");
-      setMcpSaveErr("当前环境不支持写入 mcp.json");
-      return;
-    }
-    setMcpSaving(true);
-    setMcpSaveState(null);
-    setMcpSaveErr(null);
-    const cmdParts = [
-      mcpForm.command.trim(),
-      ...mcpForm.args.trim().split(/\s+/),
-    ].filter(Boolean);
-    const nextCwd =
-      mcpServers[editingMcpName || name]?.cwd || resolveDefaultMcpCwd();
-    const old = mcpServers[editingMcpName || name] || {};
-    const gatewayEntry: GatewayMcpServerWire = {
-      enabled: old.enabled ?? true,
-      ...(mcpForm.type === "remote"
-        ? { url: mcpForm.url.trim() }
-        : { command: cmdParts[0] || "" }),
-      ...(mcpForm.type === "local" && cmdParts.length > 1
-        ? { args: cmdParts.slice(1) }
-        : {}),
-      ...(Object.keys(old.environment || {}).length > 0
-        ? { env: old.environment }
-        : {}),
-      ...(old.envPassthrough ? { env_passthrough: true } : {}),
-      ...(mcpForm.type === "local" && nextCwd ? { cwd: nextCwd } : {}),
-      ...(Object.keys(old.headers || {}).length > 0
-        ? { headers: old.headers }
-        : {}),
-      ...(typeof old.timeout === "number" ? { timeout: old.timeout } : {}),
-      ...advancedToWire(mcpForm),
-    };
-    const servers: Record<string, GatewayMcpServerWire> = { ...gatewayMcp };
-    if (editingMcpName && editingMcpName !== name)
-      delete servers[editingMcpName];
-    servers[name] = gatewayEntry;
-
-    try {
-      const r = await saveGatewayMcp(api, servers);
-      if (!r?.ok) {
-        setMcpSaveState("err");
-        setMcpSaveErr(`保存失败：${r?.error || "未知错误"}`);
-        return;
-      }
-      // 新加的服务器只留在 config.yaml（网关级），不重复放进应用列表。
-      if (editingMcpName && editingMcpName !== name)
-        removeMcpServer(editingMcpName);
-      else if (mcpServers[name]) removeMcpServer(name);
-      await persistToStorage();
-      await reloadGatewayMcp();
-      setMcpSaveState("ok");
-      setTimeout(fetchMcpStatus, 1000);
-    } catch (e) {
-      setMcpSaveState("err");
-      setMcpSaveErr(`保存失败：${(e as Error)?.message || e}`);
-    } finally {
-      setMcpSaving(false);
-    }
-  }, [
-    mcpForm,
-    editingMcpName,
-    mcpServers,
-    gatewayMcp,
-    removeMcpServer,
-    persistToStorage,
-    reloadGatewayMcp,
-    fetchMcpStatus,
-    resolveDefaultMcpCwd,
-  ]);
-
-  const handleEditMcp = useCallback(
-    (name: string) => {
-      const config = mcpServers[name];
-      if (!config) return;
-      setEditingMcpName(name);
-      const cmdParts = Array.isArray(config.command)
-        ? config.command
-        : config.command
-          ? [config.command]
-          : [];
-      setMcpForm({
-        name,
-        type: config.type,
-        command: cmdParts[0] || "",
-        url: config.url || "",
-        args: cmdParts.slice(1).map(mcpArgText).filter(Boolean).join(" "),
-        ...advancedFromWire(config),
-      });
-    },
-    [mcpServers, setEditingMcpName, mcpArgText],
-  );
-
-  const handleDeleteMcp = useCallback(
-    async (name: string) => {
-      removeMcpServer(name);
-      await persistToStorage();
-      showToast({ type: "info", title: `服务器 "${name}" 已删除` });
-    },
-    [removeMcpServer, persistToStorage, showToast],
-  );
-
-  const handleToggleMcp = useCallback(
-    async (name: string) => {
-      toggleMcpServer(name);
-      await persistToStorage();
-    },
-    [toggleMcpServer, persistToStorage],
-  );
-
-  // ── Gateway MCP (config.yaml mcp_servers) edit handlers ────────────────
-  const handleEditGatewayMcp = useCallback(
-    (name: string) => {
-      const cfg = gatewayMcp[name];
-      if (!cfg) return;
-      setGatewayEditing(name);
-      const cmdParts = Array.isArray(cfg.command)
-        ? cfg.command
-        : cfg.command
-          ? [cfg.command]
-          : [];
-      const argsArr = Array.isArray(cfg.args) ? cfg.args : [];
-      setMcpForm({
-        name,
-        type: cfg.url ? "remote" : "local",
-        command: cmdParts[0] || "",
-        url: cfg.url || "",
-        args: [...cmdParts.slice(1), ...argsArr]
-          .map(mcpArgText)
-          .filter(Boolean)
-          .join(" "),
-        ...advancedFromWire(cfg),
-      });
-    },
-    [gatewayMcp, mcpArgText],
-  );
-
-  const handleSaveGatewayMcp = useCallback(async () => {
-    const name = mcpForm.name.trim();
-    if (!name) {
-      setMcpSaveState("err");
-      setMcpSaveErr("请填写服务器名称");
-      return;
-    }
-    if (mcpForm.type === "local" && !mcpForm.command.trim()) {
-      setMcpSaveState("err");
-      setMcpSaveErr("请填写启动命令");
-      return;
-    }
-    if (mcpForm.type === "remote" && !mcpForm.url.trim()) {
-      setMcpSaveState("err");
-      setMcpSaveErr("请填写 URL");
-      return;
-    }
-    const api = window.electron?.mcpConfig;
-    if (!api?.save) {
-      setMcpSaveState("err");
-      setMcpSaveErr("当前环境不支持保存");
-      return;
-    }
-    setMcpSaving(true);
-    setMcpSaveState(null);
-    setMcpSaveErr(null);
-    const cmdParts = [
-      mcpForm.command.trim(),
-      ...mcpForm.args.trim().split(/\s+/),
-    ].filter(Boolean);
-    const oldName = gatewayEditing;
-    const oldCfg = (oldName && gatewayMcp[oldName]) || {};
-
-    // Full-block write: carry over the original cfg so scalar overrides
-    // (enabled/timeout/auth/headers) survive an edit; delete keys the form
-    // cleared. env is NOT sent when untouched — the Rust side then carries
-    // the old env block over, so secrets never get clobbered by a display
-    // round trip (config.yaml env values are hidden from the renderer).
-    const merged: GatewayMcpServerWire = { ...oldCfg };
-    if (mcpForm.type === "remote") {
-      merged.url = mcpForm.url.trim();
-      delete merged.command;
-      delete merged.args;
-    } else {
-      merged.command = cmdParts[0] || "";
-      if (cmdParts.length > 1) merged.args = cmdParts.slice(1);
-      else delete merged.args;
-    }
-    const nextCwd = oldCfg.cwd || resolveDefaultMcpCwd();
-    if (nextCwd) merged.cwd = nextCwd;
-    else delete merged.cwd;
-
-    // 描述 / 暴露方式 / 按工具覆盖 / 超时：表格里空值要 delete 旧值，
-    // 否则清空描述后旧描述还会被写回去（merged 的基底是上一份配置）。
-    for (const [k, v] of Object.entries(advancedToWire(mcpForm))) {
-      merged[k] = v;
-    }
-    if (!mcpForm.description.trim()) delete merged.description;
-    if (!mcpForm.toolExposureText.trim()) delete merged.toolExposure;
-    if (!mcpForm.timeoutText.trim()) delete merged.timeout;
-
-    const servers: Record<string, GatewayMcpServerWire> = { ...gatewayMcp };
-    if (oldName && oldName !== name) delete servers[oldName];
-    servers[name] = merged;
-
-    try {
-      const r = await saveGatewayMcp(api, servers);
-      if (!r?.ok) {
-        setMcpSaveState("err");
-        setMcpSaveErr(`保存失败：${r?.error || "未知错误"}`);
-        return;
-      }
-      setMcpSaveState("ok");
-      await reloadGatewayMcp();
-      setTimeout(fetchMcpStatus, 1000);
-    } catch (e) {
-      setMcpSaveState("err");
-      setMcpSaveErr(`保存失败：${(e as Error)?.message || e}`);
-    } finally {
-      setMcpSaving(false);
-    }
-  }, [
-    mcpForm,
-    gatewayEditing,
-    gatewayMcp,
-    reloadGatewayMcp,
-    fetchMcpStatus,
-    resolveDefaultMcpCwd,
-  ]);
-
-  const handleDeleteGatewayMcp = useCallback(
-    async (name: string) => {
-      const api = window.electron?.mcpConfig;
-      if (!api?.save) {
-        showToast({ type: "error", title: "当前环境不支持保存" });
-        return;
-      }
-      const servers: Record<string, GatewayMcpServerWire> = { ...gatewayMcp };
-      delete servers[name];
-      try {
-        const r = await saveGatewayMcp(api, servers);
-        if (!r?.ok) {
-          showToast({
-            type: "error",
-            title: `删除失败：${r?.error || "未知错误"}`,
-          });
-          return;
-        }
-        await reloadGatewayMcp();
-        setTimeout(fetchMcpStatus, 1000);
-        showToast({ type: "info", title: `服务器 "${name}" 已删除` });
-      } catch (e) {
-        showToast({
-          type: "error",
-          title: `删除失败：${(e as Error)?.message || e}`,
-        });
-      }
-    },
-    [gatewayMcp, reloadGatewayMcp, fetchMcpStatus, showToast],
-  );
-
-  const handleMcpFormChange = useCallback((patch: Partial<McpFormData>) => {
-    setMcpForm((prev) => ({ ...prev, ...patch }));
-  }, []);
 
   const handleDeleteArchive = useCallback(
     async (id: string) => {
       await persistence.deleteSession(id);
       useHelixStore.getState().clearSessionSidebarState(id);
-      showToast({ type: "success", title: "已删除" });
       await loadArchives();
     },
-    [showToast, loadArchives],
+    [loadArchives],
   );
 
   const handleDeleteAllArchives = useCallback(async () => {
@@ -1846,24 +1249,6 @@ export function ApiSettings({
                       {visionModelName || "未配置"}
                     </span>
                     {visionHasApiKey && (
-                      <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
-                    )}
-                  </button>
-                  <button
-                    onClick={() => setModelTab("image")}
-                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors ${
-                      modelTab === "image"
-                        ? "bg-primary/10 text-primary"
-                        : "text-foreground hover:bg-muted/50"
-                    }`}
-                  >
-                    <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] px-1.5 py-0.5 rounded-full font-medium bg-muted/80 text-muted-foreground">
-                      生图
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-[length:var(--helix-transcript-size)] font-medium">
-                      {imageModelName || "未配置"}
-                    </span>
-                    {imageHasApiKey && (
                       <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
                     )}
                   </button>
@@ -2495,8 +1880,6 @@ export function ApiSettings({
                   </>
                 ) : modelTab === "vision" ? (
                   <VisionModelSettings />
-                ) : modelTab === "image" ? (
-                  <ImageModelSettings />
                 ) : (
                   <ChannelModelSettings
                     channelId={modelTab.slice("channel:".length)}
@@ -2515,188 +1898,8 @@ export function ApiSettings({
           </div>
         );
 
-      case "mcp":
-        return (
-          <div className="space-y-6">
-            <PageHeader
-              action={<>
-                {!isAddingMcp && !editingMcpName && !gatewayEditing ? (
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setIsAddingMcp(true);
-                      resetMcpForm();
-                    }}
-                  >
-                    添加服务器
-                  </Button>
-                ) : (
-                  <button
-                    onClick={() => {
-                      setIsAddingMcp(false);
-                      setEditingMcpName(null);
-                      setGatewayEditing(null);
-                      resetMcpForm();
-                    }}
-                    className="text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
-                    data-tip="关闭"
-                  >
-                    关闭
-                  </button>
-                )}
-              </>}>
-              MCP
-            </PageHeader>
-
-            {/* Gateway-loaded MCP servers (config.yaml mcp_servers) — editable */}
-            {gatewayMcpLoaded &&
-              !isAddingMcp &&
-              !editingMcpName &&
-              !gatewayEditing && (
-                <section className="space-y-2">
-                  {Object.keys(gatewayMcp).length === 0 ? null : (
-                    <div className="max-w-3xl space-y-2">
-                      {Object.entries(gatewayMcp).map(([name, cfg]) => {
-                        const st = mcpStatus[name];
-                        const cmd = [cfg?.command, ...(cfg?.args || [])]
-                          .filter(Boolean)
-                          .join(" ");
-                        return (
-                          <div
-                            key={name}
-                            className="group flex items-center gap-3 rounded-xl border border-border/40 bg-card/60 px-4 py-3 transition-colors hover:border-border/70"
-                          >
-                            <div className="relative shrink-0">
-                              <div
-                                title={mcpStatusDetail[name]?.error || undefined}
-                                className={`w-2.5 h-2.5 rounded-full ${cfg?.enabled === false ? "bg-gray-300" : st === "connected" ? "bg-green-500" : st === "failed" ? "bg-red-400" : "bg-amber-400"}`}
-                              />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
-                                  {name}
-                                </span>
-                                <span
-                                  className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full font-medium ${cfg?.url ? "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300" : "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"}`}
-                                >
-                                  {cfg?.url ? "远程" : "本地"}
-                                </span>
-                              </div>
-                              <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 font-mono truncate mt-0.5">
-                                {mcpToolCountLabel(mcpStatusDetail[name]?.toolCount)}{cfg?.url || cmd || "(环境变量式配置)"}
-                              </p>
-                            </div>
-                            <button
-                              onClick={() => handleEditGatewayMcp(name)}
-                              className="px-1.5 py-1 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 hover:text-foreground hover:bg-accent opacity-0 group-hover:opacity-100 transition-all shrink-0"
-                            >
-                              编辑
-                            </button>
-                            <button
-                              onClick={() => handleDeleteGatewayMcp(name)}
-                              className="px-1.5 py-1 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950 opacity-0 group-hover:opacity-100 transition-all shrink-0"
-                            >
-                              删除
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
-              )}
-
-            {!isAddingMcp && !editingMcpName && !gatewayEditing ? (
-              <>
-                {/* Server list */}
-                <div className="max-w-3xl space-y-2">
-                  {mcpServerNames.map((name) => {
-                    const config = mcpServers[name];
-                    const st = mcpStatus[name];
-                    return (
-                      <div
-                        key={name}
-                        className="group flex items-center gap-3 rounded-xl border border-border/40 bg-card/60 px-4 py-3 transition-colors hover:border-border/70"
-                      >
-                        <div className="relative shrink-0">
-                          <div
-                            title={mcpStatusDetail[name]?.error || undefined}
-                            className={`w-2.5 h-2.5 rounded-full ${config.enabled === false ? "bg-gray-300" : st === "connected" ? "bg-green-500" : st === "failed" ? "bg-red-400" : "bg-amber-400"}`}
-                          />
-                          {config.enabled !== false && st === "connected" && (
-                            <span className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-green-500 animate-ping opacity-30" />
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
-                              {name}
-                            </span>
-                            <span
-                              className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full font-medium ${config.type === "local" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300" : "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300"}`}
-                            >
-                              {config.type === "local" ? "本地" : "远程"}
-                            </span>
-                          </div>
-                          <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 font-mono truncate mt-0.5">
-                            {mcpToolCountLabel(mcpStatusDetail[name]?.toolCount)}{config.type === "local"
-                              ? config.command?.join(" ")
-                              : config.url}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <Toggle
-                            enabled={config.enabled !== false}
-                            onToggle={() => handleToggleMcp(name)}
-                          />
-                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
-                            <button
-                              onClick={() => handleEditMcp(name)}
-                              className="px-1 py-1 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 hover:text-foreground hover:bg-accent transition-colors"
-                            >
-                              编辑
-                            </button>
-                            <button
-                              onClick={() => handleDeleteMcp(name)}
-                              className="px-1 py-1 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950 transition-colors"
-                            >
-                              删除
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            ) : (
-              /* Editor — centered card, similar to model add */
-              <div className="flex justify-center py-4">
-                <div className="w-full max-w-2xl">
-                  <McpEditorForm
-                    form={mcpForm}
-                    onChange={handleMcpFormChange}
-                    saving={mcpSaving}
-                    saveState={mcpSaveState}
-                    saveError={mcpSaveErr}
-                    onSave={
-                      gatewayEditing ? handleSaveGatewayMcp : handleSaveMcp
-                    }
-                    onCancel={() => {
-                      setIsAddingMcp(false);
-                      setEditingMcpName(null);
-                      setGatewayEditing(null);
-                      resetMcpForm();
-                      setMcpSaveState(null);
-                      setMcpSaveErr(null);
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-        );
+      case "plugins":
+        return <SkillPanel />;
 
       case "archive": {
         const projectOptions = [
@@ -2751,13 +1954,7 @@ export function ApiSettings({
               归档
             </PageHeader>
 
-            {archives.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-12 text-center">
-                <p className="ui-text font-medium text-foreground/60">
-                  暂无归档记录
-                </p>
-              </div>
-            ) : (
+            {(
               <>
                 {/* 搜索（只匹配任务名）+ 按项目筛选 */}
                 <div className="flex items-center gap-3">
@@ -2792,13 +1989,7 @@ export function ApiSettings({
                   />
                 </div>
 
-                {groups.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-center">
-                    <p className="ui-text font-medium text-foreground/60">
-                      没有匹配的归档任务
-                    </p>
-                  </div>
-                ) : (
+                {(
                   <div className="space-y-8">
                     {groups.map((g) => (
                       <section key={g.key}>
@@ -2915,9 +2106,6 @@ export function ApiSettings({
             <PageHeader>帮助</PageHeader>
           </div>
         );
-
-      case "agents":
-        return <AgentsSettings />;
 
       case "memory":
         return <MemorySettingsPanel />;

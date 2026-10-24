@@ -27,7 +27,6 @@
 //! SESSION_FILES cache). The reaped instance keeps its map entry (with its
 //! cwd + session-file mapping) so the respawn lands in the same project.
 
-use base64::Engine;
 use sha2::{Digest, Sha256};
 use crate::gateway::emit_helix_event;
 use crate::state::AppState;
@@ -152,6 +151,17 @@ static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 /// via switch_session(file).
 static SESSION_FILES: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// 网关存活期间、确认过「sid 的 jsonl 曾经真实存在于磁盘」的 sid 集合。pi 的
+/// jsonl 是**惰性创建**的：直到第一条 user/assistant 消息 persist 才落盘
+///（bundle 的 `_persist` 里有 `_hasConversation()` 门槛），所以新会话的早期
+/// prompt 在文件不存在时完全合法。而文件一旦落盘过又被人为删除，pi 对活实例
+/// 的后续写入走 `appendFileSync`，它会在原路径旁路重建出只剩新内容的 jsonl =
+/// 用户看到的「静默新建会话文件」。因此：prompt 路由前如果磁盘上还能找到该
+/// sid 的文件 → 记入本集合；找不到且已在集合（= 曾经存在、现在没了）→ 按
+/// session_not_found 拒绝，前端据此把会话锁死。从不误伤全新会话（文件从未
+/// 出现过 → 不在集合 → 放行）。
+static FILE_SEEN_SIDS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 /// Live instances: key = pi session id ("" for the main instance, or a
 /// "pending-N" placeholder between spawn and new_session).
 static INSTANCES: std::sync::LazyLock<Mutex<HashMap<String, Arc<PiInstance>>>> =
@@ -857,6 +867,13 @@ impl PiInstance {
                         .lock()
                         .unwrap()
                         .insert(session_id.to_string(), session_file.to_string());
+                    // 远程实例的 sessionFile 是**远端**机器上的绝对路径，本机
+                    // restore 的缓存/扫描都看不到它。登记一份到磁盘：网关重启后
+                    // 这个 sid 的 resume 才能直接 switch_session 回原会话，而不是
+                    // 落到前端的「本地历史重建」（新 sid + 系统注入回放 = 事实分叉）。
+                    if self.remote.load(Ordering::SeqCst) {
+                        remember_remote_session_file(session_id, session_file);
+                    }
                 }
             }
         }
@@ -2202,6 +2219,7 @@ fn current_model_supports_images(instance: &PiInstance) -> bool {
 /// 返回空 Vec = 全部失败。
 fn save_pasted_images(images: &[Value]) -> Vec<String> {
     use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
     let dir = crate::paths::pi_agent_dir().join("paste-images");
     if std::fs::create_dir_all(&dir).is_err() {
         return Vec::new();
@@ -2447,122 +2465,6 @@ async fn spawn_history_seed_turn(
         instance.end_debt_turn();
     }
     seed.len()
-}
-
-/// `image/generate` — 前端 `/image` 斜杠命令走这里。读 config.yaml 的 `image:`
-/// 块（z.ai / CogView-3-Flash 等 OpenAI 兼容生图端点），调 images/generations
-/// 拿图片 URL，再下载成 data URL 返回给前端（前端期望 {success, image_data,
-/// available, error} 形状）。与 vision.rs 同源：同一份 config，同一套 key。
-fn image_generate(params: &Value) -> Result<Value, String> {
-    let yaml = std::fs::read_to_string(crate::config::config_yaml_path()).unwrap_or_default();
-    let block = crate::config::read_yaml_block(&yaml, "image");
-    let get = |k: &str| -> String {
-        block.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
-    };
-    let base_url = get("baseUrl");
-    let api_key = get("apiKey");
-    let model = get("model");
-    if base_url.is_empty() || model.is_empty() {
-        return Ok(json!({
-            "ok": true,
-            "available": false,
-            "error": "生图模型未配置（请在设置里填写 image baseUrl/model/apiKey）"
-        }));
-    }
-
-    let prompt = params
-        .get("prompt")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    if prompt.is_empty() {
-        return Ok(json!({ "ok": true, "available": false, "error": "缺少 prompt" }));
-    }
-
-    // aspect_ratio (square/portrait/landscape …) → OpenAI 尺寸。默认 square。
-    let ratio = params
-        .get("aspect_ratio")
-        .and_then(Value::as_str)
-        .unwrap_or("square");
-    let size = match ratio {
-        "portrait" => "720x1280",
-        "landscape" | "wide" => "1280x720",
-        _ => "1024x1024",
-    };
-
-    let endpoint = format!("{}/images/generations", base_url.trim_end_matches('/'));
-    let body = json!({
-        "model": model,
-        "prompt": prompt,
-        "size": size,
-        "n": 1
-    });
-
-    // 用 reqwest blocking 客户端：避免把整条 async send() 链改成 async/await，
-    // 且 reqwest blocking 跑在独立线程池上，不会阻塞 tokio 运行时。
-    let client = crate::proxy::proxy_aware_blocking_client()
-        .map_err(|e| format!("生图请求准备失败: {e}"))?;
-    let resp = client
-        .post(&endpoint)
-        .json(&body)
-        .bearer_auth(api_key.as_str())
-        .send()
-        .map_err(|e| format!("生图请求失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("生图 API 报错: {e}"))?;
-
-    let data: Value = resp.json().map_err(|e| format!("生图响应解析失败: {e}"))?;
-    let url = data["data"][0]["url"]
-        .as_str()
-        .filter(|u| !u.is_empty());
-    let url = match url {
-        Some(u) => u.to_string(),
-        None => {
-            // API 直接返回 base64 就省一次下载。
-            if let Some(b64) = data["data"][0]["b64_json"].as_str() {
-                if !b64.is_empty() {
-                    return Ok(json!({
-                        "ok": true,
-                        "available": true,
-                        "success": true,
-                        "image_data": format!("data:image/png;base64,{b64}")
-                    }));
-                }
-            }
-            return Ok(json!({
-                "ok": true,
-                "available": true,
-                "success": false,
-                "error": "生图 API 未返回图片",
-                "raw": data
-            }));
-        }
-    };
-
-    // 远程 URL → 下载成 data URL（前端只认 dataUrl，不接受裸 http 链接）。
-    let resp2 = client
-        .get(&url)
-        .send()
-        .map_err(|e| format!("图片下载失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("图片下载报错: {e}"))?;
-    let mime = resp2
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/png")
-        .split(';')
-        .next()
-        .unwrap_or("image/png")
-        .to_string();
-    let bytes = resp2.bytes().map_err(|e| format!("读取图片字节失败: {e}"))?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Ok(json!({
-        "ok": true,
-        "available": true,
-        "success": true,
-        "image_data": format!("data:{mime};base64,{b64}")
-    }))
 }
 
 /// Top-level RPC dispatch (Tauri `helix_send`). Routes session-scoped calls
@@ -2856,6 +2758,26 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             });
             Ok(json!({ "prepared": true }))
         }
+        "remote/probe" => {
+            // 启动路径的远程探活：config.yaml 配了 `pi.remote_rpc` 才算「远程
+            // 模式配过」；2s TCP 探一次本地隧道口。**不 spawn、不碰凭证、不读
+            // 会话**——前端据此决定「这个远程对话要不要恢复」：连不上就不恢复
+            // （不 set_mode、不 resume、不干等），连得上才走正常恢复链。
+            //
+            // 只证明「隧道本地监听在」，不证明远端 pi 活着（那要一次 RPC 往返，
+            // 启动路径等不起）。真连上但远端已死的情况，随后的 switch_session
+            // 会快速 EOF 报错兜底，不会挂住。
+            let Some(endpoint) = remote_rpc_endpoint() else {
+                return Ok(json!({ "configured": false, "reachable": false }));
+            };
+            if remote_marked_down() {
+                return Ok(
+                    json!({ "configured": true, "reachable": false, "cooling": true }),
+                );
+            }
+            let reachable = remote_endpoint_reachable(&endpoint);
+            Ok(json!({ "configured": true, "reachable": reachable, "endpoint": endpoint }))
+        }
         "session/resume" => {
             // Resume = restore THIS session, by its SID. Exactly one of:
             //   live / restored            → Ok(state)
@@ -2897,6 +2819,25 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 "session/resume OK sid={session_id} elapsed_ms={}",
                 now_ms() - resume_started
             ));
+            // 实例**活着**也不等于会话还在磁盘上：jsonl 可能被删（清理/人工删除）。
+            // 此时照常回 Ok 的话，前端会沿用这个 sid 继续发 prompt，pi 在内存里
+            // 续写、把文件在原路径旁路重建出来（同 sid 的新 jsonl、内容只剩新轮
+            // 次）——用户看到的就是"静默新建了会话文件"。语义对齐 restore 的
+            // 落地校验（4223 行注释）：文件不在（本机扫描 + 远端登记都没有）→
+            // 按文件丢失处理，让前端走锁死阶梯。这层是恢复阶梯 ①/② 验证的
+            // 权威兜底。
+            if remote_session_file(&session_id).is_none()
+                && remote_session_dir(&session_id).is_none()
+                && find_session_file(&session_id).is_none()
+            {
+                log_spawn_diag(&format!(
+                    "session/resume FAILED sid={session_id} kind=session_not_found: live instance but jsonl gone"
+                ));
+                return Ok(json!({
+                    "error": format!("no session file for {session_id}"),
+                    "error_kind": "session_not_found",
+                }));
+            }
             // Restore-time context read for the frontend's context ring:
             // session/new's seed-history replay can re-shape the active
             // branch, so estimate AFTER the switch has landed. `context_max`
@@ -3071,6 +3012,19 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 "context_percent": resumed_context_percent,
                 "categories": categories,
             }))
+        }
+        "session/file_exists" => {
+            // 轻量存在性检查：SID 的持久化 jsonl 是否还在磁盘上。恢复阶梯的
+            // ①「现存 sid 直接沿用（不付 resume 代价）」用它在**不 spawn 实例**
+            // 的前提下验证凭据仍然有效——pi 对缺失的 sessionPath 不报错而是
+            // 就地 newSession 铸新 sid（SessionManager._setSessionFile），直接
+            // 发 prompt 会静默开新会话文件。文件不在就回 false 让前端锁死。
+            let sid = params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or("session/file_exists is missing session_id")?;
+            Ok(json!({ "ok": find_session_file(sid).is_some() }))
         }
         "session/latest_for_cwd" => {
             // Recover the newest on-disk pi session file for a conversation's
@@ -3322,6 +3276,11 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 if let Some(sid) = sid {
+                    // 远程实例同上：压缩不换文件，但这个（可能更新的）远端路径要
+                    // 重新登记，供网关重启后的远程 resume 使用。
+                    if instance.remote.load(Ordering::SeqCst) {
+                        remember_remote_session_file(&sid, &file);
+                    }
                     SESSION_FILES.lock().unwrap().insert(sid, file);
                 }
             }
@@ -3415,6 +3374,34 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .unwrap()
                 .clone()
                 .unwrap_or_default();
+
+            // 路由前的落盘校验（「找不到就不准聊天」的实盘兜底）：session/resume
+            // 只在恢复时验证一次，之后 jsonl 完全可能被人为删除——而 pi 对活实例
+            // 的下一笔写入走 appendFileSync，会把文件在原路径**旁路重建**出来
+            // （只剩新内容、没有 session 头），用户看到的就是「静默新建了会话
+            // 文件」。所以每次 prompt 前都查：文件在 → 记入 FILE_SEEN_SIDS 放行；
+            // 文件不在但它曾经存在（在 FILE_SEEN_SIDS 里）→ 按 session_not_found
+            // 拒绝，前端 classifyResumeError 会把会话锁死。全新会话的文件本来
+            // 就还没落盘（pi 惰性创建）→ 不在集合 → 放行，不误伤。远端会话的
+            // jsonl 在远端机器上，本机查不到，直接放行。
+            if !session_id.is_empty() && !instance.remote.load(Ordering::SeqCst) {
+                let mut seen = FILE_SEEN_SIDS.lock().unwrap();
+                let found = match SESSION_FILES.lock().unwrap().get(&session_id).cloned() {
+                    Some(file_path) => std::path::Path::new(&file_path).exists(),
+                    None => false,
+                } || remote_session_file(&session_id).is_some()
+                    || remote_session_dir(&session_id).is_some()
+                    || find_session_file(&session_id).is_some();
+                if found {
+                    seen.insert(session_id.clone());
+                } else if seen.contains(&session_id) {
+                    drop(seen);
+                    log_spawn_diag(&format!(
+                        "session/prompt REJECTED sid={session_id}: jsonl gone (was seen earlier)"
+                    ));
+                    return Err(format!("no session file for {session_id}"));
+                }
+            }
 
             // 粘贴图片的分流（替代旧的无条件自动转述；详见上方 helper 注释）。
             let message = if images.is_empty() {
@@ -3540,6 +3527,29 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
                 *instance.turn_waiter.lock().unwrap() = None;
                 instance.sync_streaming_flag();
                 return Err(result.unwrap_err());
+            }
+
+            // ── 扩展命令回合（/connect、/plan、/context 之类）───────��────────
+            // pi 对「斜杠命令」不启动 agent 回合：prompt 直接执行扩展命令本身，
+            // 响应里 disposition="handled"，之后**不会**再有 agent_settled。
+            // 旧代码一律等 turn_waiter，于是这类回合必然干等到 PROMPT_TIMEOUT、
+            // 再被看门狗判成「模型响应流中断（3 分钟无任何输出）」——用户在
+            // Helix 里看到的就是「输入 /connect 后一直转圈，最后报错」。
+            // handled 就是这一轮的终局：命令自己的输出走 notify/toast。
+            let disposition = result
+                .as_ref()
+                .ok()
+                .and_then(|data| data.get("disposition"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if disposition == "handled" {
+                *instance.turn_waiter.lock().unwrap() = None;
+                instance.sync_streaming_flag();
+                return Ok(json!({
+                    "session_id": session_id,
+                    "state": "complete",
+                    "turn": { "disposition": "handled" },
+                }));
             }
 
             // Wait for the turn to fully settle (streaming continues as
@@ -3956,7 +3966,6 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
             };
             instance.request(method, params, timeout).await
         }
-        "image/generate" => image_generate(&params),
         _ => Err(format!("pi adapter does not implement {method}")),
     }
 }
@@ -4157,33 +4166,52 @@ fn restore_session_instance(
     // (if any) keeps its stored cwd, so the respawn lands in the same project.
     // Cached paths are validated — the file may have been deleted since the
     // index was built (session cleanup / pi CLI housekeeping).
-    let session_file = match SESSION_FILES
-        .lock()
-        .unwrap()
-        .get(session_id)
-        .filter(|p| std::path::Path::new(p).exists())
-        .cloned()
-        .or_else(|| find_session_file(session_id))
+    //
+    // 远程会话的 jsonl 在**远端**机器上：本机缓存（进程重启后必空）与磁盘扫描
+    // （只扫 `~/.pi/agent/sessions`）都看不到它。实例存活时
+    // `stamp_session_from_state` 把 get_state 报来的远端路径登记进了
+    // REMOTE_SESSION_FILES —— 有登记就直接拿它当 switch_session 的
+    // sessionPath：remote-bridge 是纯透传，远端 pi 自己读那个文件，于是真·
+    // 续接原会话（不分叉、不注入、上下文完整）。没登记（本修复上线前创建的
+    // 会话）才走本机逻辑，最终按「本机无此会话文件」上抛，由前端走重建阶梯
+    // —— 不会比现在更坏。
+    let remote_dir = remote_session_dir(session_id);
+    let session_file = if let Some(file) =
+        remote_session_file(session_id).filter(|_| remote_dir.is_some())
     {
-        Some(f) => {
-            log_spawn_diag(&format!(
-                "restore: sid={session_id} file={f}"
-            ));
-            f
-        }
-        None => {
-            // 远程会话的 jsonl 在**远端**机器的 sessions 目录里，本机扫不到 ——
-            // 扫不到不等于对话不存在。这里仍按「本机无此会话文件」上抛，让前端走
-            // 它已有的 seedHistory 重建阶梯（session/new 带 messages，会重新登记
-            // remote_cwd，于是重建后依旧跑在远端）。
-            log_spawn_diag(&format!(
-                "restore FAILED sid={session_id}: no session file (cache miss + scan miss){}",
-                match remote_session_dir(session_id) {
-                    Some(d) => format!(" — 这是远程会话，jsonl 在远端 {d}"),
-                    None => String::new(),
-                }
-            ));
-            return Err(format!("no session file for {session_id}"));
+        log_spawn_diag(&format!(
+            "restore: sid={session_id} 远程会话，远端 jsonl={file}"
+        ));
+        file
+    } else {
+        match SESSION_FILES
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .filter(|p| std::path::Path::new(p).exists())
+            .cloned()
+            .or_else(|| find_session_file(session_id))
+        {
+            Some(f) => {
+                log_spawn_diag(&format!(
+                    "restore: sid={session_id} file={f}"
+                ));
+                f
+            }
+            None => {
+                // 远程会话的 jsonl 在**远端**机器的 sessions 目录里，本机扫不到 ——
+                // 扫不到不等于对话不存在。这里仍按「本机无此会话文件」上抛，让前端走
+                // 它已有的 seedHistory 重建阶梯（session/new 带 messages，会重新登记
+                // remote_cwd，于是重建后依旧跑在远端）。
+                log_spawn_diag(&format!(
+                    "restore FAILED sid={session_id}: no session file (cache miss + scan miss){}",
+                    match remote_session_dir(session_id) {
+                        Some(d) => format!(" — 这是远程会话，jsonl 在远端 {d}"),
+                        None => String::new(),
+                    }
+                ));
+                return Err(format!("no session file for {session_id}"));
+            }
         }
     };
     // The conversation's real project dir comes from the jsonl header — the
@@ -4191,12 +4219,24 @@ fn restore_session_instance(
     // '-'), so it can't be recovered from the directory alone. Feeding it to
     // spawn_instance also fixes a fresh-start respawn landing in the global
     // work dir instead of the conversation's own project.
-    let session_cwd = read_session_cwd(&session_file);
+    // 远程会话不读本机 jsonl 头（读不到）——项目目录来自 REMOTE_SESSIONS 登记表
+    // （session/new 时写下的 remote_cwd）。
+    let is_remote_session = remote_dir.is_some();
+    let session_cwd = if !is_remote_session {
+        read_session_cwd(&session_file)
+    } else {
+        None
+    };
     // Claim a warm spare in the same project — skips pi's 10s+ cold start
     // (process spawn + extension init + handshake) on resume. Only when the
     // session's dir is known: an unknown dir must not claim an arbitrary
     // spare, which would run the conversation in the wrong project.
-    let instance = if let Some(cwd) = session_cwd.as_deref() {
+    let instance = if let Some(remote) = remote_dir {
+        // 远程：按登记的远端目录重连隧道 spawn。不能认领本地 warm spare（池子里
+        // 清一色本地子进程），也不走本机 cwd 兜底（那会把远程会话拉到你本机某个
+        // 目录去跑）。
+        spawn_instance(session_id.to_string(), Some(remote), true, state)?
+    } else if let Some(cwd) = session_cwd.as_deref() {
         match take_warm_spare(Some(cwd)) {
             Some(spare) => {
                 // Claimed — rearm a replacement for the next resume.
@@ -4252,6 +4292,16 @@ fn restore_session_instance(
             log_spawn_diag(&format!(
                 "restore FAILED sid={session_id} switch_session: {e}"
             ));
+            // 这个实例没有落到目标会话上，绝不能留在 INSTANCES 里冒充就绪
+            // （initialized=true + 预置的 current_session 会让快路径直接返回它，
+            // 之后的 prompt 全发进一个错的会话）。杀掉，下次走完整 restore。
+            instance.kill();
+            // 远端 jsonl 可能已被对端清掉（会话清理 / 换机器）：这类「文件没了」
+            // 归一成 no session file，前端才会判 session_not_found 走重建阶梯，
+            // 而不是卡在可重试的 restore_failed 反复失败。
+            if is_remote_session && looks_like_missing_file(&e) {
+                return Err(format!("no session file for {session_id}"));
+            }
             return Err(e);
         }
     };
@@ -4259,10 +4309,27 @@ fn restore_session_instance(
         log_spawn_diag(&format!(
             "restore FAILED sid={session_id}: pi declined the session switch"
         ));
+        instance.kill();
         return Err("pi declined the session switch".into());
     }
     // get_state + stamp (session_state is async-only; inline the sync pair).
     let state_data = instance.request_sync("get_state", Value::Null, RPC_TIMEOUT)?;
+    // 落地身份校验：pi 对**不存在**的 sessionPath 不报错，而是就地 newSession
+    // 铸一个随机新 sid（SessionManager._setSessionFile 的 else 分支）。远端路径
+    // 过期（对端清理过会话）就会踩到：不检查的话 resume 会"成功"返回一个空会话，
+    // 用户对着失忆的模型继续聊。sid 不一致 = 没落到目标会话上，按「会话文件没了」
+    // 上抛，让前端走重建阶梯（本地历史还在，不会丢内容）。
+    let landed_sid = state_data
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if landed_sid != session_id {
+        log_spawn_diag(&format!(
+            "restore FAILED sid={session_id}: switch landed on {landed_sid:?}（会话文件缺失或已失效）"
+        ));
+        instance.kill();
+        return Err(format!("no session file for {session_id}"));
+    }
     instance.stamp_session_from_state(Some(&state_data));
     // Free-tier upstreams (tokenrouter glm-5.3-free) silently DROP requests
     // whose restored context exceeds the model window: no error, no stream,
@@ -7882,6 +7949,110 @@ fn remote_session_dir(session_id: &str) -> Option<String> {
         return None;
     }
     REMOTE_SESSIONS.lock().unwrap().get(session_id).cloned()
+}
+
+/// 本地隧道口探活（`remote/probe` 用）：2s 内 TCP 连上就算可达。
+/// 只证明「隧道本地监听在」，不证明远端 pi 活着——后者要一次 RPC 往返，启动
+/// 路径等不起。连上之后真出事，随后的 switch_session 会快速报错兜底。
+fn remote_endpoint_reachable(endpoint: &str) -> bool {
+    use std::net::TcpStream;
+    let Ok(mut addrs) = endpoint.to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok()
+}
+
+/// 会话 id → 该会话的 jsonl 在**远端**机器上的绝对路径。
+///
+/// 为什么必须落盘：`restore_session_instance` 只会找**本机**的会话文件
+/// （SESSION_FILES 缓存 + `find_session_file` 扫描 `~/.pi/agent/sessions`），
+/// 远程会话的 jsonl 在远端机器上，本机永远扫不到 —— 远程 sid 的 resume 只能
+/// 失败，前端退到「本地历史重建」阶梯：新 sid + 截断回放 + 系统注入块，原会话
+/// 被分叉遗弃。实例活着时 `stamp_session_from_state` 能从 get_state 拿到这个
+/// 路径（pi 报的是它自己那台机器上的绝对路径），但进程重启后内存表全丢，所以在
+/// 这里登记一份到磁盘，让远程 resume 直接 switch_session 回原会话。
+///
+/// 与 `REMOTE_SESSIONS`（sid → 远端 cwd）分开存：那张表回答「是不是远程、在哪个
+/// 目录」，这张表回答「jsonl 具体在哪」。没有路径登记的旧会话保持原行为（resume
+/// 失败 → 前端重建），不会比现在更坏。
+static REMOTE_SESSION_FILES: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new({
+        let mut map = HashMap::new();
+        if let Some(path) = remote_session_files_path() {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                if let Ok(obj) = serde_json::from_str::<Value>(&raw) {
+                    if let Some(m) = obj.as_object() {
+                        for (k, v) in m {
+                            if let Some(s) = v.as_str() {
+                                if !k.is_empty() && !s.is_empty() {
+                                    map.insert(k.clone(), s.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        map
+    }));
+
+fn remote_session_files_path() -> Option<PathBuf> {
+    Some(crate::state::user_data_dir()?.join("remote-session-files.json"))
+}
+
+fn persist_remote_session_files() {
+    let Some(path) = remote_session_files_path() else {
+        return;
+    };
+    let snapshot: Value = {
+        let map = REMOTE_SESSION_FILES.lock().unwrap();
+        Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect(),
+        )
+    };
+    let _ = std::fs::write(path, snapshot.to_string());
+}
+
+/// 记下「这个 sid 的 jsonl 在远端这个路径」。仅远程实例的路径登记调用。
+fn remember_remote_session_file(session_id: &str, file: &str) {
+    if session_id.is_empty() || file.is_empty() {
+        return;
+    }
+    {
+        let mut map = REMOTE_SESSION_FILES.lock().unwrap();
+        if map.get(session_id).map(String::as_str) == Some(file) {
+            return;
+        }
+        map.insert(session_id.to_string(), file.to_string());
+    }
+    persist_remote_session_files();
+}
+
+/// 这个 sid 登记过的远端 jsonl 路径（没登记过就返回 None）。
+fn remote_session_file(session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+    REMOTE_SESSION_FILES.lock().unwrap().get(session_id).cloned()
+}
+
+/// switch_session 的报错是不是「文件没了」。远端 jsonl 可能被对端清掉（会话
+/// 清理 / 换机器），这种永久失败要归一成 `no session file`
+/// （session_not_found），前端才会走重建阶梯，而不是卡在可重试的
+/// restore_failed 反复失败。
+fn looks_like_missing_file(err: &str) -> bool {
+    let low = err.to_ascii_lowercase();
+    low.contains("enoent")
+        || low.contains("no such file")
+        || low.contains("cannot read")
+        || low.contains("could not read")
+        || low.contains("does not exist")
+        || low.contains("not found")
 }
 
 // ──────────────────────── 审批档作用域解析（给 approval_policy 用） ────────────────────────

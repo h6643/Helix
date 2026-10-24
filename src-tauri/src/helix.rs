@@ -404,7 +404,7 @@ pub fn helix_register_provider_models(
     json!({ "success": true, "wrote": wrote })
 }
 
-/// Live config push from the renderer (personality / reasoning effort / fast
+/// Live config push from the renderer (reasoning effort / fast
 /// mode etc.): writes the dotted key into config.yaml. Takes effect on the
 /// next gateway respawn.
 #[tauri::command]
@@ -872,10 +872,6 @@ pub fn helix_remove_memory_entry(target: String, text: String) -> Value {
     json!({ "ok": true, "entries": next })
 }
 
-// ── Personality Management ──────────────────────
-// (helix_list_personalities / helix_set_personality removed — the renderer
-// persists display.personality via helix_set_config_key_value through
-// config-sync's pushConfigKeyValue.)
 
 // ── Pi Commands (extensions / skills / prompts) ─────────────────────
 
@@ -1870,6 +1866,37 @@ fn push_skill_dirs(dir: &std::path::Path, pkg_name: &str, version: &str, items: 
 #[tauri::command]
 pub async fn pi_get_available_models() -> Result<Value, String> {
     pi_gateway::send("get_available_models", Value::Null).await
+}
+
+/// List the slash commands **extensions** registered in pi (`/connect` 之类)。
+///
+/// 只挑 `source == "extension"`：prompt 模板与 skills 各自有面板与菜单入口，
+/// 在这里重复列会让同一个名字出现两次、行为还不一样。命令本体由 pi 在
+/// `prompt()` 里执行（响应 disposition="handled"），前端只负责列出来 + 把
+/// `/name ` 填进输入框，**不需要**任何新的执行通道。
+#[tauri::command]
+pub async fn pi_list_commands() -> Result<Value, String> {
+    let data = pi_gateway::send("get_commands", Value::Null).await?;
+    let commands: Vec<Value> = data
+        .get("commands")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter(|cmd| cmd.get("source").and_then(Value::as_str) == Some("extension"))
+                .filter_map(|cmd| {
+                    let name = cmd.get("name").and_then(Value::as_str)?;
+                    if name.is_empty() {
+                        return None;
+                    }
+                    Some(json!({
+                        "name": name,
+                        "description": cmd.get("description").and_then(Value::as_str).unwrap_or(""),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(json!({ "commands": commands }))
 }
 
 /// Read the custom providers pi has registered in `models.json` (the file Helix

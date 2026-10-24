@@ -49,7 +49,7 @@ export function CodemodeSettingsPanel() {
       <SettingGroup>
         <SettingRow
           label="启用 Codemode"
-          hint="让模型可以编写 JavaScript 脚本，在 QuickJS 沙箱中并行调用工具、运行分类器与生图模型。写入 pi 的 defaultTools（+codemode）。"
+          hint="让模型可以编写 JavaScript 脚本，在 QuickJS 沙箱中并行调用工具、运行分类器。写入 pi 的 defaultTools（+codemode）。"
         >
           <Toggle
             enabled={cfg?.enabled ?? false}

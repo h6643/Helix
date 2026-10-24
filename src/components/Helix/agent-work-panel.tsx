@@ -41,7 +41,7 @@ interface RawStep {
   status: StepStatus;
 }
 
-/** 合并同类后的一行：`查阅 · 2 搜索, 1 文件`。items 保留组内原始工具行，供展开。 */
+/** 合并同类后的一行：`查阅 · 2 搜索 · 1 文件`。items 保留组内原始工具行，供展开。 */
 interface MergedStep {
   label: string;
   detail: string;
@@ -59,7 +59,7 @@ function oneLine(s: string, max: number): string {
 }
 
 /**
- * 「合并同类」：连续同类目的工具收成一行（查阅 · 2 搜索, 1 文件），
+ * 「合并同类」：连续同类目的工具收成一行（查阅 · 2 搜索 · 1 文件），
  * 不再一条工具一行地铺原始参数 JSON。失败步单独成行，保证错误可见。
  */
 function mergeSteps(raw: RawStep[]): MergedStep[] {

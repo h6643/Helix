@@ -11,7 +11,6 @@ import {
   Check,
   Wrench,
   ChevronDown,
-  RefreshCw,
 } from "lucide-react";
 import React, {
   useState,
@@ -20,13 +19,12 @@ import React, {
   useCallback,
   useRef,
 } from "react";
+import { AgentsSettings } from "./agents-settings";
+import { McpPanel } from "./mcp-panel";
 import { PopupSelect } from "./settings-ui";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { helixApi } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
-
-interface SkillPanelProps {}
 
 interface InstalledItem {
   name: string;
@@ -74,7 +72,7 @@ interface PackageResult {
   piUrl?: string;
 }
 
-type TabKey = "plugins" | "skills";
+type TabKey = "plugins" | "skills" | "mcp" | "agents";
 
 const typeLabels: Record<
   string,
@@ -107,23 +105,35 @@ const typeLabels: Record<
   },
 };
 
-// eslint-disable-next-line no-empty-pattern
-export function SkillPanel({}: SkillPanelProps) {
+export function SkillPanel() {
   const [activeTab, setActiveTab] = useState<TabKey>("plugins");
   const [searchQuery, setSearchQuery] = useState("");
   const [showBrowse, setShowBrowse] = useState(false);
   const [sortBy, setSortBy] = useState<"downloads" | "date">("downloads");
   const [filterType, setFilterType] = useState<string>("all");
 
-  // 面板挂载或请求号变化时跳到目标 tab，并预填搜索词。
-  const skillPanelRequest = useHelixStore((s) => s.skillPanelRequest);
-  useEffect(() => {
-    if (!skillPanelRequest?.ts) return;
-    setActiveTab(skillPanelRequest.tab);
-    if (skillPanelRequest.query !== undefined) {
-      setSearchQuery(skillPanelRequest.query);
-    }
-  }, [skillPanelRequest]);
+  // 页签计数与「添加」分发：连接器 / 智能体数量由子面板上报，
+  // 添加动作通过递增序号传给子面板（0 = 从未触发）。
+  const [mcpCount, setMcpCount] = useState(0);
+  const [agentCount, setAgentCount] = useState(0);
+  const [mcpAddRequest, setMcpAddRequest] = useState(0);
+  const [agentAddRequest, setAgentAddRequest] = useState(0);
+  const handleMcpCount = useCallback((n: number) => setMcpCount(n), []);
+  const handleAgentCount = useCallback((n: number) => setAgentCount(n), []);
+  const handleAddClick = useCallback(() => {
+    if (activeTab === "plugins") setShowBrowse(true);
+    else if (activeTab === "skills") {
+      void (async () => {
+        if (window.electron?.helixSkills) {
+          const dir = await window.electron.helixSkills.getDir();
+          if (dir) {
+            window.electron.shell.showItemInFolder(dir);
+          }
+        }
+      })();
+    } else if (activeTab === "mcp") setMcpAddRequest((n) => n + 1);
+    else if (activeTab === "agents") setAgentAddRequest((n) => n + 1);
+  }, [activeTab]);
 
   // Plugins state
   const [items, setItems] = useState<InstalledItem[]>([]);
@@ -151,7 +161,7 @@ export function SkillPanel({}: SkillPanelProps) {
   // 有更新的卡片在开关右侧显示「更新」按钮。列表首次加载后自动查一次
   // （后台跑，不阻塞列表渲染）；点头部按钮 = 手动复查，反馈更完整。
   const [latestMap, setLatestMap] = useState<Record<string, string>>({});
-  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [, setCheckingUpdates] = useState(false);
   // 点击「更新」按钮后弹确认框：name → {installed, latest}
   const [updateFound, setUpdateFound] = useState<{
     name: string;
@@ -497,7 +507,7 @@ export function SkillPanel({}: SkillPanelProps) {
   useEffect(() => {
     if (activeTab === "plugins") {
       void loadItems();
-    } else {
+    } else if (activeTab === "skills") {
       void loadSkills();
     }
   }, [activeTab, loadItems]);
@@ -832,144 +842,95 @@ export function SkillPanel({}: SkillPanelProps) {
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-transparent">
-      {/* Header — big title + action, tab switcher, then search below
-          (same layout as the scheduled tasks panel). 40px top padding
-          clears the window controls. */}
-      <div className="px-8 pt-10 pb-4 shrink-0 border-b border-border/40">
-        <div className="flex items-center justify-between">
-          <h1 className="ui-title font-semibold text-foreground tracking-tight">
-            插件中心
-          </h1>
-          <div className="flex items-center gap-2">
-            {activeTab === "plugins" && !showBrowse && (
-              <button
-                onClick={() => void checkUpdates(true)}
-                disabled={checkingUpdates}
-                className="mr-2 p-1.5 rounded hover:bg-accent/60 transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50"
-                data-tip="检查更新"
-                data-tip-side="left"
-              >
-                {checkingUpdates ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="size-4" />
-                )}
-              </button>
-            )}
-            {activeTab === "plugins" && (
-              <button
-                onClick={() => setShowBrowse(!showBrowse)}
-                className={`mr-2 p-1.5 rounded hover:bg-accent/60 transition-colors ${
-                  showBrowse
-                    ? "text-primary bg-primary/10"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-                data-tip="浏览安装"
-                data-tip-side="left"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M5 12h14" />
-                  <path d="M12 5v14" />
-                </svg>
-              </button>
-            )}
-            {activeTab === "skills" && (
-              <button
-                onClick={async () => {
-                  if (window.electron?.helixSkills) {
-                    const dir = await window.electron.helixSkills.getDir();
-                    if (dir) {
-                      window.electron.shell.showItemInFolder(dir);
-                    }
+    <div className="w-full">
+      <div className="pb-5 border-b border-border/40">
+        <h1 className="ui-title font-semibold text-foreground tracking-tight">
+          扩展管理
+        </h1>
+        <p className="ui-text text-muted-foreground/60 mt-1">
+          管理本机已安装的插件、技能、连接器和智能体。
+        </p>
+
+        {!showBrowse ? (
+          <div className="flex items-center justify-between gap-3 mt-5">
+            {/* Tab pills — 插件 / 技能 / 连接器 / 智能体，带已安装计数 */}
+            <div className="inline-flex items-center rounded-xl bg-muted/60 p-1">
+              {(
+                [
+                  { key: "plugins", label: "插件", count: extensions.length },
+                  { key: "skills", label: "技能", count: skills.length },
+                  { key: "mcp", label: "MCP", count: mcpCount },
+                  { key: "agents", label: "子智能体", count: agentCount },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.key}
+                  onClick={() => setActiveTab(tab.key)}
+                  className={`flex items-center gap-2 px-3.5 h-8 rounded-lg text-[length:var(--helix-transcript-size)] transition-all ${
+                    activeTab === tab.key
+                      ? "bg-background shadow-sm border border-border/60 text-foreground font-medium"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  data-tip={
+                    tab.key === "mcp"
+                      ? "管理 MCP 连接器"
+                      : tab.key === "agents"
+                        ? "管理子智能体"
+                        : undefined
                   }
-                }}
-                className="p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
-                data-tip="打开技能目录"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
                 >
-                  <path d="M5 12h14" />
-                  <path d="M12 5v14" />
-                </svg>
-              </button>
-            )}
+                  {tab.label}
+                  <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60">
+                    {tab.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {/* Search + add — 添加按页签分发（插件=浏览市场 / 技能=打开目录 /
+                连接器=打开添加表单 / 智能体=新增子智能体草稿） */}
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="搜索已安装项"
+                  className="w-64 h-10 pl-9 pr-3 rounded-xl border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
+                />
+              </div>
+              <Button
+                variant="outline"
+                onClick={handleAddClick}
+                className="h-10 rounded-xl"
+              >
+                添加
+              </Button>
+            </div>
           </div>
-        </div>
-
-        {/* Tab switcher — 插件中心 / 技能中心.
-            Skills 面板之前只有渲染分支、没有任何入口：现在通过这两个 tab
-            暴露出来。默认停在「插件」，与老行为一致。 */}
-        <div className="flex items-center justify-center gap-1 mt-3">
-          <button
-            onClick={() => {
-              setActiveTab("plugins");
-              setShowBrowse(false);
-            }}
-            className={`flex items-center gap-1.5 px-3.5 h-8 rounded-lg text-[length:var(--helix-transcript-size)] transition-colors ${
-              activeTab === "plugins"
-                ? "bg-primary/10 text-primary font-medium"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
-            }`}
-            data-tip="管理扩展类插件"
-          >
-            <Puzzle className="size-4" />
-            插件
-          </button>
-          <button
-            onClick={() => setActiveTab("skills")}
-            className={`flex items-center gap-1.5 px-3.5 h-8 rounded-lg text-[length:var(--helix-transcript-size)] transition-colors ${
-              activeTab === "skills"
-                ? "bg-primary/10 text-primary font-medium"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
-            }`}
-            data-tip="管理 SKILL.md 技能"
-          >
-            <Zap className="size-4" />
-            技能
-          </button>
-        </div>
-
-        {!showBrowse && (
-          <div className="relative mt-3 flex justify-center">
-            <Search className="absolute left-[calc(2.5%+12px)] top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={
-                activeTab === "skills"
-                  ? "搜索技能..."
-                  : "搜索插件..."
-              }
-              className="w-[95%] h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
-            />
+        ) : (
+          /* Browse 中头部右侧给出返回入口（市场按钮顶部已无） */
+          <div className="flex justify-end mt-5">
+            <Button
+              variant="outline"
+              onClick={() => setShowBrowse(false)}
+              className="h-10 rounded-xl"
+            >
+              返回
+            </Button>
           </div>
         )}
       </div>
 
-      <ScrollArea className="flex-1">
-        <div className="max-w-3xl mx-auto px-6 pt-2 pb-8">
-          {activeTab === "plugins" ? (
+      <div className="pt-2 pb-8">
+        {activeTab === "mcp" ? (
+          <McpPanel
+            onCount={handleMcpCount}
+            addRequest={mcpAddRequest}
+            searchQuery={searchQuery}
+          />
+        ) : activeTab === "plugins" ? (
             showBrowse ? (
               <>
                 {/* Browse view */}
@@ -1043,11 +1004,6 @@ export function SkillPanel({}: SkillPanelProps) {
                 ) : searchLoading ? null : (
                   <div className="text-center py-12 text-[length:var(--helix-transcript-size)] text-muted-foreground/60">
                     未找到相关插件
-                    {browseQuery && (
-                      <p className="mt-2 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40">
-                        pi.dev 共收录 5400+ 个包，换个关键词试试
-                      </p>
-                    )}
                   </div>
                 )}
               </>
@@ -1079,6 +1035,8 @@ export function SkillPanel({}: SkillPanelProps) {
                 )}
               </>
             )
+          ) : activeTab === "agents" ? (
+            <AgentsSettings onCount={handleAgentCount} addRequest={agentAddRequest} />
           ) : (
             <>
               {/* Skills tab */}
@@ -1088,15 +1046,7 @@ export function SkillPanel({}: SkillPanelProps) {
                 </h2>
               </div>
 
-              {skillsLoading && skills.length === 0 ? (
-                <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground/60 text-center py-8">
-                  加载中...
-                </p>
-              ) : filteredSkills.length === 0 ? (
-                <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground/60 text-center py-8">
-                  暂无技能
-                </p>
-              ) : (
+              {(
                 <div className="space-y-2">
                   {filteredSkills.map((skill) => {
                     const isActive = skill.isActive !== false;
@@ -1138,11 +1088,6 @@ export function SkillPanel({}: SkillPanelProps) {
                           className={`shrink-0 relative w-10 h-6 rounded-full transition-colors duration-200 disabled:opacity-50 ${
                             isActive ? "bg-primary" : "bg-muted-foreground/20"
                           }`}
-                          data-tip={
-                            isActive
-                              ? "禁用：pi 不再加载这个技能（立即重启网关生效）。"
-                              : "启用：恢复加载这个技能（立即重启网关生效）。"
-                          }
                         >
                           <span
                             className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform duration-200 ${
@@ -1167,8 +1112,7 @@ export function SkillPanel({}: SkillPanelProps) {
               )}
             </>
           )}
-        </div>
-      </ScrollArea>
+      </div>
 
       {/* Plugin update confirmation dialog */}
       {updateFound && (
@@ -1186,10 +1130,6 @@ export function SkillPanel({}: SkillPanelProps) {
                 <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
                   插件有新版本
                 </h3>
-                <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground mt-1">
-                  {updateFound.name} 可从 v{updateFound.installed} 更新到 v
-                  {updateFound.latest}。更新后 pi 将重新加载插件。
-                </p>
               </div>
             </div>
             <div className="flex justify-between gap-2">

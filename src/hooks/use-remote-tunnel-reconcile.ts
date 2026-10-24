@@ -11,18 +11,16 @@ import {
 import { useHelixStore, type ExternalService } from "@/stores/helix-store";
 
 /**
- * 远程隧道对账：查后端 `remote_tunnel_status`，把真正生效的连接状态写成全局
- * `remoteMode`。
+ * 远程项目**不自动连接、不自动检测**：启动只检查本地项目，远程一律不动。
+ * 隧道只在用户显式连接后存在于进程内（重启即消亡），所以这里只做**只读
+ * 对账**——读后端 `remote_tunnel_status`（本地进程状态 + config，不碰网络）
+ * 回灌 `remoteMode` 供侧边栏/徽标显示。往远端发任何探测、重连、SSH 都交给
+ * 用户的显式动作（连接向导 / 服务器卡片）或发送消息时的探活门。
  *
- * `remoteMode` 只描述**隧道**（后端同时只有一条）。它不描述某条对话跑在哪台机器
- * —— 那是 `session.workDir` 的事（双通道：远程对话走隧道，本地对话走本机）。
- *
- * 必须挂在一个**永不卸载**的宿主上（helix-layout）：远程列表在侧边栏里可折叠、
- * 在输入框下拉里只在展开时挂载，那些位置随时会卸载。只靠它们回灌的话
- * `remoteMode` 会停在 null —— 远程行明明连着却不绿，断开按钮也找不到。
- *
- * 可能在多处同时挂载（宿主 + 列表），各实例写的值同源于后端 status，所以幂等。
+ * 被跳过恢复的远程对话不会卡在坏状态：agent-flow-panel 会标 `remoteUnreachable`，
+ * 用户连上服务器后发第一条消息即自动恢复。
  */
+
 export function useRemoteTunnelReconcile(services: ExternalService[]) {
   const setRemoteMode = useHelixStore((s) => s.setRemoteMode);
   const statusVersion = useHelixStore((s) => s.remoteStatusVersion);
@@ -48,13 +46,16 @@ export function useRemoteTunnelReconcile(services: ExternalService[]) {
           }
         : null,
     );
+    // 不做任何自动重连 / 远端检测（见文件头注释）：远程连接只来自用户的
+    // 显式动作。
   }, [services, setRemoteMode]);
 
   useEffect(() => {
     if (!remoteAvailable()) return;
     void refresh();
-    // 轮询：连接/断开是后端动作（还会重启 gateway），前端只能靠轮询发现。
-    // 30s 足够——切换都是用户主动点的。向导连完会 bump statusVersion 立刻叫醒一次。
+    // 轮询只回灌本地可读的隧道进程状态（显示远程行绿/灰、更新 remoteMode）。
+    // 30s 足够——连接/断开都是用户主动点的。向导连完会 bump statusVersion
+    // 立刻叫醒一次。
     const t = setInterval(() => void refresh(), 30_000);
     return () => clearInterval(t);
   }, [refresh, statusVersion]);

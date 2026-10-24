@@ -93,7 +93,7 @@ export function TokenUsagePanel() {
         <div className="rounded-xl border border-border/40 bg-card/60 p-5">
           <div className="min-w-0">
             <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
-              缓存命中率
+              平均缓存命中率
             </p>
             <p className="text-[calc(var(--helix-transcript-size)*2.1429)] font-semibold tabular-nums text-foreground mt-1">
               {cacheHit.reported && cacheHit.percent !== null

@@ -444,6 +444,8 @@ function buildTauriAPI(): ElectronAPI {
     deleteSubagent: (name: string) => invoke("helix_delete_subagent", { name }),
     // Pi agent commands (extensions / skills / prompts / models)
     piListInstalled: () => invoke("pi_list_installed"),
+    // pi 扩展注册的斜杠命令（/connect 之类），供输入框 `/` 菜单列出。
+    piListCommands: () => invoke("pi_list_commands"),
     piGetAvailableModels: () => invoke("pi_get_available_models"),
     piReadCustomProviders: () => invoke("pi_read_custom_providers"),
     piSetThinkingLevelAll: (level: string) =>
@@ -572,12 +574,6 @@ function buildTauriAPI(): ElectronAPI {
       invoke<string>("vision_describe", { image, prompt: prompt ?? null }),
   };
 
-  // ── image-generation model ─────────────────────────────────────────────
-  api.image = {
-    getConfig: () => invoke("image_config_list"),
-    setConfig: (config: unknown) => invoke("image_config_save", { config }),
-  };
-
   // ── 联网搜索（web-access 扩展读的 config.yaml `web_search:` 块）─────────
   // 后端只回「有没有 key / key 由什么提供」，从不回显密钥，所以这里没有脱敏工作。
   api.webSearch = {
@@ -592,7 +588,7 @@ function buildTauriAPI(): ElectronAPI {
   };
 
   // ── subagent settings (config.yaml `subagents:` block, read/write,
-  //     mirrored into the extension's settings.json on save) ─────────
+  //     mirrored into the extension's settings.json on save)  ─────────
   api.subagentsConfig = {
     list: () => invoke("subagents_settings_list"),
     save: (settings: unknown) => invoke("subagents_settings_save", { settings }),

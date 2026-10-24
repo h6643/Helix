@@ -2,21 +2,6 @@
 
 /**
  * 右侧栏「文档」面：侧边栏里直接看 PPT / DOCX / XLSX / PDF / 图片 / 音视频。
- *
- * 为什么单独一面而不是塞进「代码」编辑器：代码编辑器是 CodeMirror 的文本世界，
- * 而这里要渲染的是结构化文档和媒体。两者生命周期也不同 —— 文档页签按文件走，
- * 走右栏的 pages 模型（与浏览器页、终端页同级），所以能多开、能单独关。
- *
- * 版面还原用四个动态 import 的引擎（都按需加载、不进主包）：
- * PPTX=@aiden0z/pptx-renderer(ZCode 同款)、DOCX=docx-preview、XLSX=SheetJS、
- * PDF=pdf.js（WebView2 没有内置 PDF 查看器，`<embed>` 是灰块）。
- * `@/lib/doc-preview` 的 fflate 纯文本提取是最后一层兜底；再失败降级成
- * 「外部打开」按钮，绝不把界面卡死。
- *
- * PPTX 是三级渲染：本机 PowerPoint COM 逐页导出的 PNG（最接近 Office）→
- * @aiden0z/pptx-renderer 纯前端版面还原（ZCode 同款：形状/文本/图表/SmartArt
- * 按 HTML/SVG 重绘）→ doc-preview 的纯文本提取。每一级失败都静默降到下一级，
- * 预览只是锦上添花。
  */
 import {
   AlertTriangle,

@@ -131,7 +131,9 @@ pub fn connect(
     }
 }
 
-#[tauri::command]
+// (async)：ssh 探测是阻塞子进程调用，绝不能在主线程跑，否则远端不可达时
+// 每次探测最多卡死界面 10s（ConnectTimeout）。
+#[tauri::command(async)]
 pub fn ssh_connect(
     host: String,
     port: u32,

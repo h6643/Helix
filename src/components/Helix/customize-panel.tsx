@@ -3,7 +3,6 @@
 import {
   X,
   Keyboard,
-  FileText,
   Palette,
   Pencil,
   Sun,
@@ -20,7 +19,7 @@ interface CustomizePanelProps {
   onClose: () => void;
 }
 
-type CustomizeSection = "shortcuts" | "instructions" | "appearance";
+type CustomizeSection = "shortcuts" | "appearance";
 
 export function CustomizePanel({ onClose }: CustomizePanelProps) {
   const [activeSection, setActiveSection] =
@@ -28,7 +27,6 @@ export function CustomizePanel({ onClose }: CustomizePanelProps) {
 
   const sections = [
     { id: "shortcuts" as const, label: "快捷键", icon: Keyboard },
-    { id: "instructions" as const, label: "自定义指令", icon: FileText },
     { id: "appearance" as const, label: "外观", icon: Palette },
   ];
 
@@ -76,7 +74,6 @@ export function CustomizePanel({ onClose }: CustomizePanelProps) {
             <ScrollArea className="h-full">
               <div className="p-6">
                 {activeSection === "shortcuts" && <ShortcutsSection />}
-                {activeSection === "instructions" && <InstructionsSection />}
                 {activeSection === "appearance" && <AppearanceSection />}
               </div>
             </ScrollArea>
@@ -245,41 +242,6 @@ function ShortcutsSection() {
           暂无快捷键
         </p>
       )}
-    </div>
-  );
-}
-
-// ─── Instructions Section ─────────────────────────────────────────────────
-
-function InstructionsSection() {
-  const { personality, setPersonality } = useHelixStore();
-  const [localPersonality, setLocalPersonality] = useState(personality);
-
-  const handleSave = () => {
-    setPersonality(localPersonality);
-  };
-
-  return (
-    <div className="space-y-6">
-      <section className="space-y-3">
-        <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-medium text-foreground">
-          个性设定
-        </h3>
-        <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground">
-          设定 AI 的个性和行为风格，影响 AI 的回复方式。
-        </p>
-        <textarea
-          value={localPersonality}
-          onChange={(e) => setLocalPersonality(e.target.value)}
-          placeholder="例如：你是一个耐心友好的助手..."
-          className="w-full h-48 p-3 text-[length:var(--helix-transcript-size)] rounded-xl border border-border/50 bg-card/50 resize-none"
-        />
-        <div className="flex justify-end">
-          <Button size="sm" onClick={handleSave}>
-            保存
-          </Button>
-        </div>
-      </section>
     </div>
   );
 }

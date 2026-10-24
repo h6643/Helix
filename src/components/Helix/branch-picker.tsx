@@ -154,7 +154,6 @@ export function BranchPicker({
       // 换分支就是换改动基准，「更改」列表立刻重算。
       storeActions.bumpGitChangeRevision();
       setOpen(false);
-      storeActions.showToast({ type: "success", title: `已切换到 ${b}` });
     } else {
       storeActions.showToast({
         type: "error",

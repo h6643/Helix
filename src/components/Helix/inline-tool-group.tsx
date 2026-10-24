@@ -1,6 +1,6 @@
 "use client";
 
-import { Copy, CheckCheck } from "lucide-react";
+import { Copy, CheckCheck, ChevronRight } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import { computeDiff, looksLikeUnifiedDiff } from "@/components/Helix/diff-preview";
 import { CodeCard } from "@/components/Helix/helix-markdown";
@@ -313,10 +313,14 @@ function ToolCard({
   step,
   results,
   isRunning,
+  onOpenAgent,
 }: {
   step: ExecutionStep;
   results: ExecutionStep[];
   isRunning: boolean;
+  /** 传入即「子代理导航卡」：整卡变成跳转入口，点击进右侧栏「子 Agent」页，
+   *  不再展开参数/结果面板（完整执行流在侧栏里看，比卡片内展开信息全）。 */
+  onOpenAgent?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   // 命令标题裁行只影响折叠态；展开后必须回到全文，所以测量只在折叠时跑，
@@ -400,15 +404,11 @@ function ToolCard({
             : undefined);
   const running = stepStatus === "running" && isRunning;
   const failed = stepStatus === "failed";
-  // 命令类的输出必须常驻、而且要在 ⎿ 边框里：以前它挂在标题下方当裸 monospace
-  // 文本，等于「一行标题 + 下面的卡片」这条规则在运行中失效（整屏结果没有容器，
-  // 和正文分不出来）。所以运行中/报错时不用点开也渲染面板，面板里就是那套
-  // 「输入卡 + 实时输出」，跟展开后完全同一份结构。
-  const forcePanel =
-    isCommandTool &&
-    ((running && !!step.content) ||
-      results.some((r) => r.type === "error"));
-  const panelVisible = expandable && (open || forcePanel);
+  // 运行中一律折叠：面板开关完全由用户点击决定（open），不再因为「运行中」自动
+  // 展开。刻意不提供 forcePanel / 运行中外露实时输出的分支——那样一条跑几分钟的
+  // 命令会把这些面板一路钉在对话流里，用户看到的不是「正在执行」而是刷屏。
+  // 标题行的 ⏺ 脉冲 + 计时已经表达了执行中；实时输出与报错都在面板里，点标题看。
+  const panelVisible = expandable && open;
   const action = toolActionText(step);
   // 动词固定不随状态变化("搜索/读取/执行"),完成态不再加"已"前缀——
   // 组折叠摘要已经表达完成语义,行内前缀"已/正在"切换只会让列宽抖动。
@@ -464,6 +464,7 @@ function ToolCard({
   })();
   // 运行中的实时输出尾巴（tool_output_delta 往 step.content 里追加）。它和"输入"必须
   // 合成同一张卡：分成两块就是"一张白卡 + 下面一堆没有容器的散字"，同一件事两种排版。
+  // 只在用户把面板点开后才渲染——运行中不再自动展开（见 panelVisible）。
   const liveTail =
     running && step.content
       ? stripAnsi(step.content.slice(-PREVIEW_TAIL_CHARS))
@@ -476,9 +477,15 @@ function ToolCard({
       <button
         type="button"
         onClick={() => {
+          if (onOpenAgent) {
+            onOpenAgent();
+            return;
+          }
           if (clickable) setOpen((prev) => !prev);
         }}
-        className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${clickable ? "" : "cursor-default"}`}
+        className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${
+          onOpenAgent ? "cursor-pointer" : clickable ? "" : "cursor-default"
+        }`}
       >
         {failed ? (
           <span className="tool-glyph tool-glyph-failed" aria-hidden>
@@ -575,16 +582,22 @@ function ToolCard({
             </span>
           );
         })()}
+        {onOpenAgent && (
+          <span
+            data-tip="在右侧栏查看工作内容"
+            className="shrink-0 flex items-center opacity-0 group-hover:opacity-100 transition-opacity"
+          >
+            <ChevronRight
+              className="size-3.5 text-foreground/30"
+              aria-hidden
+            />
+          </span>
+        )}
       </button>
 
-      {/* 读取类不展开（canExpand=false），运行中的实时输出与失败错误直接外露在标题
-          下，不依赖展开。命令类走下面那张常驻面板，所以这里排除它——两处都渲染就是
-          同一段输出两份。 */}
-      {!canExpand && !isCommandTool && running && step.content && (
-        <div className="ml-1 mt-1 text-[0.85em] text-foreground/40 font-mono max-h-40 overflow-y-auto leading-relaxed whitespace-pre-wrap break-all">
-          {stripAnsi(step.content.slice(-PREVIEW_TAIL_CHARS))}
-        </div>
-      )}
+      {/* 读取类不展开（canExpand=false），只有失败错误外露在标题下、不依赖展开——
+          运行中的实时输出不外露（时间线会被刷屏），它仍在面板里，点标题看。
+          命令类走下面那张面板，两处都渲染就是同一段输出两份。 */}
       {!canExpand &&
         !isCommandTool &&
         results.some((r) => r.type === "error") && (
@@ -606,7 +619,7 @@ function ToolCard({
       {panelVisible && (
         <div className="tool-result-panel space-y-1.5">
           {/* 还没有结果（运行中 / 调用被中断 / 只剩 error 结果）：这一张卡就是"输入 +
-              实时输出"。命令类尤其必须靠它——标题永远只占一行，不渲染就没有任何地方
+              实时输出"。命令类尤其靠它——标题永远只占一行，不展开就没有任何地方
               能看到整条命令。结果到达后改由下面的结果卡带 `$ 命令` 前缀，不再走这里。 */}
           {(results.length === 0 ||
             results.every((r) => r.type === "error")) &&
@@ -786,10 +799,13 @@ export function InlineToolGroup({
   steps,
   isRunning,
   fontSize = 14,
+  onOpenAgent,
 }: {
   steps: ExecutionStep[];
   isRunning: boolean;
   fontSize?: number;
+  /** 透传给组内每张 ToolCard（仅单张子代理卡的场景使用）。 */
+  onOpenAgent?: () => void;
 }) {
   const visible = steps ?? [];
   if (visible.length === 0) {
@@ -815,6 +831,7 @@ export function InlineToolGroup({
           step={call}
           results={results}
           isRunning={isRunning}
+          onOpenAgent={onOpenAgent}
         />
       ))}
     </div>

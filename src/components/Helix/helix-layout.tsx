@@ -110,9 +110,6 @@ const SessionManager = lazy(() =>
 const ApiSettings = lazy(() =>
   import("./api-settings").then((m) => ({ default: m.ApiSettings })),
 );
-const SkillPanel = lazy(() =>
-  import("./skill-panel").then((m) => ({ default: m.SkillPanel })),
-);
 const ScheduledTasksPanel = lazy(() =>
   import("./scheduled-tasks-panel").then((m) => ({
     default: m.ScheduledTasksPanel,
@@ -577,7 +574,6 @@ export function HelixLayout() {
   // State selectors (only re-render when this specific slice changes)
   const showSessionManager = useHelixStore((s) => s.showSessionManager);
   const showSettings = useHelixStore((s) => s.showSettings);
-  const showSkillPanel = useHelixStore((s) => s.showSkillPanel);
   const showScheduledTasksPanel = useHelixStore(
     (s) => s.showScheduledTasksPanel,
   );
@@ -588,18 +584,17 @@ export function HelixLayout() {
   const showSubAgentPanel = useHelixStore((s) => s.showSubAgentPanel);
   const showActivityFeed = useHelixStore((s) => s.showActivityFeed);
   const showArtifactsBrowser = useHelixStore((s) => s.showArtifactsBrowser);
-  // 打开任一主区覆盖页（计划/技能/运行时/工作树）时，聊天区用
+  // 打开任一主区覆盖页（计划/运行时/工作树）时，聊天区用
   // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
-  // 画面并让暂停按钮消失（看起来像"点击插件把运行终止了"）。保持挂载即可在
+  // 画面并让暂停按钮消失（看起来像"点击面板把运行终止了"）。保持挂载即可在
   // 切页面时让模型继续在后台运行，返回后还能接着看。
   // Only hide chat for overlay panels (delegations, runtime, worktree,
-  // scheduled tasks, plugins) — 让计划/插件页与其它覆盖页一致：聊天 display:none
+  // scheduled tasks) — 让计划页与其它覆盖页一致：聊天 display:none
   // 隐藏，页面直接铺在卡片自身的 surface 上，不再叠一层圆角浮窗。
   const sidePanelOpen =
     showRuntimePanel ||
     showWorktreePanel ||
     showSubAgentPanel ||
-    showSkillPanel ||
     showScheduledTasksPanel;
   const rightSidebarTab = useHelixStore((s) => s.rightSidebarTab);
   const rightSidebarOpen = useHelixStore((s) => s.rightSidebarOpen);
@@ -666,13 +661,12 @@ export function HelixLayout() {
   const hasGlobalBg = Boolean(globalBgImage);
   const chatMessages = useHelixStore((s) => s.chatMessages);
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
-  // 新对话 / 计划 / 插件 视图下隐藏标题栏的「终端 / 右侧边栏」——这两项是
-  // 对话区操作：空会话、或被任意全屏面板（计划/插件/运行时/工作树/子 Agent）
+  // 新对话 / 计划 视图下隐藏标题栏的「终端 / 右侧边栏」——这两项是
+  // 对话区操作：空会话、或被任意全屏面板（计划/运行时/工作树/子 Agent）
   // 盖住聊天区时都没有意义。同时让面板头部只留窗口控制按钮那一段，避免互相压。
   const hideConversationActions =
     !currentSessionId ||
     showScheduledTasksPanel ||
-    showSkillPanel ||
     showRuntimePanel ||
     showWorktreePanel ||
     showSubAgentPanel;
@@ -757,7 +751,13 @@ export function HelixLayout() {
       let tasks: BgTask[] = res?.ok ? (res.tasks || []) : [];
       // 远程项目：后台任务注册在远端机器的 ~/.pi/agent/tasks.json，
       // 本机 tasks_list 读不到，需额外经 SSH 读远端并合并。
-      if (activeSessionWorkDir && isRemoteWorkDir(activeSessionWorkDir)) {
+      // 但隧道没在连（remoteMode = null，重启后必然如此）就不碰远端：
+      // 启动对远程项目不管不检测（远端服务器关着也别发 SSH）。
+      if (
+        activeSessionWorkDir &&
+        isRemoteWorkDir(activeSessionWorkDir) &&
+        useHelixStore.getState().remoteMode
+      ) {
         const svc = findServiceByRemoteWorkDir(
           useHelixStore.getState().externalServices,
           activeSessionWorkDir,
@@ -1091,7 +1091,7 @@ export function HelixLayout() {
   }, [storeActions]);
 
   // Sync agent settings to Helix via live config.set (no gateway restart).
-  // personality + reasoningEffort + fastMode 三条即时下发。
+  // reasoningEffort 即时下发。
   const agentSettingsSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -1099,18 +1099,11 @@ export function HelixLayout() {
     if (!isElectron()) return;
     const pushAgentConfig = () => {
       const s = useHelixStore.getState();
-      pushAgentConfigLive({
-        personality: s.personality || undefined,
-        reasoningEffort: s.reasoningEffort,
-        fastMode: s.fastMode,
-      });
+      pushAgentConfigLive({ reasoningEffort: s.reasoningEffort });
     };
     pushAgentConfig();
     const unsub = useHelixStore.subscribe((state, prevState) => {
-      const changed =
-        state.personality !== prevState.personality ||
-        state.reasoningEffort !== prevState.reasoningEffort ||
-        state.fastMode !== prevState.fastMode;
+      const changed = state.reasoningEffort !== prevState.reasoningEffort;
       if (!changed) return;
       if (agentSettingsSyncTimer.current)
         clearTimeout(agentSettingsSyncTimer.current);
@@ -2756,13 +2749,6 @@ export function HelixLayout() {
                       </PanelSuspense>
                     </div>
                   )}
-                  {showSkillPanel && (
-                    <div className="absolute inset-0 z-20">
-                      <PanelSuspense>
-                        <SkillPanel />
-                      </PanelSuspense>
-                    </div>
-                  )}
                 </div>
                 {/* Floating card — right sidebar. Kept mounted at all times so switching
             tabs (and the browser <webview>) never rebuilds; visibility is toggled
@@ -2770,7 +2756,7 @@ export function HelixLayout() {
             removes the "flash / white-screen on first open and on every tab
             switch". */}
                 <div
-                  className={`relative ${codeFullscreen ? "flex-1 min-w-0" : "shrink-0"} ${rightSidebarVisible && !(showSkillPanel || showScheduledTasksPanel || showRuntimePanel || showWorktreePanel || showSubAgentPanel) ? "" : "hidden"}`}
+                  className={`relative ${codeFullscreen ? "flex-1 min-w-0" : "shrink-0"} ${rightSidebarVisible && !(showScheduledTasksPanel || showRuntimePanel || showWorktreePanel || showSubAgentPanel) ? "" : "hidden"}`}
                   style={
                     codeFullscreen
                       ? undefined

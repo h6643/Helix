@@ -21,11 +21,8 @@ interface UsageHeatmapProps {
 const GAP = 3;
 const LEVELS = 5;
 const MIN_CELL = 8;
-/* 固定 7 行 × 16 列的网格：行 = 星期（0=周一 … 6=周日），列 = 周。
-   所以每列正好一整周，今天所在的那一周固定落在最后一列。 */
 const ROWS = 7;
 const COLS = 16;
-/** 与 ROWS 一一对应：第 0 行是周一 */
 const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"];
 
 function levelColor(level: number) {
@@ -50,8 +47,6 @@ export function UsageHeatmap({
   const todayKey = dayKeyOf(end);
   const start = new Date(end);
   start.setDate(start.getDate() - (days - 1));
-  // 行=星期：第 0 行周一…第 6 行周日。把起点回退到它所在周的周一，
-  // 这样每列正好一整周，且「今天所在的那一周」落在最后一列。
   const backToMonday = (start.getDay() + 6) % 7;
   start.setDate(start.getDate() - backToMonday);
 
@@ -61,11 +56,8 @@ export function UsageHeatmap({
     dated.push(dayKeyOf(cursor));
     cursor.setDate(cursor.getDate() + 1);
   }
-  // 今天是周三 ⇒ 同一列里右侧的周四~周日属未来，用 null 占位补满整列
   while (dated.length % ROWS !== 0) dated.push(null);
 
-  // 时间从左上往右下走：空位补在头部（左侧），今天永远在最后一列。
-  // 头部空位必须是 ROWS 的整数倍，否则整列错位、每列不再是同一星期。
   const total = ROWS * COLS;
   const headPad = Math.max(0, Math.ceil((total - dated.length) / ROWS)) * ROWS;
   const cells: (string | null)[] = [
@@ -138,7 +130,6 @@ export function UsageHeatmap({
                   const idx = col * ROWS + row;
                   const key = cells[idx];
                   if (!key) {
-                    // 空位：画成 level-0 淡灰，保持矩形完整
                     return (
                       <div
                         key={`empty-${row}-${col}`}
@@ -180,9 +171,6 @@ export function UsageHeatmap({
               )}
             </div>
           </div>
-          {/* 月份标签：绝对定位对齐到各自列的左缘。
-              原来用 flex + gap + marginLeft(m.col*(cell+GAP))，gap 会额外累加，
-              标签被逐个右推，最后一个月标签溢出容器被 overflow-hidden 裁掉。 */}
           <div style={{ position: "relative", height: 13, marginTop: 2 }}>
             {monthLabels.map((m) => (
               <div

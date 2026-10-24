@@ -2,7 +2,6 @@
 
 import {
   Search,
-  Plus,
   Clock,
   Trash2,
   RefreshCw,
@@ -152,71 +151,6 @@ function SessionModePicker({
           ? "每次运行接着上次的对话继续"
           : "每次运行都开一条干净的新对话"}
       </span>
-    </div>
-  );
-}
-
-function AddTaskForm({
-  onCancel,
-  onAdd,
-}: {
-  onCancel: () => void;
-  onAdd: (
-    label: string,
-    prompt: string,
-    schedule: string,
-    sessionMode: "fresh" | "reuse",
-  ) => void;
-}) {
-  const [label, setLabel] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [schedule, setSchedule] = useState("");
-  const [sessionMode, setSessionMode] = useState<"fresh" | "reuse">("fresh");
-  const canSubmit = label.trim() && prompt.trim() && schedule.trim();
-
-  return (
-    <div className="p-4 rounded-xl border border-primary/30 bg-primary/[0.03] space-y-3">
-      <div className="flex items-center gap-2">
-        <Circle className="size-4 text-foreground/30" />
-        <input
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-          className="flex-1 min-w-0 bg-transparent text-[length:var(--helix-transcript-size)] font-medium text-foreground placeholder:text-muted-foreground"
-          placeholder="任务名称"
-          autoFocus
-        />
-      </div>
-      <textarea
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono min-h-[70px]"
-        placeholder="输入要 agent 执行的 prompt..."
-      />
-      <input
-        value={schedule}
-        onChange={(e) => setSchedule(e.target.value)}
-        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono"
-        placeholder="e.g. every day at 9:00, every 30 minutes, in 5 minutes"
-      />
-      <SessionModePicker value={sessionMode} onChange={setSessionMode} />
-      <div className="flex justify-end gap-2">
-        <button
-          onClick={onCancel}
-          className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground rounded-lg transition-colors"
-        >
-          取消
-        </button>
-        <button
-          onClick={() =>
-            canSubmit &&
-            onAdd(label.trim(), prompt.trim(), schedule.trim(), sessionMode)
-          }
-          disabled={!canSubmit}
-          className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-primary text-primary-foreground rounded-lg disabled:opacity-50 transition-colors"
-        >
-          创建
-        </button>
-      </div>
     </div>
   );
 }
@@ -458,16 +392,13 @@ function TaskItem({
 export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
   const {
     scheduledTasks,
-    addScheduledTask,
     updateScheduledTask,
     removeScheduledTask,
     toggleScheduledTask,
-    showToast,
     selectedWorkDir,
   } = useHelixStore();
   const [search, setSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [isAdding, setIsAdding] = useState(false);
 
   // Pull scheduled tasks from Helix backend on mount
   useEffect(() => {
@@ -497,54 +428,6 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
     };
     load();
   }, []);
-
-  const handleAdd = useCallback(
-    async (
-      label: string,
-      prompt: string,
-      schedule: string,
-      sessionMode: "fresh" | "reuse",
-    ) => {
-      const parsed = parseSchedule(schedule);
-      const cronExpression = parsed.kind === "cron" ? parsed.expr : undefined;
-      const nextRunAt = parsed.kind === "once" ? parsed.runAt : undefined;
-      let backendId: string | undefined;
-      let backendNextRun: number | null = parsed.nextRun;
-      try {
-        const electron = window.electron;
-        if (electron?.scheduledTasks?.create) {
-          const res = await electron.scheduledTasks.create({
-            name: label,
-            prompt,
-            scheduleText: schedule,
-            cronExpression,
-            nextRunAt,
-            sessionMode,
-          });
-          if (res.ok && res.id) {
-            backendId = res.id;
-            if (res.nextRunAt) backendNextRun = res.nextRunAt;
-          }
-        }
-      } catch (e) {
-        console.error("Failed to create backend scheduled task:", e);
-      }
-      addScheduledTask({
-        id: backendId,
-        label,
-        prompt,
-        scheduleText: schedule,
-        cronExpression,
-        sessionMode,
-        enabled: true,
-        lastRunAt: null,
-        nextRunAt: backendNextRun,
-      });
-      if (parsed.error) showToast({ type: "warning", title: parsed.error });
-      setIsAdding(false);
-    },
-    [addScheduledTask, showToast],
-  );
 
   const handleRunNow = useCallback(async (task: ScheduledTask) => {
     try {
@@ -682,21 +565,13 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
 
   return (
     <div className="h-full w-full flex flex-col bg-transparent">
-      {/* Header — big title + add action, search below (same layout as the
-          plugin center). 40px top padding clears the window controls. */}
+      {/* Header — big title, search below (same layout as the plugin center).
+          40px top padding clears the window controls. */}
       <div className="px-8 pt-10 pb-4 shrink-0 border-b border-border/40">
         <div className="flex items-center justify-between">
           <h1 className="ui-title font-semibold text-foreground tracking-tight">
             计划任务
           </h1>
-          <button
-            onClick={() => setIsAdding(true)}
-            className="mr-2 p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
-            data-tip="添加计划"
-            data-tip-side="left"
-          >
-            <Plus className="size-4" />
-          </button>
         </div>
 
         <div className="relative mt-3 flex justify-center">
@@ -752,7 +627,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
             </div>
 
             <div className="space-y-2">
-              {filteredTasks.length === 0 && !isAdding ? (
+              {filteredTasks.length === 0 ? (
                 <div className="text-center py-14">
                   <Clock className="size-10 text-muted-foreground/20 mx-auto mb-3" />
                   <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground">
@@ -788,12 +663,6 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
                       onToggleSelect={() => handleToggleSelect(task.id)}
                     />
                   ))}
-                  {isAdding && (
-                    <AddTaskForm
-                      onCancel={() => setIsAdding(false)}
-                      onAdd={handleAdd}
-                    />
-                  )}
                 </>
               )}
             </div>

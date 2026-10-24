@@ -3,6 +3,7 @@
 import {
   Circle,
   FileText,
+  Terminal,
   ShieldCheck,
   ShieldQuestion,
   Zap,
@@ -21,6 +22,7 @@ import {
   FolderPlus,
   ListOrdered,
   AlertTriangle,
+  WifiOff,
   GitBranch,
   GitFork,
   CornerUpLeft,
@@ -65,6 +67,7 @@ import {
   ToolStreamFold,
   FoldTitle,
   HighlightText,
+  ProcessFold,
   ProcessWindow,
 } from "./transcript-message";
 import {
@@ -81,7 +84,6 @@ import {
   formatBytes,
   formatDuration,
 } from "./transcript-utils";
-import { Button } from "@/components/ui/button";
 import {
   formatChannelModelLabel,
   parseChannelModelLabel,
@@ -115,6 +117,7 @@ import {
   findServiceByRemoteWorkDir,
   isRemoteWorkDir,
   parseRemoteWorkDir,
+  probeRemoteReachability,
   remoteAvailable,
   remoteProjectLabel,
 } from "@/lib/remote-projects";
@@ -425,15 +428,6 @@ function isTextualFile(file: File): boolean {
   return TEXTUAL_EXT.test(file.name);
 }
 
-function _readFileAsText(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsText(file);
-  });
-}
-
 // Convert a dropped/picked File into a FileAttachment (reads image preview + base64).
 async function fileToAttachment(file: File): Promise<FileAttachment> {
   const isImage = file.type.startsWith("image/");
@@ -464,12 +458,6 @@ async function fileToAttachment(file: File): Promise<FileAttachment> {
   };
 }
 
-// ==== Empty State ====================================================================================
-
-function _EmptyState() {
-  return null;
-}
-
 // ==== Reasoning Effort Select ==================================================================
 
 /**
@@ -490,20 +478,7 @@ const REASONING_OPTIONS: { value: ReasoningEffortLevel; label: string }[] = [
   { value: "high", label: "高" },
 ];
 
-/**
- * 把任意 ReasoningEffortLevel 归一到三档之一，用于下拉选中项的回显。
- *
- * 为什么需要：store / 后端可能存着旧值或当前模型不支持的档（如 xhigh、
- * minimal、off）。这些值不在 REASONING_OPTIONS 里，若不归一，
- * findIndex 会返回 -1，UI 会退到一个写死的兜底档，显示与真实状态不符。
- *
- * 按「思考预算」的直觉排序归并：
- *   none/off/minimal → 低（几乎不思考）
- *   low             → 低
- *   medium          → 中
- *   high            → 高
- *   xhigh/max/ultra → 高（比高更强，但前端不区分，统一显示为高）
- */
+
 function normalizeReasoningDisplay(
   level: ReasoningEffortLevel | undefined,
 ): ReasoningEffortLevel {
@@ -516,7 +491,6 @@ function normalizeReasoningDisplay(
     case "ultra":
       return "high";
     default:
-      // low / minimal / off / none / undefined
       return "low";
   }
 }
@@ -703,10 +677,6 @@ export function ReasoningEffortControl({
               <span className="ui-text-sm2 font-medium text-primary">
                 {current.label}
               </span>
-            </div>
-            <div className="flex items-center justify-between text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/40 leading-none">
-              <span>更快</span>
-              <span>更聪明</span>
             </div>
             <div
               ref={trackRef}
@@ -934,15 +904,11 @@ function PendingQueueIndicator() {
       className="shrink-0 h-7 px-2 rounded-lg flex items-center gap-1 text-amber-600 dark:text-amber-400 hover:bg-amber-400/15 transition-colors"
     >
       <span className="size-1.5 rounded-full bg-amber-500 animate-pulse" />
-      <span className="text-[length:var(--helix-transcript-size)*0.85] tabular-nums">
-        已排队 {count} 条
-      </span>
     </button>
   );
 }
 
-// 忙时行为三档：决定「正在跑时按 Enter」把这条消息怎么处理。
-// pi 的 prompt.streamingBehavior（两档，均为 pi 原生行为）：
+// 忙时行为两档：决定「正在跑时按 Enter」把这条消息怎么处理。
 //  - steer = 插话：等当前工具调用结束、下一次 LLM 调用前注入
 //  - followUp = 排队：本轮完全跑完后投递
 const BUSY_BEHAVIOR_OPTIONS = [
@@ -987,11 +953,6 @@ export function BusyBehaviorSelector({
         type="button"
         onClick={() => setOpen(!open)}
         className="flex items-center gap-1.5 px-2.5 h-8 rounded-xl ui-text-sm2 transition-colors duration-150 text-muted-foreground hover:text-foreground hover:bg-muted/50"
-        data-tip={
-          compact
-            ? `${cur?.label ?? "插话"}（模型忙时按 Enter 的处理方式）`
-            : "模型忙时按 Enter 的处理方式"
-        }
       >
         <ListOrdered className="size-3.5 shrink-0" />
         {!compact && (
@@ -1146,8 +1107,6 @@ export function AgentFlowPanel() {
   const planModeBySession = useHelixStore((s) => s.planModeBySession);
   const setPermissionMode = useHelixStore((s) => s.setPermissionMode);
   const setPlanModeForSession = useHelixStore((s) => s.setPlanModeForSession);
-  // 作用域视图（生效档 + 本对话那格 + 远程/总开关旗标）。
-  const permissionScopeInfo = useHelixStore((s) => s.permissionScopeInfo);
   // 侧栏开着 → 主输入框压缩到 7 件（+ / 审批图标 / 忙时行为图标 / 上下文图标 /
   // 模型前8字 / 思考强度 / 发送）。侧栏收起时恢复完整工具条（含「已排队」角标、
   // 审批档位文字、模型全名）。旁路面板 byline 常驻右栏，永远按紧凑走。
@@ -1181,15 +1140,9 @@ export function AgentFlowPanel() {
   const compressionNotice = useHelixStore(
     (s) => s.compressionNotices[currentSessionId ?? DRAFT_SESSION_KEY],
   );
-  // 压缩进行中标记：手动 /compact 与自动压缩共用。用它驱动对话流里的
-  // 「压缩中…」动画行，让用户知道压缩正在发生（之前该标记只做并发保护，
-  // UI 无任何反馈，表现为"点了压缩却什么都没发生"）。
-  // 按会话取——原先是全局单值，A 会话压缩时切到 B 会话，动画会跟着跑到 B 上。
   const compressionBusy = useHelixStore(
     (s) => s.compressionBusyBySession[currentSessionId ?? DRAFT_SESSION_KEY],
   );
-  const [showNewProjectForm, setShowNewProjectForm] = useState(false);
-  const [newProjectName, setNewProjectName] = useState("");
   const [fileSkills, setFileSkills] = useState<
     Array<{ name: string; description: string }>
   >([]);
@@ -1295,7 +1248,7 @@ export function AgentFlowPanel() {
   );
 
   const abortRef = useRef<AbortController | null>(null);
-  // 当前会话 id 的 ref 镜像：/btw 在 handleRun 里执行，useCallback 闭包里的
+  // /btw 在 handleRun 里执行，useCallback 闭包里的
   // currentSessionId 可能已被用户切走；发问瞬间取 ref 才是用户真正所在的主线。
   const mainCidRef = useRef<string | null>(currentSessionId);
   useEffect(() => {
@@ -1324,6 +1277,10 @@ export function AgentFlowPanel() {
   // session id AND the gateway epoch it was created under, so we can detect
   // dead sessions after a gateway restart (see loadSessionMap / persistSessionMap).
   const sessionMapRef = useRef<Map<string, SessionMapEntry>>(new Map());
+  // 本次 run 里**现场铸造**的 cid（草稿第一条消息时生成）。恢复阶梯用它与
+  // 「凭据全丢的僵尸对话」区分：僵尸 cid 是从历史列表加载进来的，本地持久化
+  // 记录已被删/损坏 → 锁死；新铸造的 cid 没有 record 是正常状态 → 允许开新会话。
+  const freshRunCidsRef = useRef<Set<string>>(new Set());
   const runningSessionIdRef = useRef<string | null>(null);
   // 待处理的用户应答（审批/clarify 反问）条数。clarifyQueue / approvalQueue 是
   // useState，run 循环的闭包拿不到最新值——用 ref 镜像，让空闲兜底定时器能感知
@@ -1589,7 +1546,18 @@ export function AgentFlowPanel() {
     left: number;
     bottom: number;
     flyoutLeft: boolean;
+    // 二级菜单贴 hover 行底「向上长」（flyoutAbove=true，bottom-0 锚定）；
+    // 行太靠上、菜单顶会越过视口顶时，去掉底锚、改用 flyoutTopOffset
+    // （top 相对行顶，可负）把菜单顶压到距视口顶 8px，菜单 max-h 内滚动。
+    flyoutAbove: boolean;
+    flyoutTopOffset: number;
   } | null>(null);
+  // 二级菜单 wrapper 按供应商 id 存着：hover 时量它实际撑开的高度，
+  // 配合行位置判断「向上长」会不会顶出视口（空态输入框偏上时就是这种）。
+  const modelFlyoutRefs = useRef(new Map<string, HTMLDivElement>());
+  const [hoveredProviderId, setHoveredProviderId] = useState<string | null>(
+    null,
+  );
   const approvalModeDropdownRef = useRef<HTMLDivElement>(null);
 
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
@@ -2124,25 +2092,49 @@ export function AgentFlowPanel() {
     const target = permissionTarget();
     const cid = currentSessionId;
     const sid = cid ? sessionMapRef.current.get(cid)?.sid : undefined;
-    void useHelixStore
-      .getState()
-      .syncPermissionMode(target)
-      .then(() => {
-        if (!cid || !sid) return;
+    void (async () => {
+      // 远程对话：启动只检查本地项目，远程不管不检测。隧道没在连（remoteMode
+      // 为空 —— 重启后隧道子进程必然已消亡）就**什么都不发往远端**：不探活、
+      // 不 resume、不重启网关，直接标记待恢复并返回，避免对着关机的服务器
+      // 反复尝试（用户看到的"启动一直连接然后卡死"）。
+      // 用户显式连上服务器（连接向导/服务器卡片）后，发送第一条消息的探活门
+      // 会探一次并走完整恢复链。隧道在连时仍照旧探活（远端可能中途掉线）。
+      // activeSessionWorkDir 与 currentSessionId 在 store 的切会话 action 里
+      // 同一个 set 更新，这里读到的一定是当前对话自己的目录。
+      const workDir = useHelixStore.getState().activeSessionWorkDir;
+      if (cid && isRemoteWorkDir(workDir)) {
+        const tunnelUp = !!useHelixStore.getState().remoteMode;
+        if (!tunnelUp) {
+          useHelixStore.getState().setRemoteUnreachable(cid, true);
+          debug("[HelixTrace] 隧道未连接，跳过远程对话恢复（启动不检测远程）", { cid });
+          return;
+        }
+        const probe = await probeRemoteReachability();
+        if (probe.configured && !probe.reachable) {
+          useHelixStore.getState().setRemoteUnreachable(cid, true);
+          debug("[HelixTrace] 远程探活不可达，跳过恢复该对话", { cid });
+          return;
+        }
+        useHelixStore.getState().setRemoteUnreachable(cid, false);
+      }
+      try {
+        await useHelixStore.getState().syncPermissionMode(target);
+      } catch (e: unknown) {
+        console.warn("[Helix] syncPermissionMode(switch) failed:", e);
+        return;
+      }
+      if (!cid || !sid) return;
+      try {
         const st = useHelixStore.getState();
         const mode_id = approvalModeOf(
           st.permissionMode,
           !!st.planModeBySession[cid],
         );
-        return helixApi()
-          ?.send("session/set_mode", { session_id: sid, mode_id })
-          .catch((e: unknown) => {
-            console.warn("[Helix] set_mode(sync on switch) failed:", e);
-          });
-      })
-      .catch((e: unknown) => {
-        console.warn("[Helix] syncPermissionMode(switch) failed:", e);
-      });
+        await helixApi()?.send("session/set_mode", { session_id: sid, mode_id });
+      } catch (e: unknown) {
+        console.warn("[Helix] set_mode(sync on switch) failed:", e);
+      }
+    })();
   }, [currentSessionId, permissionTarget]);
   // Per-session running: any conversation whose draft is running (whether it's
   // the front run or a background run you switched to) shows busy state.
@@ -2164,13 +2156,50 @@ export function AgentFlowPanel() {
   const brokenSessionReason = useHelixStore((s) =>
     currentSessionId ? s.brokenSessionReasons[currentSessionId] : null,
   );
-  // 覆盖面板（定时任务/技能）打开时，把聊天输入区降一级（z-20），避免
+  // 失效对话的自愈探测：历史文件被恢复（用户把 jsonl 放回原处）后自动解除
+  // broken 锁定，不用重启应用。判定来源只有 session/file_exists——与恢复
+  // 阶梯①同一权威检查，只查磁盘不付 spawn 代价；查到即 clearSessionBroken
+  //（横幅消失、输入恢复），之后的发送照常走完整恢复阶梯，不再有旧状态残留。
+  useEffect(() => {
+    if (!isSessionBroken || !currentSessionId) return;
+    let alive = true;
+    const probe = async () => {
+      const entry = sessionMapRef.current.get(currentSessionId);
+      const sid = entry?.sid || entry?.sids?.[0];
+      if (!sid) return;
+      try {
+        const fe = (await helixApi()!.send("session/file_exists", {
+          session_id: sid,
+        })) as { ok?: boolean };
+        if (alive && fe?.ok) {
+          useHelixStore.getState().clearSessionBroken(currentSessionId);
+          useHelixStore.getState().showToast({
+            type: "success",
+            title: "会话历史已恢复",
+            description: "检测到历史文件已恢复，可以继续对话。",
+          });
+        }
+      } catch {
+        /* 探测失败不作为：下一轮再试 */
+      }
+    };
+    probe();
+    const timer = window.setInterval(probe, 10_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [isSessionBroken, currentSessionId]);
+  // 远程对话探活不可达（启动/切会话时探过）：输入区显示提示，发送前会再探。
+  const isRemoteUnreachable = useHelixStore(
+    (s) => !!currentSessionId && !!s.remoteUnreachableCids[currentSessionId],
+  );
+  // 覆盖面板（定时任务）打开时，把聊天输入区降一级（z-20），避免
   // 和面板（z-30）争焦点；历史条/上下文指示器也在面板打开时隐藏（遮挡感）。
   const showScheduledTasksPanel = useHelixStore(
     (s) => s.showScheduledTasksPanel,
   );
-  const showSkillPanel = useHelixStore((s) => s.showSkillPanel);
-  const overlayPanelOpen = showScheduledTasksPanel || showSkillPanel;
+  const overlayPanelOpen = showScheduledTasksPanel;
   // Per-session busy: only the conversation that is itself running shows a
   // stop button. A global isChatLoading (even if set by a future caller) must
   // never lock the input of a different/new conversation.
@@ -2837,31 +2866,63 @@ export function AgentFlowPanel() {
   }, [showModelDropdown, showApprovalModeDropdown, showFolderDropdown]);
 
   // 模型下拉是 portal + fixed 定位：打开时按触发按钮的视口坐标算位置，
-  // 之后跟着 scroll/resize 重算（空态输入框在滚动容器里，会真滚走）。
-  // 打开的首帧位置在按钮 onClick 里同步算好（避免 useEffect 晚一帧闪现），
-  // 这里只负责后续跟随。
-  // 二级菜单默认向左开（right-full），左侧放不下时翻到右边，避免被
-  // 视口/卡片左缘裁掉。
-  useEffect(() => {
-    if (!showModelDropdown) return;
+  // 之后跟着 scroll/resize/面板尺寸变化重算（空态输入框在滚动容器里，会真滚走）。
+  // 一级面板：底边贴按钮上缘 8px 向上长。空态（新对话）输入框偏上、供应商多
+  // 时面板会顶出视口顶（表现为"顶部被挡"）——量到面板实际高度后把底边下压，
+  // 保证整块面板留在视口内（顶留 8px）。
+  // 二级菜单：默认贴 hover 行底向上长（right-full 向左开），左侧放不下时
+  // 翻到右边，避免被视口/卡片左缘裁掉；行太靠上时见上方 flyoutAbove 注释。
+  const computeModelDropdownPos = useCallback(() => {
+    const r = modelDropdownRef.current?.getBoundingClientRect();
+    if (!r) return null;
     const PANEL_W = 176; // w-44
     const FLYOUT_W = 264; // w-64 + pr-1
+    const left = Math.round(r.right - PANEL_W);
+    let bottom = Math.round(window.innerHeight - r.top + 8);
+    const panelH =
+      modelDropdownPanelRef.current?.getBoundingClientRect().height ?? 0;
+    if (panelH > 0) {
+      // 面板顶越视口顶 → 底边下压（顶留 8px，且不高于按钮上缘那个默认位置）。
+      bottom = Math.min(bottom, Math.max(8, window.innerHeight - panelH - 8));
+    }
+    let flyoutAbove = true;
+    let flyoutTopOffset = 0;
+    if (hoveredProviderId) {
+      const w = modelFlyoutRefs.current.get(hoveredProviderId);
+      const row = w?.parentElement;
+      if (w && row) {
+        const rowR = row.getBoundingClientRect();
+        if (rowR.bottom - w.getBoundingClientRect().height < 8) {
+          flyoutAbove = false;
+          flyoutTopOffset = Math.round(8 - rowR.top);
+        }
+      }
+    }
+    return {
+      left,
+      bottom,
+      flyoutLeft: left - FLYOUT_W >= 8,
+      flyoutAbove,
+      flyoutTopOffset,
+    };
+  }, [hoveredProviderId]);
+
+  // 打开的首帧位置在按钮 onClick 里同步算好（避免晚一帧闪现）；这里只负责
+  // 之后的跟随：scroll/resize + 面板首帧渲染后由 ResizeObserver 量到真实
+  // 高度，补上上面的视口顶 clamp（首帧时面板还没挂载、量不到）。
+  useEffect(() => {
+    if (!showModelDropdown) return;
     const update = () => {
-      const r = modelDropdownRef.current?.getBoundingClientRect();
-      if (!r) return;
-      const left = Math.round(r.right - PANEL_W);
-      const bottom = Math.round(window.innerHeight - r.top + 8);
+      const next = computeModelDropdownPos();
+      if (!next) return;
       setModelDropdownPos((prev) => {
-        const next = {
-          left,
-          bottom,
-          flyoutLeft: left - FLYOUT_W >= 8,
-        };
+        if (!prev) return next;
         if (
-          prev &&
           prev.left === next.left &&
           prev.bottom === next.bottom &&
-          prev.flyoutLeft === next.flyoutLeft
+          prev.flyoutLeft === next.flyoutLeft &&
+          prev.flyoutAbove === next.flyoutAbove &&
+          prev.flyoutTopOffset === next.flyoutTopOffset
         ) {
           return prev;
         }
@@ -2869,13 +2930,19 @@ export function AgentFlowPanel() {
       });
     };
     update();
+    let ro: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined" && modelDropdownPanelRef.current) {
+      ro = new ResizeObserver(update);
+      ro.observe(modelDropdownPanelRef.current);
+    }
     window.addEventListener("scroll", update, true);
     window.addEventListener("resize", update);
     return () => {
+      ro?.disconnect();
       window.removeEventListener("scroll", update, true);
       window.removeEventListener("resize", update);
     };
-  }, [showModelDropdown]);
+  }, [showModelDropdown, computeModelDropdownPos]);
 
   // The dropdown shows all providers' models grouped. If the current model
   // doesn't belong to any provider, snap to the first available model.
@@ -3034,20 +3101,10 @@ export function AgentFlowPanel() {
           <button
             type="button"
             onClick={() => {
-              // 打开前同步量一次位置，首帧就落在按钮正上方（见下方 effect
-              // 只负责之后的 scroll/resize 跟随）。
+              // 打开前同步量一次位置，首帧就落在按钮正上方（视口顶 clamp
+              // 由下方 effect 的 ResizeObserver 在首帧渲染后补上）。
               if (!showModelDropdown) {
-                const r = modelDropdownRef.current?.getBoundingClientRect();
-                if (r) {
-                  const PANEL_W = 176; // w-44
-                  const FLYOUT_W = 264; // w-64 + pr-1
-                  const left = Math.round(r.right - PANEL_W);
-                  setModelDropdownPos({
-                    left,
-                    bottom: Math.round(window.innerHeight - r.top + 8),
-                    flyoutLeft: left - FLYOUT_W >= 8,
-                  });
-                }
+                setModelDropdownPos(computeModelDropdownPos());
               } else {
                 setModelDropdownPos(null);
               }
@@ -3107,6 +3164,8 @@ export function AgentFlowPanel() {
                     <div
                       key={g.id}
                       className="group relative flex items-center gap-1.5 px-2 py-1.5 cursor-default transition-colors rounded-lg hover:bg-muted/70"
+                      onMouseEnter={() => setHoveredProviderId(g.id)}
+                      onMouseLeave={() => setHoveredProviderId(null)}
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
@@ -3127,11 +3186,26 @@ export function AgentFlowPanel() {
                         <path d="m9 18 6-6-6-6" />
                       </svg>
                       <div
-                        className={`invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute bottom-0 ${
+                        ref={(el) => {
+                          if (el) modelFlyoutRefs.current.set(g.id, el);
+                          else modelFlyoutRefs.current.delete(g.id);
+                        }}
+                        className={`invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute ${
+                          !modelDropdownPos || modelDropdownPos.flyoutAbove
+                            ? "bottom-0"
+                            : ""
+                        } ${
                           modelDropdownPos?.flyoutLeft
                             ? "right-full pr-1"
                             : "left-full pl-1"
                         }`}
+                        style={
+                          modelDropdownPos &&
+                          !modelDropdownPos.flyoutAbove &&
+                          modelDropdownPos.flyoutTopOffset !== 0
+                            ? { top: modelDropdownPos.flyoutTopOffset }
+                            : undefined
+                        }
                       >
                         {/* 二级菜单**向上长**（bottom-0 锚在行底）且自带滚动。
                             原来用 top-0 向下长：面板贴着卡片底部，下面没有空间，
@@ -3338,7 +3412,49 @@ export function AgentFlowPanel() {
   // 绝不发给模型；在 "/" 补全列表里与 skills 并列出现。
   const BUILTIN_COMMANDS = BUILTIN_SLASH_COMMANDS;
 
-  // 合并客户端内置命令与本地技能（去重后交给 filteredSkills 做前缀/子串匹配）。
+  // pi 扩展注册的斜杠命令（pi-connect 的 /connect、plan-mode 的 /plan …）。
+  // 这些命令由扩展在 pi 运行期注册，名字只存在于 `get_commands` RPC 里；
+  // 菜单不列出来的话，用户只能靠记忆手打——pi-connect 的「渠道中心」入口
+  // 就只有 /connect 一条，没入口等于插件不存在。
+  // 只取 source=="extension"：prompt 模板与 skills 各自有面板，重复列会出现
+  // 同名两个选项（行为还不一样）。
+  const [piSlashCommands, setPiSlashCommands] = useState<
+    Array<{ name: string; description: string }>
+  >([]);
+  useEffect(() => {
+    if (piSlashCommands.length > 0) return;
+    const api = window.electron?.helix as
+      | {
+          piListCommands?: () => Promise<{
+            commands?: Array<{ name?: unknown; description?: unknown }>;
+          }>;
+        }
+      | undefined;
+    if (!api?.piListCommands) return;
+    api
+      .piListCommands()
+      .then((res) => {
+        const list = Array.isArray(res?.commands) ? res.commands : [];
+        setPiSlashCommands(
+          list
+            .filter(
+              (c): c is { name: string; description?: unknown } =>
+                typeof c?.name === "string" && c.name !== "",
+            )
+            .map((c) => ({
+              name: c.name,
+              description:
+                typeof c.description === "string" ? c.description : "",
+            })),
+        );
+      })
+      .catch(() => {
+        // 网关未就绪：菜单少一组扩展命令，不影响其余条目。
+      });
+  }, [piSlashCommands.length]);
+
+  // 合并客户端内置命令、pi 扩展命令与本地技能（去重后交给 filteredSkills 做
+  // 前缀/子串匹配）。顺序 = 渲染顺序 = 键盘选中索引顺序，不能乱。
   const allSlashItems = useMemo(() => {
     const builtinCmds = BUILTIN_COMMANDS.flatMap((c) => {
       const names = [c.name];
@@ -3356,11 +3472,30 @@ export function AgentFlowPanel() {
     const builtinNames = new Set(
       BUILTIN_COMMANDS.map((c) => c.name.toLowerCase()),
     );
+    // 扩展命令：选中/回车只把 `/name ` 填进输入框（参数由用户补，例如
+    // `/connect status`），发送时原样交给 pi —— prompt() 会先执行扩展命令本身。
+    const extCmds = piSlashCommands
+      .filter((c) => !builtinNames.has(c.name.toLowerCase()))
+      .map((c) => ({
+        name: c.name,
+        description: c.description,
+        id: "extcmd:" + c.name,
+        icon: undefined as string | undefined,
+        isBuiltinCommand: false as const,
+        isExtensionCommand: true as const,
+        action: undefined,
+      }));
+    const extNames = new Set(extCmds.map((c) => c.name.toLowerCase()));
     return [
       ...builtinCmds,
-      ...allSkills.filter((s) => !builtinNames.has(s.name.toLowerCase())),
+      ...extCmds,
+      ...allSkills.filter(
+        (s) =>
+          !builtinNames.has(s.name.toLowerCase()) &&
+          !extNames.has(s.name.toLowerCase()),
+      ),
     ];
-  }, [allSkills, BUILTIN_COMMANDS]);
+  }, [allSkills, BUILTIN_COMMANDS, piSlashCommands]);
 
   const filteredSkills = useMemo(() => {
     if (input.startsWith("/")) {
@@ -3376,7 +3511,7 @@ export function AgentFlowPanel() {
     }
     return allSlashItems;
   }, [allSlashItems, input]);
-  // 命令（builtin）与技能（skill）拆成两个分组，分别渲染「命令」「技能」两段。
+  // 命令（builtin）/ 扩展命令 / 技能（skill）三段分组，渲染顺序与 flat 索引一致。
   const filteredCommands = useMemo(
     () =>
       filteredSkills.filter(
@@ -3388,11 +3523,26 @@ export function AgentFlowPanel() {
       ),
     [filteredSkills],
   );
-  const filteredSkillsOnly = useMemo(
+  const filteredExtCommands = useMemo(
     () =>
       filteredSkills.filter(
         (s) =>
-          (s as { isBuiltinCommand?: boolean }).isBuiltinCommand !== true,
+          (s as { isExtensionCommand?: boolean }).isExtensionCommand === true,
+      ),
+    [filteredSkills],
+  );
+  const filteredSkillsOnly = useMemo(
+    () =>
+      filteredSkills.filter(
+        (s) => {
+          const item = s as {
+            isBuiltinCommand?: boolean;
+            isExtensionCommand?: boolean;
+          };
+          return (
+            item.isBuiltinCommand !== true && item.isExtensionCommand !== true
+          );
+        },
       ),
     [filteredSkills],
   );
@@ -3542,20 +3692,6 @@ export function AgentFlowPanel() {
     }
     prevMsgLen.current = chatMessages.length;
   }, [chatMessages.length]);
-
-  // 外部面板回填输入框（子代理编排面板的「插入输入框」）。
-  // 用 setInputSynced 而非 setInput：它同时同步 inputValueRef，
-  // 否则 @ 补全/Enter 发送读到的还是旧值。
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { text?: string } | undefined;
-      if (!detail?.text) return;
-      setInputSynced(detail.text);
-      inputRef.current?.focus();
-    };
-    window.addEventListener("helix:fill-input", handler);
-    return () => window.removeEventListener("helix:fill-input", handler);
-  }, [setInputSynced]);
 
   // Scan workspace files for @ file references.
   // NOTE: 必须跟随**本对话的**项目目录重跑。旧实现依赖数组是 `[]` 且用
@@ -3718,7 +3854,7 @@ export function AgentFlowPanel() {
         <ChevronDown className="size-3 opacity-60" />
       </button>
       {showFolderDropdown && (
-        <div className="absolute bottom-full left-0 mb-2 w-[100px] bg-card border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in p-1.5">
+        <div className="absolute bottom-full left-0 mb-2 w-[120px] bg-card border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in p-1.5">
           <button
             type="button"
             onClick={async () => {
@@ -3957,51 +4093,6 @@ export function AgentFlowPanel() {
     },
     [pendingImages, pendingFiles, persistPendingAttachments],
   );
-
-  // Handle new project creation
-  const handleCreateProject = useCallback(async () => {
-    if (!newProjectName.trim()) {
-      return;
-    }
-
-    if (isElectron()) {
-      // Use Electron to create directory
-      const dir = await electronDialog.openDirectory();
-      if (dir) {
-        const projectPath = `${dir}/${newProjectName.trim()}`;
-        try {
-          await window.electron?.fs?.write(
-            `${projectPath}/.gitkeep`,
-            "",
-          );
-          selectWorkDir(projectPath);
-          setShowNewProjectForm(false);
-          setNewProjectName("");
-          storeActions.showToast({
-            type: "success",
-            title: "项目已创建",
-            description: projectPath,
-          });
-        } catch (err) {
-          storeActions.showToast({
-            type: "error",
-            title: "创建失败",
-            description: String(err),
-          });
-        }
-      }
-    } else {
-      // Browser mode: just set the project name as work dir hint
-      selectWorkDir(newProjectName.trim());
-      setShowNewProjectForm(false);
-      setNewProjectName("");
-      storeActions.showToast({
-        type: "success",
-        title: "项目已设置",
-        description: newProjectName.trim(),
-      });
-    }
-  }, [newProjectName, selectWorkDir, storeActions]);
 
   // Resolve /command -> skill name + user query
   const resolveCommand = useCallback(
@@ -4500,6 +4591,35 @@ export function AgentFlowPanel() {
         return;
       }
 
+      // ── 远程对话探活门 ─────────────────────────────────────────────────
+      // 启动/切会话时探过不可达的远程对话会被打标记；发送前再探一次：
+      // 仍然连不上 → 直接提示返回（不走恢复阶梯、不 spawn、不干等）；
+      // 已经能连上 → 清除标记，照常走完整恢复链。2s TCP 探活，隧道活着时
+      // 瞬间返回。本地对话完全不探（isRemoteWorkDir 即豁免）。
+      if (!isBackground && currentSessionId) {
+        const stNow = useHelixStore.getState();
+        if (
+          stNow.remoteUnreachableCids[currentSessionId] ||
+          isRemoteWorkDir(stNow.activeSessionWorkDir)
+        ) {
+          const probe = await probeRemoteReachability();
+          if (probe.configured && !probe.reachable) {
+            useHelixStore
+              .getState()
+              .setRemoteUnreachable(currentSessionId, true);
+            storeActions.showToast({
+              type: "warning",
+              title: "远程服务器当前不可达",
+              description: "已跳过恢复该对话。连接服务器后即可继续，或改用本地项目。",
+            });
+            return;
+          }
+          useHelixStore
+            .getState()
+            .setRemoteUnreachable(currentSessionId, false);
+        }
+      }
+
       // ── 输入队列 ────────────────────────────────────────────────────────
       // 本会话还在跑时，纯文本消息按「忙时行为」两档分流
       //（BUSY_BEHAVIOR_OPTIONS，均为 pi 原生 streamingBehavior）：
@@ -4910,6 +5030,7 @@ export function AgentFlowPanel() {
           Date.now() +
           "-" +
           Math.random().toString(36).slice(2, 6);
+        freshRunCidsRef.current.add(activeSessionId);
         useHelixStore.getState().setCurrentSessionId(activeSessionId);
         // 新对话归属当前项目：activeSessionWorkDir 从此始终反映「当前对话所属项目」
         // （加载的项目外对话为 null），界面据此决定是否显示项目目录与分支。
@@ -5121,22 +5242,33 @@ export function AgentFlowPanel() {
             useHelixStore.getState().selectedWorkDir,
         );
 
-        // ── 会话恢复阶梯（**永不判死**）───────────────────────────────────
-        // 不变量：只要这个对话还有本地历史，它就一定能继续用。sid 只是"接回原
-        // 后端会话"的凭据，凭据丢了 ≠ 对话死了——所以按可靠性从高到低逐级尝试，
-        // 最后一级是"用本地历史重建一个后端会话"，它保证阶梯一定有出口：
+        // ── 会话恢复阶梯 ──────────────────────────────────────────────────
         //   ① 现存 sid 且 epoch 仍是当前代 → 实例还活着，直接沿用（不付 resume 代价）
         //   ② 本对话的历史 sid（entry.sids[]，rebindSessionSid 一直往里追加）
         //   ③ 磁盘反向索引 conversation-index.json（conversation → sid）
         //   ④ pi 磁盘扫描 + 首条用户消息指纹（session/latest_for_cwd）
-        //   ⑤ 重建：session/new + 回放最近若干轮本地历史 → 绑定新 sid，旧 sid 继续
-        //      留在 sids[]（子 Agent 磁盘清单按它归位）
-        // 以前这里只有 ①→③，且 ③ 的 RPC 在网关侧根本不存在（unknown method）→
+        //   全部失败 + 本地还有真实历史 → markSessionBroken 锁死对话，禁止再聊；
+        //   无本地历史（真新对话）→ session/new 开一条干净会话。曾经还有第⑤级
+        //   「用本地历史重建后端会话」，已按要求移除：回放只是近似上下文。
+        // 以前只有 ①→③，且 ③ 的 RPC 在网关侧根本不存在（unknown method）→
         // 于是"sid 被清空"必然落到"标记失效、永久不可用"。2026-09-22 早上 6 条
         // 对话就是这么坏的，而它们的 jsonl 全都还在磁盘上。
         let sessionId: string | null = null;
         if (existing?.sid && !epochStale && existing.epoch === liveEpoch) {
-          sessionId = existing.sid; // ①
+          // ① 现存 sid 也**必须**验证 jsonl 还在磁盘上：文件被删后 pi 实例还在
+          // 内存里活着，直接沿用发 prompt 时 pi 会对缺失的 sessionPath 就地
+          // newSession 铸一个新 sid 文件（SessionManager._setSessionFile 的
+          // else 分支）——表现为"静默新建对话"。轻量 RPC 只查文件，不付
+          // spawn/restore 代价；结果为 false 就放弃沿用，交给下面的阶梯：
+          // resume 会归一成 session_not_found，最终走到锁死。
+          try {
+            const fe = (await helixApi()!.send("session/file_exists", {
+              session_id: existing.sid,
+            })) as { ok?: boolean };
+            if (fe?.ok) sessionId = existing.sid; // ①
+          } catch {
+            /* 检查失败不算定论：不沿用，让 resume 阶梯给出真实判定 */
+          }
         }
 
         const adoptSid = (sid: string, how: string, storedId?: string) => {
@@ -5192,11 +5324,10 @@ export function AgentFlowPanel() {
           );
         }
 
-        // 本地持久化记录：④ 的指纹与 ⑤ 的回放都要用。**只在凭据全丢时才读盘**
+        // 本地持久化记录：④ 的指纹与会话锁死判定都要用。**只在凭据全丢时才读盘**
         // （`loadSessions()` 要反序列化全部对话的转录，不能放在常规路径上）。
         let localTurns: PersistedChatMessage[] = [];
-        let hasContent = false;
-        // ⑤ 也要用它：远程/本地通道的判定看**这条对话自己的** workDir，界面记的
+        // 远程/本地通道的判定看**这条对话自己的** workDir，界面记的
         // activeSessionWorkDir 在跨视图重建时可能是上一个会话留下的。
         let record: PersistedSession | undefined;
         if (!sessionId && myCid) {
@@ -5209,11 +5340,6 @@ export function AgentFlowPanel() {
           );
           const firstUserText =
             localTurns.find((m) => m.role === "user")?.content ?? "";
-          hasContent =
-            !!record &&
-            (localTurns.length > 0 ||
-              (record.tasks?.length ?? 0) > 0 ||
-              (record.checkpoints?.length ?? 0) > 0);
 
           // ④ pi 磁盘扫描 + 首条用户消息指纹。指纹精确（同一对话/分叉共享），所以
           //    必须跳过已被**别的**对话占用的 sid，否则会把别人的会话抢过来续写。
@@ -5258,20 +5384,30 @@ export function AgentFlowPanel() {
         }
 
         if (!sessionId) {
-          // ⑤ 重建 / 真 Draft。无 SID ≠ 新对话：有本地历史就必须把历史回放进新
-          // 会话（否则用户看到的是一段有上下文、模型却从零开始的对话）。回放走
-          // session/new 的 messages（Rust 侧按轮数与字符预算裁剪）。
-          // 这**不是**"静默 session/new 顶替"：旧 sid 留在 sids[] 里，映射被
-          // rebindSessionSid 原地更新，历史一条都不会丢。
-          const seedMessages = hasContent
-            ? localTurns
-                .map((m) => ({
-                  role: m.role,
-                  content: normalizeAcpContent(m.content),
-                }))
-                .filter((m) => m.content.trim())
-                .slice(-40)
-            : [];
+          // 找不到原后端会话 + 本地还有真实历史 → **禁止**再聊。曾在这里走
+          // 「session/new + 本地历史回放」重建阶梯，但回放只是近似上下文（最多
+          // 40 轮），把"还在聊"伪装成"会话还在"。现在按用户要求：恢复失败就
+          // 锁死对话（broken 横幅 + 输入框禁用），绝不静默重建。
+          //
+          // 僵尸对话的第二种形态：cid 在（从列表加载过），但本地持久化记录已经
+          // 不存在（对话被删 / 记录损坏）。此时读不到 localTurns，靠 freshRunCidsRef
+          // 区分——本 run 现场铸造的草稿 cid 没有 record 是正常的，其他 cid 都按
+          // 凭据全丢锁死。后台旁路 run 不锁（它的 UI 不在前台，横幅无处显示）。
+          const zombieCid =
+            myCid && !record && !freshRunCidsRef.current.has(myCid);
+          if ((localTurns.length > 0 || zombieCid) && !isBackground) {
+            useHelixStore.getState().markSessionBroken(
+              myCid,
+              "会话历史缺失：此会话的执行历史文件不存在，暂时无法继续。已有消息会保留；请恢复历史文件后重试，或新建任务。新任务不会自动继承旧上下文。",
+            );
+            useHelixStore.getState().showToast({
+              type: "error",
+              title: "会话历史缺失",
+              description: "执行历史文件不存在，暂无法继续；请新建任务。",
+            });
+            throw new Error("原后端会话已找不到，无法继续对话");
+          }
+          // 真 Draft：无 SID 也无本地历史——正常开一条新会话。
           const st0 = useHelixStore.getState();
           // 这条对话的项目身份，与上面 `rawCwd` 同一条链（落盘的 workDir 优先于
           // 界面记的）。远程对话走重建时 activeSessionWorkDir 可能是上一个视图
@@ -5300,7 +5436,6 @@ export function AgentFlowPanel() {
             ...(remoteKey
               ? { remote_cwd: remoteKey.remotePath || "~" }
               : { cwd: ownWorkDir ?? undefined }),
-            ...(seedMessages.length > 0 ? { messages: seedMessages } : {}),
           })) as {
             session_id?: string;
             sessionID?: string;
@@ -5326,21 +5461,8 @@ export function AgentFlowPanel() {
           persistSessionMap(sessionMapRef.current);
           sessionEpochRef.current = liveEpoch;
           useHelixStore.getState().clearSessionBroken(myCid);
-          // 新建/重建 = 全新后端会话，上下文占用从零开始。
+          // 新开 draft 会话，上下文占用从零开始。
           useHelixStore.getState().setContextUsage(myCid, 0, 0, []);
-          if (seedMessages.length > 0) {
-            // 必须让用户知道"这不是原来那个后端会话了"——上下文是回放出来的
-            // 近似，比原会话短（只带最近若干轮）。
-            useHelixStore.getState().showToast({
-              type: "info",
-              title: "已重建后端会话",
-              description: `原会话凭据已不可恢复，已回放最近 ${seedMessages.length} 条本地历史继续对话。`,
-            });
-            debug(
-              "[HelixTrace] 凭据全丢，已用本地历史重建后端会话 →",
-              sessionId,
-            );
-          }
         }
         // 还没落盘的选档（这条对话在草稿期被选过档）：sid 此刻已经有了，先写成
         // 「本对话」覆盖再往下走。放在提交 prompt **之前**是硬要求——闸门按 sid 查
@@ -5711,9 +5833,6 @@ export function AgentFlowPanel() {
                   size: Number(u.size) || 0,
                   used: Number(u.used) || 0,
                 };
-              case "available_commands_update":
-                // 已废弃：后端不再发送此事件
-                return null;
               case "session_info_update": {
                 // 普通标题/元数据更新
                 // Backends sometimes carry errors, notices, or even the final
@@ -9833,17 +9952,45 @@ export function AgentFlowPanel() {
           if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
         }}
       >
-        {/* 会话已失效：生命周期结束，不再假装会话存在（不发送、不 resume、
-            不 session/new 顶替）。 */}
+        {/* 会话已失效：不再假装会话存在（自动短路发送）。横幅可关闭——
+            关闭即解除 broken 锁定，允许再发一次重试（发送时阶梯①会重新
+            验证 jsonl：文件还没回来就会再次锁死；文件回来了则照常恢复）。 */}
         {isSessionBroken && (
           <div className="flex items-start gap-2 px-4 py-2.5 border-b border-amber-500/20 bg-amber-500/5 text-amber-600 ui-text-sm2">
             <AlertTriangle className="size-3.5 mt-0.5 shrink-0" />
-            <div className="min-w-0">
-              <div className="font-medium">该对话已失效，无法继续对话</div>
+            <div className="min-w-0 flex-1">
+              <div className="font-medium">会话历史缺失，暂无法继续对话</div>
               <div className="opacity-80 break-all">
                 {brokenSessionReason
                   ? brokenSessionReason.slice(0, 160)
-                  : "如需继续，请新建对话"}
+                  : "请恢复历史文件后重试，或新建对话"}
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="关闭提示并允许重试"
+              title="关闭提示；再次发送会重新校验历史文件"
+              className="shrink-0 p-0.5 rounded-md opacity-70 hover:opacity-100 hover:bg-amber-500/10 transition-colors"
+              onClick={() => {
+                if (currentSessionId)
+                  useHelixStore.getState().clearSessionBroken(currentSessionId);
+              }}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        )}
+        {/* 远程对话探活不可达：启动时探过连不上，已跳过恢复后端会话。
+            发送前会再探一次，连上了提示自动消失、照常恢复。 */}
+        {isRemoteUnreachable && !isSessionBroken && (
+          <div className="flex items-start gap-2 px-4 py-2.5 border-b border-border/40 bg-muted/30 text-muted-foreground ui-text-sm2">
+            <WifiOff className="size-3.5 mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <div className="font-medium text-foreground">
+                远程服务器当前不可达，已跳过恢复该对话
+              </div>
+              <div className="opacity-80">
+                连接服务器后再次发送即可自动恢复；本地历史仍可查看。
               </div>
             </div>
           </div>
@@ -9980,7 +10127,7 @@ export function AgentFlowPanel() {
           onPaste={handlePaste}
           readOnly={isSessionBroken}
           placeholder={
-            isSessionBroken ? "该对话已失效，请新建对话" : "随心输入..."
+            isSessionBroken ? "会话历史缺失，暂无法继续对话" : "随心输入..."
           }
           rows={1}
           className="chat-input w-full min-w-0 resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/70 text-[length:var(--helix-transcript-size)] min-h-[36px] max-h-[200px] px-3 pt-2 pb-1 leading-[1.45] break-all overflow-x-hidden overflow-y-auto text-foreground outline-none"
@@ -10069,17 +10216,68 @@ export function AgentFlowPanel() {
               </>
             )}
 
+            {/* Extension commands section（pi 扩展注册的命令，如 /connect） */}
+            {filteredExtCommands.length > 0 && (
+              <>
+                {filteredCommands.length > 0 && (
+                  <div className="border-t border-border/30 mx-3" />
+                )}
+                <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">
+                  扩展命令
+                </p>
+                {filteredExtCommands.map((skill, index) => {
+                  const flatIndex = filteredCommands.length + index;
+                  return (
+                    <button
+                      key={skill.id}
+                      type="button"
+                      ref={
+                        flatIndex === selectedSkillIndex
+                          ? (el) => {
+                              if (el) el.scrollIntoView({ block: "nearest" });
+                            }
+                          : undefined
+                      }
+                      onClick={() => {
+                        // 只填进输入框、不直接发送：这类命令几乎都带参数
+                        // （/connect status、/connect checkin），回车再由 pi 执行。
+                        handleSkillSelect(skill);
+                      }}
+                      className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 ${
+                        flatIndex === selectedSkillIndex
+                          ? "bg-primary/10 text-primary"
+                          : "hover:bg-muted/30"
+                      }`}
+                    >
+                      <Terminal className="size-4 text-foreground/40 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground block truncate">
+                          {skill.name}
+                        </span>
+                        {skill.description && (
+                          <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground block truncate">
+                            {skill.description}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </>
+            )}
+
             {/* Skills section */}
             {filteredSkillsOnly.length > 0 && (
               <>
-                {filteredCommands.length > 0 && (
+                {filteredCommands.length + filteredExtCommands.length > 0 && (
                   <div className="border-t border-border/30 mx-3" />
                 )}
                 <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">
                   技能
                 </p>
                 {filteredSkillsOnly.map((skill, index) => {
-                  const flatIndex = filteredCommands.length + index;
+                  const flatIndex =
+                    filteredCommands.length + filteredExtCommands.length + index;
                   return (
                     <button
                       key={skill.id}
@@ -10685,29 +10883,27 @@ export function AgentFlowPanel() {
                           lastProcessBlock?.type === "thinking";
                         return (
                           <>
-                            <details
-                              ref={(el) => {
-                                if (el && !el.hasAttribute("open"))
-                                  el.open = true;
-                              }}
-                              className="my-2 group/details"
+                            <ProcessFold
+                              streaming={streamingActive}
+                              summary={
+                                <>
+                                  {/* 只有卡里真的装了过程段才显示「已完成」标题：
+                                      「最后文本不位于末尾」时 processSegments 可能为空
+                                      （消息以文字开头、后面全是工具调用），此时折叠卡里
+                                      没有内容，再挂一个孤零零的「已完成」就是纯噪声。 */}
+                                  {!streamingActive &&
+                                    processSegments.length > 0 && (
+                                      <>
+                                        <FoldTitle
+                                          label="已完成"
+                                          active={false}
+                                          fontSize={transcriptFontSize}
+                                        />
+                                      </>
+                                    )}
+                                </>
+                              }
                             >
-                              <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors mb-1">
-                                {/* 只有卡里真的装了过程段才显示「已完成」标题：
-                                    「最后文本不位于末尾」时 processSegments 可能为空
-                                    （消息以文字开头、后面全是工具调用），此时折叠卡里
-                                    没有内容，再挂一个孤零零的「已完成」就是纯噪声。 */}
-                                {!streamingActive &&
-                                  processSegments.length > 0 && (
-                                    <>
-                                      <FoldTitle
-                                        label="已完成"
-                                        active={false}
-                                        fontSize={transcriptFontSize}
-                                      />
-                                    </>
-                                  )}
-                              </summary>
                               <ProcessWindow
                                 active={streamingActive}
                                 dependency={displayResponseBlocks}
@@ -10817,7 +11013,6 @@ export function AgentFlowPanel() {
                                               <ToolStreamFold
                                                 blocks={toolBlocks}
                                                 fontSize={transcriptFontSize}
-                                                forceFold
                                                 isRunning={isRunning}
                                               >
                                                 {toolBlocks
@@ -10851,7 +11046,7 @@ export function AgentFlowPanel() {
                                   );
                                 })}
                               </ProcessWindow>
-                            </details>
+                            </ProcessFold>
                             {summarySegment && (
                               <div
                                 className="my-2"
@@ -11068,7 +11263,6 @@ export function AgentFlowPanel() {
                                               <ToolStreamFold
                                                 blocks={toolBlocks}
                                                 fontSize={transcriptFontSize}
-                                                forceFold
                                                 isRunning={isRunning}
                                               >
                                                 {toolBlocks
@@ -11216,50 +11410,6 @@ export function AgentFlowPanel() {
         </div>
       </div>
 
-      {/* New project form */}
-      {showNewProjectForm && (
-        <div className="max-w-[700px] mx-auto mb-2 p-3 bg-card/30 rounded-xl border border-border/30 shadow-sm">
-          <div className="flex items-center gap-2 mb-2">
-            <FolderPlus className="size-4 text-primary" />
-            <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
-              新建项目
-            </span>
-          </div>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={newProjectName}
-              onChange={(e) => setNewProjectName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleCreateProject();
-              }}
-              placeholder="输入项目名称..."
-              className="flex-1 px-3 py-2 bg-muted border border-border rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground transition-all duration-200"
-              autoFocus
-            />
-            <Button size="sm" onClick={handleCreateProject} className="px-3">
-              创建
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setShowNewProjectForm(false);
-                setNewProjectName("");
-              }}
-            >
-              取消
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* Scroll to bottom button — 悬浮在输入框上缘，不占布局空间。
-          此前是夹在消息列表与输入框之间的实体行（约 44px），一出现就把列表
-          视口压矮，列表底部本来可见的最新文字被挤出可视区，看起来像"按钮
-          行把后面的文字挡住了"。改为 absolute 覆盖层后列表高度恒定，出现/
-          消失不再引发任何内容位移。 */}
-      {/* Bottom input */}
       {sessionMessages.length > 0 &&
         !approvalRequest &&
         !clarifyRequest &&

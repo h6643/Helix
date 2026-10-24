@@ -99,7 +99,7 @@
 | `skills.rs` | `SKILL.md` 技能目录与子代理开关 |
 | `subagents.rs` | `config.yaml` 的 `subagents:` 块读写（镜像到扩展 settings.json） |
 | `delegations.rs` | 子代理委派转录 / 时间线回放 |
-| `vision.rs` / `image_model.rs` | 视觉 / 图像模型配置与调用 |
+| `vision.rs` | 视觉转述模型配置与调用 |
 | `hooks.rs` | `config.yaml` 的 `hooks:` 块读写 |
 | `proxy.rs` | 跨平台 HTTP 代理（模型 / MCP / 渲染层） |
 | `profile.rs` | 模型 profile 缓存与激活 |

@@ -1,18 +1,5 @@
 //! Gateway MCP servers — read/write view of pi's MCP config.
-//!
-//! pi ships built-in MCP (verified in 0.99.1): it reads `~/.pi/agent/mcp.json`
-//! itself — `{ "mcpServers": {...} }`, ServerEntry schema: command/args/env/
-//! cwd/url/headers/disabled — and registers the servers' tools as
-//! `mcp__<server>__<tool>`. No adapter extension is needed any more; the old
-//! `pi-mcp-adapter` / `pi-mcp-lite` bridges are gone (pi-mcp-lite duplicated
-//! the tools under a second `<server>__<tool>` naming).
-//!
-//! Helix keeps the canonical copy of the server list in the top-level
-//! `mcp_servers:` block of `~/.pi/agent/config.yaml` (the shared user config
-//! file, alongside vision/web_search/image/agent blocks), and mirrors it into
-//! mcp.json on every save — which is exactly the file pi's built-in loader
-//! reads, so no extra plumbing is required.
-//!
+
 //! The renderer speaks the old shape: `{ name: { enabled?, ... } }`.
 //! `enabled: false` is written as `disabled: true` on disk and translated
 //! back on read; every other field passes through verbatim.
@@ -287,7 +274,7 @@ fn load_servers() -> Map<String, Value> {
 
 /// Write the full server map into config.yaml's `mcp_servers:` block, replacing
 /// the whole block in place and preserving every other part of the file
-/// (vision/web_search/image/... blocks, inline data-root comments, etc.).
+/// (vision/web_search/... blocks, inline data-root comments, etc.).
 /// Per-server `env` is carried over from the previous config (yaml or legacy
 /// mcp.json) when the incoming entry omits it (display round trips don't
 /// carry secrets).
@@ -396,8 +383,7 @@ fn save_mcp_servers(
     atomic_write(&path, &(body + "\n")).map_err(|e| e.to_string())
 }
 
-/// Mirror the adapter-shape server map into `~/.pi/agent/mcp.json` so the
-/// pi-mcp-adapter picks up the change on the next gateway respawn.
+/// Mirror the adapter-shape server map into `~/.pi/agent/mcp.json` 
 /// The adapter only reads mcp.json — config.yaml is the user-facing source
 /// of truth and mcp.json is its runtime mirror.
 fn mirror_to_mcp_json(servers_adapter_shape: &Map<String, Value>) {
@@ -477,7 +463,6 @@ pub fn mcp_config_save(
     if let Err(e) = save_mcp_servers(obj, &merged_env) {
         return json!({ "ok": false, "error": format!("write failed: {e}") });
     }
-    // Mirror into mcp.json so the pi-mcp-adapter (which only reads mcp.json)
     // picks up the server list on the next gateway respawn. Build the adapter-
     // shaped server map from the merged view (env carried over, enabled
     // translated to disabled).
@@ -557,7 +542,7 @@ mod tests {
             "      TOKEN: secret\n",
             "    enabled: false\n",
             "agent:\n",
-            "  personality: ''\n",
+            "  name: demo\n",
         );
         let legacy = parse_legacy_mcp_servers(yaml);
         assert_eq!(legacy.len(), 1);

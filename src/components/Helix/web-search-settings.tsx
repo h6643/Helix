@@ -117,7 +117,6 @@ export function WebSearchSettings() {
       }
       setTavilyDraft("");
       await refresh();
-      showToast({ type: "success", title: "联网搜索配置已保存" });
     } catch (e) {
       showToast({
         type: "error",

@@ -137,7 +137,9 @@ pub fn tasks_kill(task_id: String) -> Value {
 /// List background tasks from a **remote** machine's `~/.pi/agent/tasks.json`
 /// via SSH. Remote projects run pi on the remote host, so their background
 /// tasks are registered there — the local `tasks_list` can't see them.
-#[tauri::command]
+// (async)：启动后就 10s 一轮的轮询路径。远端不可达时 ssh 阻塞到 ConnectTimeout，
+// 放主线程会把整个窗口卡成「一启动就卡死」。必须在独立线程执行。
+#[tauri::command(async)]
 pub fn remote_tasks_list(
     host: String,
     port: u32,

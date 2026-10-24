@@ -12,7 +12,7 @@
  */
 import { Check, Copy, GitFork, FileText, Pencil } from "lucide-react";
 import React from "react";
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { FileChangeSummary } from "./file-change-summary";
 import { HelixMarkdown } from "./helix-markdown";
 import { InlineToolGroup } from "./inline-tool-group";
@@ -36,7 +36,20 @@ import {
   extractKaomojiStatus,
 } from "@/lib/text-utils";
 import { formatMergedSummary, isSubAgentTool } from "@/lib/tool-merge";
+import { useHelixStore } from "@/stores/helix-store";
 import { type ChatMessage, type ExecutionStep } from "@/stores/helix-types";
+
+/** 思考体展开后最多显示的行数。超出部分在这个高度里滚动——完整推理仍在数据里
+ *  （上翻可读、复制可拿全文），但一段几千字的 reasoning 不能把对话流整个顶下去。
+ *  按行数而不是写死 rem：思考体字号跟随「界面字号」设置，写死 18rem 时小字号能显示
+ *  二十来行、大字号只剩七八行，同一个限制在不同设置下含义不同。 */
+const THINKING_BODY_MAX_LINES = 8;
+/** 思考体的 row-height（em）。必须与下面 div 的 lineHeight 用同一个值，行数才准。 */
+const THINKING_BODY_LINE_HEIGHT = 1.5;
+
+/** 贴底判定容差：滚动位置距底 ≤ 该像素即视为「跟着最新内容」。取 24 是按
+ *  行高留的余量——差不到一行还往回拽，用户感觉不出被抢滚动条。 */
+const STICK_EPSILON_PX = 24;
 
 const ThinkGlyph = ({ active = false }: { active?: boolean }) => (
   <span
@@ -102,11 +115,33 @@ export const ThinkingFold = React.memo(function ThinkingFold({
 
   // 流式思考（active）时 body 受 max-h 限高 + 滚轮，增量内容要把视图钉到底部，
   // 否则用户只能看到最开头的旧文本、看不到模型正在写的最新思考。
+  // 但**只在视图本来就在底部时**跟：这个 body 自己有滚动条，用户上翻去读前面
+  // 的推理时，每来一个分片都无条件拽回 scrollTop=scrollHeight，等于把滚动条
+  // 抢走——"我往上滚想看思考内容，它还是跳回最下面"。所以按终端式贴底判定
+  // （距底 ≤24px 才算跟着），用户回到底部后自动恢复跟随。
+  const stickRef = React.useRef(true);
+  const handleBodyScroll = React.useCallback(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickRef.current = distanceFromBottom <= STICK_EPSILON_PX;
+  }, []);
   React.useEffect(() => {
-    if (active && bodyRef.current) {
-      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-    }
-  }, [active, body]);
+    if (!active) return;
+    const el = bodyRef.current;
+    if (!el || !stickRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [active, body, open]);
+
+  // 重新展开就重新决定「看哪儿」：默认回到跟随最新内容（展开瞬间视图确实在
+  // 底部）。不重置的话，上一次展开时上翻过就会带着 stickRef=false 再打开，
+  // 展开后停在顶部、新内容再也不跟进来。
+  const toggleOpen = React.useCallback(() => {
+    setUserOpen((v) => {
+      if (!v) stickRef.current = true;
+      return !v;
+    });
+  }, []);
 
   return (
     <div className="group/think my-1 rounded-md">
@@ -115,7 +150,7 @@ export const ThinkingFold = React.memo(function ThinkingFold({
           直接裁断（"截断无滚轮"）。这里用普通 div + inline maxHeight 限高，
           让滚动条稳定出现。点击标题随时切换展开/收起（默认折叠）。 */}
       <div
-        onClick={() => setUserOpen((v) => !v)}
+        onClick={toggleOpen}
         className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors"
       >
         <ThinkGlyph active={active} />
@@ -168,10 +203,19 @@ export const ThinkingFold = React.memo(function ThinkingFold({
         )}
       </div>
       {open && (
+        /* 左侧竖线：与工具结果面板（.tool-result-panel）同一条 var(--border)
+           2px 折线，让「思考」在视觉上也归入"被引出的正文"，不至于和最终答复
+           混成同一层。ml-1 + pl-3 与旧 pl-5 的文字起点基本重合，行长不变。 */
         <div
           ref={bodyRef}
-          className="mt-1 pl-5 text-foreground/70 whitespace-pre-wrap"
-          style={{ fontSize, maxHeight: "18rem", overflowY: "auto" }}
+          onScroll={handleBodyScroll}
+          className="mt-1 ml-1 pl-3 border-l-2 border-border text-foreground/70 whitespace-pre-wrap"
+          style={{
+            fontSize,
+            lineHeight: THINKING_BODY_LINE_HEIGHT,
+            maxHeight: fontSize * THINKING_BODY_LINE_HEIGHT * THINKING_BODY_MAX_LINES,
+            overflowY: "auto",
+          }}
         >
           {active && !body ? "…" : body}
         </div>
@@ -180,6 +224,66 @@ export const ThinkingFold = React.memo(function ThinkingFold({
   );
 });
 
+// 行名截断：openAgentView 的 name 会成为右侧栏页签的显示名，取任务描述第一行够读即可。
+const shortAgentName = (s: string): string =>
+  s.replace(/\s+/g, " ").trim().slice(0, 60) || "子代理";
+
+/** 点击对话里的子代理执行行 → 跳右侧栏「子 Agent」页。目标定位三级解析：
+ *  ① toolCallId 直接命中 store 子代理（磁盘重建卡的 id 就是 tool_call_id，
+ *    agent-work-panel 里 subagentMap 的 tool_call_id→agent_id 映射同键）；
+ *  ② 按 Agent 调用参数里的 goal/prompt 文本匹配 live 卡 description/name——
+ *    subagent.start 的 goal 与工具参数本就同源；同段描述重复派发取时间最近的；
+ *  ③ 未命中（重启后 / 旧会话无 live 卡）：把 toolCallId 当 id 交给面板——
+ *    磁盘 delegation 按 id 命中时间线，subagentMap 兜底，都是既有路径。 */
+function openSubAgentForStep(step: ExecutionStep): void {
+  const { openAgentView, subAgents, currentSessionId } =
+    useHelixStore.getState();
+  const pool = subAgents.filter(
+    (a) => !a.sessionId || a.sessionId === currentSessionId,
+  );
+  const params = (step.toolParams ?? {}) as Record<string, unknown>;
+  const goal =
+    [params.goal, params.prompt, params.description].find(
+      (v): v is string => typeof v === "string" && v.trim() !== "",
+    ) ?? "";
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+  if (step.toolCallId) {
+    const byId = pool.find(
+      (a) => a.id === step.toolCallId || a.agentId === step.toolCallId,
+    );
+    if (byId) {
+      openAgentView({
+        id: byId.id,
+        name: shortAgentName(byId.description || byId.name),
+      });
+      return;
+    }
+  }
+  if (goal) {
+    const cands = pool.filter(
+      (a) =>
+        norm(a.description) === norm(goal) || norm(a.name) === norm(goal),
+    );
+    if (cands.length > 0) {
+      const anchor = step.startedAt ?? step.timestamp;
+      const best = cands.reduce((p, c) =>
+        Math.abs(c.createdAt - anchor) < Math.abs(p.createdAt - anchor)
+          ? c
+          : p,
+      );
+      openAgentView({
+        id: best.id,
+        name: shortAgentName(best.description || best.name),
+      });
+      return;
+    }
+  }
+  openAgentView({
+    id: step.toolCallId || norm(goal) || "subagent",
+    name: goal ? shortAgentName(goal) : "子代理",
+  });
+}
+
 // 完成态工具流折叠：整轮 N 个工具调用收成一行「N 个操作 · 动词统计」。
 // 子代理执行（Agent / delegate_task…）不并入动词统计——每次子代理执行
 // 提升为常显的独立行，摘要行只统计普通工具。
@@ -187,25 +291,28 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
   blocks,
   fontSize,
   children,
-  forceFold = false,
   isRunning = false,
 }: {
   blocks: Array<{ type: string; steps?: ExecutionStep[] }>;
   fontSize: number;
   children: React.ReactNode;
-  forceFold?: boolean;
   isRunning?: boolean;
 }) {
-  const { names, total, subagentSteps, timedSteps } = useMemo(() => {
+  const { names, total, subagentSteps, timedSteps, failedCount } = useMemo(() => {
     const ns: string[] = [];
     const sa: ExecutionStep[] = [];
     const ts: ExecutionStep[] = [];
     let all = 0;
+    let failed = 0;
     for (const b of blocks) {
       if (b.type !== "tool_group" || !b.steps) continue;
       for (const s of b.steps) {
         if (s.type !== "tool_call") continue;
         all += 1;
+        // 失败数按 tool_call 自己的 status 计，与 ToolCard 判红叉的口径一致
+        // （inline-tool-group.tsx 里 `step.status === "failed"`）。子代理失败也计入
+        // ——它们虽然单列成行不进动词统计，但失败这一事实不该被埋掉。
+        if (s.status === "failed") failed += 1;
         if (isSubAgentTool(s.toolName)) {
           sa.push(s);
           continue;
@@ -214,7 +321,7 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
         ts.push(s);
       }
     }
-    return { names: ns, total: all, subagentSteps: sa, timedSteps: ts };
+    return { names: ns, total: all, subagentSteps: sa, timedSteps: ts, failedCount: failed };
   }, [blocks]);
   const diff = useMemo(() => summarizeGroupDiff(blocks), [blocks]);
   // 工具耗时只出现在这一行标签上，卡片上不再逐个显示：一轮里挂一排零碎数字看不出
@@ -259,6 +366,7 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
               steps={[step]}
               isRunning={isRunning}
               fontSize={fontSize}
+              onOpenAgent={() => openSubAgentForStep(step)}
             />
           </div>
         ))}
@@ -267,11 +375,33 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
   // 没有普通工具可统计：全是子代理（或没有工具调用）。
   if (names.length === 0) {
     // 全是子代理：独立行就是全部内容，children 会与其重复，不再渲染折叠行。
-    if (total > 0) return <>{hoisted}</>;
+    // 但如果这一轮里有失败，子代理独立行上面插一行叙述：全部子代理失败时若
+    // 不插一行，失败信号就没地方落。
+    if (total > 0) {
+      return (
+        <>
+          {failedCount > 0 && (
+            <div className="group/tfold -mx-1.5 px-1.5">
+              <span
+                className="text-foreground/40 font-normal select-none"
+                style={{ fontSize }}
+              >
+                共 {total} 个子代理，其中 {failedCount} 个失败
+              </span>
+            </div>
+          )}
+          {hoisted}
+        </>
+      );
+    }
     return <>{children}</>;
   }
-  const summary = formatMergedSummary(names);
-  // 标签右端这一条带子同时容纳「总耗时」与「+N −n」，两者都靠右对齐。
+  const summary = formatMergedSummary(names) || `${total} 个操作`;
+  // 失败数缀在摘要句子尾巴上（「终端 · 1 命令，失败 1」），而不是右端一个孤立 ✕
+  // 徽章：这一行已经把「跑了什么、成败如何」一次说完；右边只留变更行号与总耗时
+  // ——那里是计量信息，不是叙述。
+  // 标签右端这一条带子同时容纳「总耗时」与「+N −n」，都靠右对齐。
+  // 失败信号已归到左边摘要句子，这里不再重复。
   const rightBand =
     totalDurationS > 0 || diff.added > 0 || diff.removed > 0 ? (
       <span
@@ -297,37 +427,27 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
         )}
       </span>
     ) : null;
-  // 单个工具不折叠（不该为一张卡藏起内容），但标签行照旧渲染：耗时只有这一个
-  // 归属处，持久化轮次少了这行就会「刷新一次时间就没了」。
-  if (total <= 1 && !forceFold) {
-    return (
-      <>
-        <div className="group/tfold -mx-1.5 px-1.5 flex items-center gap-1.5">
-          <span
-            className="text-foreground/40 font-normal select-none truncate"
-            style={{ fontSize }}
-          >
-            {summary || `${total} 个操作`}
-          </span>
-          {rightBand}
-        </div>
-        <div className="mt-1">{children}</div>
-      </>
-    );
-  }
+  const labelRow = (
+    <summary className="group/tfold cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
+      <span
+        className="text-foreground/40 font-normal select-none truncate"
+        style={{ fontSize }}
+      >
+        {summary}
+        {failedCount > 0 && (
+          <span className="text-foreground/40">；失败 {failedCount}</span>
+        )}
+      </span>
+      {rightBand}
+    </summary>
+  );
+  // 单个工具也照样折起来：耗时、成败信号都在标签行上，展开只是为了看那张卡，
+  // 而「一行命令正文占满对话流」并不是用户回看历史时的默认诉求。
   return (
     <>
       {hoisted}
       <details className="group/details">
-        <summary className="group/tfold cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
-          <span
-            className="text-foreground/40 font-normal select-none truncate"
-            style={{ fontSize }}
-          >
-            {summary || `${total} 个操作`}
-          </span>
-          {rightBand}
-        </summary>
+        {labelRow}
         <div className="mt-1">{children}</div>
       </details>
     </>
@@ -354,6 +474,45 @@ export const FoldTitle = ({
     {label}
   </span>
 );
+
+/**
+ * 「已完成」过程卡的外层折叠。open 跟随流式边沿：本轮开始跑就展开，跑完自动
+ * 收起成「已完成」；两次边沿之间完全由用户开合。
+ *
+ * 不要用 `open={streaming}` 直接绑：那样每次重渲染都会把用户的开合状态冲掉。
+ * 也不要在 ref 回调里写 `el.open = true`：行内 ref 每次重渲染都会重新执行，
+ * 用户刚点收起，下一次面板更新（每秒耗时 tick 就够）就被撑回去，表现为
+ * 「完成后默认展开且点不动」。
+ */
+export const ProcessFold = ({
+  streaming,
+  summary,
+  children,
+}: {
+  streaming: boolean;
+  summary: React.ReactNode;
+  children: React.ReactNode;
+}) => {
+  const [open, setOpen] = useState(streaming);
+  const wasStreaming = useRef(streaming);
+  useEffect(() => {
+    if (wasStreaming.current === streaming) return;
+    wasStreaming.current = streaming;
+    setOpen(streaming);
+  }, [streaming]);
+  return (
+    <details
+      className="my-2 group/details"
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors mb-1">
+        {summary}
+      </summary>
+      {children}
+    </details>
+  );
+};
 
 function CopyButton({
   text,
@@ -589,14 +748,12 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                 return (
                   <>
                     {hasProcess && (
-                      // 流式时折叠卡默认展开（与主对话流式管线 open={streamingActive}
-                      // 一致），完成后收起成「已完成」。
-                      <details
-                        className="my-2 group/details"
-                        open={isStreaming}
-                      >
-                        <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors mb-1">
-                          {!isStreaming && (
+                      // 流式时展开、跑完自动收起成「已完成」，中途用户可自由开合
+                      // （与主对话流式管线共用 ProcessFold）。
+                      <ProcessFold
+                        streaming={isStreaming}
+                        summary={
+                          !isStreaming && (
                             <>
                               <FoldTitle
                                 label="已完成"
@@ -609,8 +766,9 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                                 </span>
                               ) : null}
                             </>
-                          )}
-                        </summary>
+                          )
+                        }
+                      >
                         <div className="mt-1">
                           {showInlineReasoning && (
                             <ThinkingFold
@@ -736,7 +894,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                             })}
                           </div>
                         </div>
-                      </details>
+                      </ProcessFold>
                     )}
                     {summarySegment && (
                       <div className="my-2" style={{ fontSize }}>

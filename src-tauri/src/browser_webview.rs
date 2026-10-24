@@ -1,8 +1,5 @@
 //! 内置浏览器的真网页视图：每个浏览器页一条无边框子窗口（native overlay）。
 //!
-//! 为什么不是 iframe：Helix 跑在 Tauri 上，主 webview 里的 `<iframe>` 对绝大多数
-//! 外网站会被 `X-Frame-Options` / CSP `frame-ancestors` 直接拒掉，只能退回
-//! `page_fetch` 抓来的静态快照 —— 于是「能看、点不动」。
 //!
 //! 为什么不用真内嵌视图（`Window::add_child`）：那是 `unstable` feature，它会把进程里
 //! **每一条** webview 都切成 WindowChild 模式（不只新建的那条），官方自己标注「未来

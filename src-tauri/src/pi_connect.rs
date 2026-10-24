@@ -1,13 +1,6 @@
 //! 渠道中心 —— 一次性 pi RPC 桥。
 //!
-//! 在独立的 `pi --mode rpc --no-session` 进程里执行 pi-connect 扩展的
-//! `/connect` 命令，把扩展的 notify 文本收回来给设置页（「渠道中心」）。
-//!
-//! 为什么不复用常驻网关：网关的 RPC 通道是聊天主链路（prompt/事件流都归
-//! 会话用），往里塞扩展命令会污染当前会话的 transcript 与事件流；并且常驻
-//! 会话已经带上了工作目录等上下文，而渠道查询只需要扩展自身。一次性进程
-//! 完全隔离：命令执行完即杀，`--no-session` 保证不落 ~/.pi/agent/sessions。
-//!
+
 //! 除设置页的「渠道中心」面板外，Helix 的每日自动签到定时任务
 //! （scheduled_tasks::dispatch_channel_checkin）也复用本桥。
 //!

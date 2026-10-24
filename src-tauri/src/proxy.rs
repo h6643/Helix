@@ -8,9 +8,9 @@
 //! 生效路径（修改后需重启应用）：
 //! - 渲染层 webview：`lib.rs` 启动时用 `builder.proxy_url(load_proxy_url())`
 //!   注入（WebView2 → `--proxy-server`）。
-//! - Rust 侧出口 HTTP：`proxy_aware_client()` / `proxy_aware_blocking_client()`
+//! - Rust 侧出口 HTTP：`proxy_aware_client()` / `proxy_aware_blocking_client_builder()`
 //!   （需要 build 前配 redirect / UA / timeout 时用 `*_builder()` 变体），供
-//!   page_fetch / vision / 模型列表 / npm 检查 / 生图使用。留空 = 直连。
+//!   page_fetch / vision / 模型列表 / npm 检查使用。留空 = 直连。
 //!   **所有新出口调用必须走这里**，裸 `reqwest::Client::new()` 会绕过代理。
 //! - pi 子进程：`pi_gateway` 启动时注入 `proxy_env_pairs()`（`HTTP_PROXY` /
 //!   `HTTPS_PROXY` / `ALL_PROXY` + 小写别名 + `NO_PROXY` + `NODE_USE_ENV_PROXY=1`），
@@ -86,11 +86,6 @@ pub fn proxy_aware_blocking_client_builder() -> reqwest::blocking::ClientBuilder
 /// 共享的"代理感知"client：代理读 `load_proxy_url()`，留空则不挂代理。
 pub fn proxy_aware_client() -> Result<reqwest::Client, reqwest::Error> {
     proxy_aware_client_builder().build()
-}
-
-/// 阻塞版（spawn_blocking 线程里用）。
-pub fn proxy_aware_blocking_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
-    proxy_aware_blocking_client_builder().build()
 }
 
 /// pi 子进程应注入的代理 env：覆盖 pi 内模型 / MCP / 命令工具 / npx 的出口流量。

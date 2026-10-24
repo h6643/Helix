@@ -148,6 +148,10 @@ function applyStatus(msgs: NotifyMessage[]) {
   for (const m of onlyChannel(msgs)) {
     const text = m.message?.trim();
     if (!text) continue;
+    // 进度播报（「pi-connect: 正在读取 N 个渠道状态…」）：pi-connect 现在先发
+    // 一条进度，再逐渠道播报。这条不属于任何渠道，不能当渠道行渲染 —— 否则
+    // 卡片里会多出一格既没额度也没签到的「渠道」。
+    if (text.startsWith("pi-connect:")) continue;
     if (text.includes("渠道概览")) blocks.push(...splitOverview(text));
     else blocks.push(text);
   }

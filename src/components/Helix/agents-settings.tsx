@@ -5,7 +5,6 @@ import {
   ChevronDown,
   ChevronUp,
   User,
-  Users,
 } from "lucide-react";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
@@ -385,7 +384,15 @@ const PresetSubagentItem = ({
   );
 };
 
-export function AgentsSettings() {
+// PageHeader ~line 693: 保持独立称号「子智能体」；嵌入扩展管理 Tab 时
+// SkillPanel 通过 addRequest 递增触发 startAdd，onCount 上报子智能体数量。
+export function AgentsSettings({
+  onCount,
+  addRequest,
+}: {
+  onCount?: (n: number) => void;
+  addRequest?: number;
+} = {}) {
   const [cfg, setCfg] = useState<DelegationConfig>(DEFAULTS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -395,6 +402,9 @@ export function AgentsSettings() {
     { id: string; name: string; system_prompt: string }[]
   >([]);
   const [adding, setAdding] = useState(false);
+  // 「设置」视图：整页展示子智能体全局设置（config.yaml subagents 块），
+  // 由头部按钮切换；添加页（adding）优先级更高。
+  const [showSettings, setShowSettings] = useState(false);
 
   // ── Subagent global settings (config.yaml `subagents:` block) ───────
   type SubagentSettings = {
@@ -587,6 +597,19 @@ export function AgentsSettings() {
     setErr(null);
   };
 
+  // 嵌入扩展管理时的「添加」入口 + 数量上报（递增序号触发一次）。
+  const lastAdd = useRef(0);
+  useEffect(() => {
+    if (addRequest && addRequest !== lastAdd.current) {
+      lastAdd.current = addRequest;
+      startAdd();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addRequest]);
+  useEffect(() => {
+    onCount?.(presets.length);
+  }, [presets, onCount]);
+
   // 取消/关闭添加页：未保存时丢弃 startAdd 插入的空白草稿；已保存后只是
   // 退出编辑页（身份已写入，不应再删除），与「保存 Hooks 配置」停留显示一致。
   const cancelAdd = () => {
@@ -700,14 +723,22 @@ export function AgentsSettings() {
             >
               关闭
             </button>
+          ) : showSettings ? (
+            <button
+              onClick={() => setShowSettings(false)}
+              className="text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors shrink-0"
+              data-tip="关闭"
+            >
+              关闭
+            </button>
           ) : (
             <Button
               variant="outline"
               size="sm"
-              onClick={startAdd}
+              onClick={() => setShowSettings(true)}
               className="shrink-0"
             >
-              添加子智能体
+              设置
             </Button>
           )
         }
@@ -724,7 +755,6 @@ export function AgentsSettings() {
           /* ── 添加 Subagent 独立页：整页替换列表视图，与「添加模型」一致 ── */
           <>
             <SettingGroup
-              plain
               title="添加子智能体"
               description="配置委派模型的默认参数，并登记一个具名的子智能体身份。"
             >
@@ -772,53 +802,6 @@ export function AgentsSettings() {
                     "text",
                     "控制子智能体的思考深度与耗时",
                   )}
-                  {identities.length > 0 &&
-                    (() => {
-                      const draft = identities[identities.length - 1];
-                      return (
-                        <>
-                          <SettingRow label="名称">
-                            <div className="flex items-center gap-2">
-                              <input
-                                value={draft.name}
-                                onChange={(e) =>
-                                  updateIdentity(draft.id, {
-                                    name: e.target.value,
-                                  })
-                                }
-                                placeholder="如 researcher"
-                                className="w-56 px-3 py-1.5 bg-transparent border border-border/30 rounded-lg ui-text font-semibold text-foreground text-center placeholder:text-muted-foreground/30 placeholder:font-normal transition-colors focus:border-primary/40"
-                              />
-                              <Button
-                                size="icon"
-                                variant="ghost"
-                                className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
-                                onClick={exitAdd}
-                                aria-label="删除子智能体"
-                                data-tip="删除"
-                              >
-                                <Trash2 className="size-4" />
-                              </Button>
-                            </div>
-                          </SettingRow>
-                          <SettingRow
-                            label="系统提示词"
-                            hint="子智能体的人格描述 / 角色设定"
-                          >
-                            <textarea
-                              value={draft.system_prompt}
-                              onChange={(e) =>
-                                updateIdentity(draft.id, {
-                                  system_prompt: e.target.value,
-                                })
-                              }
-                              placeholder="系统提示词 / 人格描述…"
-                              className="w-72 min-h-[80px] px-3 py-1.5 bg-transparent border border-border/30 rounded-lg ui-text text-foreground text-left placeholder:text-muted-foreground/30 resize-y transition-colors focus:border-primary/40"
-                            />
-                          </SettingRow>
-                        </>
-                      );
-                    })()}
                   <SettingRow
                     label="危险命令自动通过"
                     hint="开启后，子智能体执行危险命令前不再逐条请求确认。"
@@ -835,6 +818,49 @@ export function AgentsSettings() {
                   </SettingRow>
             </SettingGroup>
 
+            {/* 身份登记：与扩展管理的插件卡片同一套视觉
+                （名称当标题 + 系统提示词在下 + 右上删除） */}
+            {identities.length > 0 &&
+              (() => {
+                const draft = identities[identities.length - 1];
+                return (
+                  <div className="rounded-xl border border-border/40 bg-card/60 px-4 py-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <input
+                        value={draft.name}
+                        onChange={(e) =>
+                          updateIdentity(draft.id, {
+                            name: e.target.value,
+                          })
+                        }
+                        placeholder="如 researcher"
+                        className="flex-1 min-w-0 bg-transparent ui-subtitle font-semibold text-foreground placeholder:text-muted-foreground/30 placeholder:font-normal transition-colors focus:outline-none"
+                      />
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
+                        onClick={exitAdd}
+                        aria-label="删除子智能体"
+                        data-tip="删除"
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </div>
+                    <textarea
+                      value={draft.system_prompt}
+                      onChange={(e) =>
+                        updateIdentity(draft.id, {
+                          system_prompt: e.target.value,
+                        })
+                      }
+                      placeholder="系统提示词 / 人格描述…"
+                      className="w-full min-h-[80px] px-3 py-1.5 bg-muted/40 border border-border/30 rounded-lg ui-text text-foreground text-left placeholder:text-muted-foreground/30 resize-y transition-colors focus:border-primary/40"
+                    />
+                  </div>
+                );
+              })()}
+
             <SaveBar
               saving={saving}
               status={saved ? "ok" : err ? "err" : null}
@@ -845,8 +871,8 @@ export function AgentsSettings() {
               saveLabel="保存"
             />
           </>
-        ) : (
-          /* ── 列表页 ── */
+        ) : showSettings ? (
+          /* ── 设置页：子智能体全局设置（config.yaml subagents 块，自动保存） ── */
           <>
             {/* ── Subagent global settings (config.yaml subagents block) ── */}
             <SettingGroup>
@@ -938,18 +964,12 @@ export function AgentsSettings() {
                 )}
               </div>
             </SettingGroup>
-
+          </>
+        ) : (
+          /* ── 列表页 ── */
+          <>
             {identities.length > 0 && (
               <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Users className="size-4 text-muted-foreground/60" />
-                  <h4 className="ui-subtitle font-semibold text-foreground">
-                    已登记的身份
-                  </h4>
-                  <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
-                    {identities.length}
-                  </span>
-                </div>
                 {identities.map((i) => (
                   <SubagentItem key={i.id} i={i} remove={removeIdentity} />
                 ))}
@@ -963,19 +983,7 @@ export function AgentsSettings() {
             )}
 
             <div className="space-y-3">
-              <div className="flex items-center gap-2">
-                <h4 className="ui-subtitle font-semibold text-foreground">
-                  已注册的 Agent
-                </h4>
-                <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
-                  {presets.length}
-                </span>
-              </div>
-              {presets.length === 0 ? (
-                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
-                  当前未检测到 pi-subagents 扩展注册的 agent 类型。
-                </p>
-              ) : (
+              {(
                 <div className="space-y-2.5">
                   {presets.map((p) => (
                     <PresetSubagentItem

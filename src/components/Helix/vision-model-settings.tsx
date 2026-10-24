@@ -77,9 +77,6 @@ export function VisionModelSettings() {
       } else {
         localStorage.setItem("helix-vision-model", JSON.stringify(config));
       }
-      if (!opts?.silent) {
-        showToast({ type: "success", title: "视觉模型配置已保存" });
-      }
     } catch (e) {
       if (!opts?.silent) showToast({ type: "error", title: "保存失败" });
       throw e;

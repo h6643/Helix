@@ -718,6 +718,14 @@ export interface ElectronAPI {
         enabled?: boolean;
       }>;
     }>;
+    /**
+     * pi **扩展**注册的斜杠命令（`get_commands` 里 `source == "extension"` 的
+     * 子集）：`/connect` 这类命令由扩展在运行期注册，前端 `/` 菜单要靠它才会
+     * 出现。命令本体仍由 pi 的 prompt() 执行，前端不需要执行通道。
+     */
+    piListCommands: () => Promise<{
+      commands: Array<{ name: string; description: string }>;
+    }>;
     piSetPackageEnabled: (
       pkg: string,
       enabled: boolean,
@@ -1165,26 +1173,6 @@ export interface ElectronAPI {
     setConfig: (
       config: HooksConfig,
     ) => Promise<{ ok: boolean; error?: string }>;
-  };
-
-  // ── Image-generation model (config.yaml `image:` block) ───────────────
-  image: {
-    getConfig: () => Promise<{
-      ok: boolean;
-      config?: {
-        provider: string;
-        model: string;
-        baseUrl: string;
-        apiKey: string;
-      };
-      error?: string;
-    }>;
-    setConfig: (config: {
-      provider: string;
-      model: string;
-      baseUrl: string;
-      apiKey: string;
-    }) => Promise<{ ok: boolean; error?: string }>;
   };
 
   // ── 联网搜索（config.yaml `web_search:` 块，供 web-access 扩展消费）─────

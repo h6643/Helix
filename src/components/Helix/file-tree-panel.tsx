@@ -425,7 +425,6 @@ export function FileTreePanel({
     try {
       await electronFS.rename(item.path, newPath);
       setItems((prev) => applyRename(prev, item.path, newName, newPath));
-      showToast({ type: "success", title: "已重命名", description: newName });
     } catch (err) {
       showToast({
         type: "error",
@@ -443,11 +442,6 @@ export function FileTreePanel({
       if (st.editorTabs.some((t) => t.path === item.path))
         st.closeEditorTab(item.path);
       setItems((prev) => removeFromTree(prev, item.path));
-      showToast({
-        type: "success",
-        title: "已移动到回收站",
-        description: item.name,
-      });
     } catch (err) {
       showToast({
         type: "error",

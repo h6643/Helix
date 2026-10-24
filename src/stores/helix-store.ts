@@ -724,6 +724,9 @@ interface HelixState
   brokenSessionReasons: Record<string, string>;
   markSessionBroken: (cid: string, reason?: string) => void;
   clearSessionBroken: (cid: string) => void;
+  /** 远程对话探活不可达的 cid（见 setRemoteUnreachable 注释）。 */
+  remoteUnreachableCids: Record<string, boolean>;
+  setRemoteUnreachable: (cid: string, on: boolean) => void;
   sessionHistory: string[];
   sessionHistoryIndex: number;
   /** direction 步进 sessionHistory；给 targetId 时直接跳到该会话在栈中的
@@ -1862,6 +1865,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   noActiveConversation: false,
   brokenSessionIds: [],
   brokenSessionReasons: {},
+  remoteUnreachableCids: {},
   activeSessionWorkDir: null,
   sessionHistory: [],
   sessionHistoryIndex: -1,
@@ -2168,7 +2172,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       skills: state.skills.filter((s) => s.id !== skillId || s.isBuiltin),
     })),
 
-  toggleSkillPanel: () => set((s) => ({ showSkillPanel: !s.showSkillPanel })),
   toggleActivityFeed: () =>
     set((s) => ({ showActivityFeed: !s.showActivityFeed })),
   toggleArtifactsBrowser: () =>
@@ -2351,13 +2354,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         }
       } else if (typeof res?.error === "string") {
         // 后端**挡下了**这一写（远程会话、配置坏 JSON）。不是落盘故障，回读
-        // 也读不出用户要的东西 —— 只把实话讲出来，档位显示保持原值，绝不能停
-        // 在用户刚点的那档。
-        get().showToast({
-          type: "error",
-          title: "审批档没改",
-          description: res.error,
-        });
+        // 也读不出用户要的东西 —— 档位显示保持原值，绝不能停在用户刚点的那档。
         return get().permissionMode;
       }
     } catch {
@@ -3266,6 +3263,20 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         brokenSessionReasons: restReasons,
       };
     }),
+  // 远程对话探活不可达的 cid。启动/切会话时探过（remote/probe），连不上就不
+  // 恢复这个对话的后端会话：UI 显示提示、发送前会再探一次（能连上就清除标记
+  // 走正常恢复链）。绝不对着一个连不上的端点反复重试等到卡死。
+  setRemoteUnreachable: (cid, on) =>
+    set((s) =>
+      s.remoteUnreachableCids[cid] === on
+        ? {}
+        : on
+          ? { remoteUnreachableCids: { ...s.remoteUnreachableCids, [cid]: true } }
+          : (() => {
+              const { [cid]: _drop, ...rest } = s.remoteUnreachableCids;
+              return { remoteUnreachableCids: rest };
+            })(),
+    ),
   setCurrentSessionId: (id) =>
     set((state) => {
       if (!id) {
@@ -3495,10 +3506,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       useGatewayStore.getState().setHelixSessionId(null);
 
       const panelState = get();
-      if (panelState.showScheduledTasksPanel || panelState.showSkillPanel) {
+      if (panelState.showScheduledTasksPanel) {
         useHelixStore.setState({
           showScheduledTasksPanel: false,
-          showSkillPanel: false,
         });
       }
 
@@ -4417,9 +4427,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           state.autoArchiveRetentionDays,
         ),
         persistence.saveSetting("reasoningEffort", state.reasoningEffort),
-        persistence.saveSetting("personality", state.personality),
-        persistence.saveSetting("fastMode", state.fastMode),
-        persistence.saveSetting("terminalShell", state.terminalShell),
         // 权限档**不落盘**：真相在 pi-permission 的配置文件里，起进程时
         // syncPermissionMode 回读。这里再存一份就是第二条真相。
         persistence.saveSetting("modelBySession", state.modelBySession),
@@ -4536,9 +4543,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         availableModels,
         providerModels,
         reasoningEffort,
-        personality,
-        fastMode,
-        terminalShell,
         editorTheme,
         gitAutoCommit,
         gitAutoPush,
@@ -4652,14 +4656,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(
           persistence.loadSetting<string>("reasoningEffort"),
           "reasoningEffort",
-        ),
-        safeLoad(persistence.loadSetting<string>("personality"), "personality"),
-        safeLoad(persistence.loadSetting<boolean>("fastMode"), "fastMode"),
-        safeLoad(
-          persistence.loadSetting<"auto" | "cmd" | "pwsh" | "powershell">(
-            "terminalShell",
-          ),
-          "terminalShell",
         ),
         safeLoad(persistence.loadSetting<string>("editorTheme"), "editorTheme"),
         safeLoad(
@@ -4802,17 +4798,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           // 连快照都读不到：只能按不可信处理，本次不回写模型列表。
         }
         if (!modelListsSourceTrusted) {
-          // 静默失败是「模型全没了却没有任何提示」的另一半原因，所以这一条必须让人
-          // 看见：本次会话的模型改动不落盘（写回去就是拿空列表覆盖），重启通常就好。
+          // 静默失败是「模型全没了却没有任何提示」的另一半原因——本次
+          // 会话的模型改动不落盘（写回去就是拿空列表覆盖），重启通常就好。
           logError(
             "[restore] apiProfiles 读取失败且没有可用快照，本次不写回模型列表",
           );
-          get().showToast({
-            type: "warning",
-            title: "没能从本地存储读出模型列表",
-            description:
-              "为避免用空列表覆盖你的配置，本次会话的模型改动不会保存。重启应用通常即可恢复。",
-          });
         }
       }
 
@@ -5364,14 +5354,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         reasoningEffort:
           (reasoningEffort as ReasoningEffortLevel | undefined) ||
           get().reasoningEffort,
-        personality: personality || get().personality,
-        fastMode: fastMode ?? get().fastMode,
-        terminalShell:
-          terminalShell === "cmd" ||
-          terminalShell === "pwsh" ||
-          terminalShell === "powershell"
-            ? terminalShell
-            : "auto",
         availableModels: availableModels || [],
         providerModels: cleanedProviderModels,
         editorTheme:
@@ -5515,12 +5497,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
                 rebuilt.activeProviderId,
               );
               await persistence.saveSetting("activeModel", rebuilt.activeModel);
-              get().showToast({
-                type: "info",
-                title: `已从本地配置重建 ${rebuilt.profiles.length} 个供应商`,
-                description:
-                  "模型列表在本地存储里是空的，已按 pi 的 models.json 重新生成。请核对一下，多余的供应商直接在设置里删除即可。",
-              });
             }
           }
         } catch (rebuildErr) {
@@ -5589,11 +5565,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       );
     } catch (e) {
       logError("Failed to restore:", e);
-      get().showToast({
-        type: "error",
-        title: "数据恢复失败",
-        description: "本地存储读取异常，部分设置可能未加载",
-      });
     }
   },
 

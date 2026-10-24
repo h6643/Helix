@@ -43,6 +43,47 @@ struct RemoteTunnelTarget {
     local_port: u32,
 }
 
+/// 持久化的隧道目标（**不含任何凭证**）。
+///
+/// 为什么需要它：Helix 重启后本机隧道子进程必然不在（`tunnel_state()` 是进程
+/// 内存），但「上次连的是哪台」必须留下来——前端拿 host/port/username 去自己
+/// 的服务器列表（凭证在 safeStorage 里）找对应项并自动重连；`remote_tunnel_status`
+/// 也靠它区分「从没配过远程」和「配了远程但隧道没起来」。密码/私钥一律不落这里。
+fn persisted_tunnel_target_path() -> Option<std::path::PathBuf> {
+    Some(crate::paths::helix_data_dir().join("remote-tunnel.json"))
+}
+
+fn persist_tunnel_target(t: &RemoteTunnelTarget) {
+    let Some(path) = persisted_tunnel_target_path() else {
+        return;
+    };
+    let snapshot = json!({
+        "remote_host": t.remote_host,
+        "remote_port": t.remote_port,
+        "username": t.username,
+        "local_port": t.local_port,
+    });
+    let _ = std::fs::write(path, snapshot.to_string());
+}
+
+fn load_persisted_tunnel_target() -> Option<RemoteTunnelTarget> {
+    let path = persisted_tunnel_target_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    Some(RemoteTunnelTarget {
+        remote_host: v.get("remote_host")?.as_str()?.to_string(),
+        remote_port: v.get("remote_port")?.as_u64()? as u32,
+        username: v.get("username")?.as_str()?.to_string(),
+        local_port: v.get("local_port")?.as_u64()? as u32,
+    })
+}
+
+fn forget_persisted_tunnel_target() {
+    if let Some(path) = persisted_tunnel_target_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// 远端 `remote-bridge.js` 的监听端口。它和 SSH 端口是**两回事**：隧道必须是
 /// `<本地口>:127.0.0.1:<这个口>`。早先误把 SSH 端口当转发目标，本地 connect
 /// 打到远端 sshd —— TCP 握手成功、sshd 把 `cwd:` 握手行当垃圾直接关连接，网关
@@ -288,7 +329,9 @@ fn write_remote_config(
 }
 
 /// 一键连接：scp + 远端起 bridge + 开隧道 + 写配置 + 重启 gateway。
-#[tauri::command]
+// (async)：整个连接流程（SSH 探测 + 推 bridge + 开隧道）全是阻塞 ssh 子进程
+// 调用，远端不可达时一次最多卡 10s+ —— 必须放到独立线程，不能堵主线程。
+#[tauri::command(async)]
 pub fn remote_connect(
     state: State<'_, Arc<AppState>>,
     host: String,
@@ -325,6 +368,12 @@ pub fn remote_connect(
     push_and_start_remote_bridge(&host, port, &username, &auth)?;
     // Step 3：本机隧道。
     open_tunnel(&host, port, &username, local_port, &auth)?;
+    // 记住「上次连的是哪台」（不含凭证）：Helix 重启后隧道子进程不会自愈，
+    // 前端靠这份记录 + 自己存的凭证自动重连（见 use-remote-tunnel-reconcile），
+    // 远程对话的 resume 也要求隧道活着（见 pi_gateway 的远程 restore 分支）。
+    if let Some(t) = tunnel_target_state().lock().unwrap().clone() {
+        persist_tunnel_target(&t);
+    }
     // Step 4+5：写配置 + 重启。
     let arc: Arc<AppState> = Arc::clone(&state);
     write_remote_config(&arc, local_port, &remote_path)?;
@@ -352,6 +401,8 @@ pub fn remote_disconnect(state: State<'_, Arc<AppState>>) -> Result<Value, Strin
     }
     drop(_guard);
     kill_tunnel();
+    // 持久化的「上次连过哪台」一并清掉：用户显式断开后，重启不应再自动重连。
+    forget_persisted_tunnel_target();
     let arc: Arc<AppState> = Arc::clone(&state);
     crate::gateway::restart_gateway_soon(&arc, "远程断开（清 pi.remote_rpc / pi.remote_cwd）");
     Ok(json!({ "ok": true }))
@@ -364,7 +415,7 @@ const NOT_A_DIR: &str = "__HELIX_NOT_A_DIR__";
 /// 走的是纯 SSH，**不依赖 bridge**，所以连接前（向导第 3 步）就能浏览。
 ///
 /// `include_hidden` = 连 `.config` 这类点目录一起列出（`ls -A`，不含 `.` 与 `..`）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remote_list_paths(
     host: String,
     port: u32,
@@ -439,7 +490,7 @@ fn shell_quote(s: &str) -> String {
 /// 关键：探测用的是**和起 bridge 时同一份 PATH 预置**（`remote_path_prelude`），
 /// npm 全局候选也和 `remote-bridge.js` 的 `resolvePiCli()` 保持同一组路径。否则
 /// 会出现「体检说 pi 在，真连上却 spawn 失败」——那体检就白做了。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remote_preflight(
     host: String,
     port: u32,
@@ -536,6 +587,13 @@ pub fn remote_tunnel_status() -> Value {
         let g = tunnel_target_state().lock().unwrap();
         g.as_ref().cloned()
     };
+    // 进程内没有（刚重启 / 从没连过）：回落到持久化目标。它只说明「上次连过
+    // 哪台」，此刻隧道必然没在跑（connected 仍为 false），但前端能凭
+    // host/port/username 找到列表里对应的服务器并自动重连。
+    let (target, persisted) = match target {
+        Some(t) => (Some(t), false),
+        None => (load_persisted_tunnel_target(), true),
+    };
     let alive = {
         let mut t = tunnel_state().lock().unwrap();
         match t.as_mut() {
@@ -553,6 +611,8 @@ pub fn remote_tunnel_status() -> Value {
             // 真实生效的远端目录。前端按它把会话归到 `remote://<id>/<路径>`，
             // 少了这个字段就只能记住「上一次点连接时填了啥」，重启应用即失真。
             "remote_path": current_remote_cwd(),
+            // true = 这份目标是上次连接留下的落盘记录，当前隧道并未建立。
+            "persisted": persisted,
         }),
         None => json!({ "connected": false }),
     }

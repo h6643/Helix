@@ -856,13 +856,11 @@ fn subagents_work_dir() -> PathBuf {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
 }
 
-/// Merged pi-subagents settings: Helix's config.yaml `subagents:` block
-/// (canonical, via `crate::subagents`) overlaid by `<work_dir>/.pi/subagents.json`
-/// (the extension's own project-level file, highest precedence).
+/// Merged pi-subagents settings from `<work_dir>/.pi/subagents.json`
+/// (the extension's own project-level file).
 fn merged_subagents_settings(cwd: &Path) -> HashMap<String, serde_json::Value> {
-    let mut out: HashMap<String, serde_json::Value> =
-        crate::subagents::load_subagents_settings().into_iter().collect();
     let project = cwd.join(".pi").join("subagents.json");
+    let mut out: HashMap<String, serde_json::Value> = HashMap::new();
     if let Ok(raw) = std::fs::read_to_string(&project) {
         if let Ok(serde_json::Value::Object(o)) = serde_json::from_str(&raw) {
             for (k, v) in o {
@@ -1220,12 +1218,15 @@ fn upsert_model_line(content: &str, model: Option<&str>) -> Option<String> {
         if i <= fm_end {
             let t = line.trim_start();
             if t.starts_with("model:") {
-                if let Some(m) = model {
-                    out.push(format!("model: \"{m}\""));
-                } else {
-                    continue; // drop the line
+                // Keep at most one model line: the first occurrence gets
+                // replaced, any later duplicates are dropped.
+                if !model_replaced {
+                    if let Some(m) = model {
+                        out.push(format!("model: \"{m}\""));
+                    }
+                    model_replaced = true;
                 }
-                model_replaced = true;
+                continue;
             }
         }
         out.push(line.to_string());
@@ -1243,7 +1244,7 @@ fn upsert_model_line(content: &str, model: Option<&str>) -> Option<String> {
         out = out2;
     }
 
-    Some(out.join("\n"))
+    Some(out.join("\n") + if content.ends_with('\n') { "\n" } else { "" })
 }
 
 /// Permanently remove a custom agent's .md file (the extension's Delete does

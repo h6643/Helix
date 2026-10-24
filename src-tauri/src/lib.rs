@@ -36,7 +36,6 @@ pub mod pi_gateway_test_hooks {
         TRIM_MARGIN_TOKENS,
     };
 }
-mod image_model;
 mod profile;
 mod proxy;
 mod remote_connect;
@@ -346,8 +345,6 @@ pub fn run() {
             vision::vision_config_list,
             vision::vision_config_save,
             vision::vision_describe,
-            image_model::image_config_list,
-            image_model::image_config_save,
             // 联网搜索（web-access 扩展的 web_search: 配置块）
             web_search::web_search_config_list,
             web_search::web_search_config_save,
@@ -473,6 +470,7 @@ pub fn run() {
             helix::pi_list_installed,
             helix::pi_set_package_enabled,
             helix::pi_get_available_models,
+            helix::pi_list_commands,
             helix::pi_read_custom_providers,
             helix::pi_set_thinking_level_all,
             helix::pi_set_auto_compaction_all,

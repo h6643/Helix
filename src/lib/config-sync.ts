@@ -200,29 +200,18 @@ function pushModelConfigViaIpc(
 }
 
 /**
- * Push agent config (personality, reasoning effort, etc.) via live config.set.
- * These take effect immediately without gateway restart.
+ * Push agent config (reasoning effort) via live config.set.
+ * Takes effect immediately without gateway restart.
  */
 export function pushAgentConfigLive(payload: {
-  personality?: string;
   reasoningEffort?: string;
-  fastMode?: boolean;
 }) {
   const helix = window.electron?.helix;
   const isTauri = !isElectron() && !!helix?.setConfigKeyValue;
 
   if (!isElectron() && !isTauri) return;
 
-  if (payload.personality !== undefined) {
-    pushConfigKeyValue("display.personality", payload.personality);
-  }
   if (payload.reasoningEffort !== undefined) {
     pushConfigKeyValue("agent.reasoning_effort", payload.reasoningEffort);
-  }
-  if (payload.fastMode !== undefined) {
-    pushConfigKeyValue(
-      "agent.service_tier",
-      payload.fastMode ? "fast" : "default",
-    );
   }
 }

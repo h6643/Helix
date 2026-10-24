@@ -1,45 +1,5 @@
 //! `helix:*` 审批档位 ⇄ pi-permission 扩展的桥。
 //!
-//! # 为什么要这一层
-//!
-//! pi 官方**没有**工具级审批（`docs/security.md`：「it does not ask for approval
-//! before every tool call」）。真正能阻断工具执行的只有扩展的 `tool_call` 钩子，
-//! 而 `@zhushanwen/pi-permission` 就是干这个的：它按 `mode` 决定
-//! allow / ask / deny，ask 走 `ctx.ui.select` → Helix 的 `clarify_request` →
-//! ClarifyBar。
-//!
-//! 所以 Helix 前端那个「审批模式」下拉**必须写到这个扩展的配置里**，而不是
-//! 维护一份自己的状态。历史上这里出过一次典型的分裂：前端三档只改
-//! `classifyApproval`（一个 pi 永不触发的事件的分类器），而真弹窗在
-//! ClarifyBar 上、只读扩展自己的配置 —— 于是「设置显示完全访问、实际照样弹窗」。
-//!
-//! # 档位映射
-//!
-//! | Helix 档位 | pi-permission mode | 语义 |
-//! |---|---|---|
-//! | 询问审批   | `strict` | 全部人工审批 |
-//! | 自动审批   | `auto`   | 安全规则放行 + 非安全过 AI 风险判定，判定为风险才问 |
-//! | 完全访问   | `yolo`   | 全放行 |
-//!
-//! 上游另有第四档 `approve`（规则匹配、无 AI 那一层）；本机装的是就地补丁版，
-//! 扩展源码里已经删掉它，但 `pi update` 会带回来，所以这里的归一必须继续认得。
-//! Helix 不提供这一档，也从不写它：它与 `auto` 的差别只是「要不要过 AI」，而 AI
-//! 判定要额外一次模型调用，不该由一个下拉静默决定。
-//!
-//! 磁盘上被人写成 `approve`（或任何认不出的值）时：扩展把它认不出 ⇒ 回落它的
-//! `DEFAULT_CONFIG.mode` = **yolo，实际全放行**，所以读路径必须照样报「完全访问」
-//! 并把 `globalModeUnparsable` 摆给前端。这里曾经报 `auto`（显示会问、实际不问），
-//! 是本模块最坏那一类错法；覆盖表里的坏值同理 —— 逐条当作不存在，绝不自己发明档位。
-//!
-//! # 按项目 / 按会话覆盖（2026-10-10 本地定制）
-//!
-//! 同一个 settings.json 的 `permission` 块里另有两张覆盖表：
-//!
-//! ```json
-//! "modeByProject": { "d:/project/helix": "strict" },
-//! "modeBySession": { "01a123df-02ea-70f4-bfdd-f4598bbd6241": "yolo" }
-//! ```
-//!
 //! 生效档 = **会话覆盖 → 项目覆盖 → 全局 `mode`**，由**扩展自己**解析
 //! （`config.ts::resolvePermissionMode`，闸门与 footer 都走它），所以「面板显示
 //! 的档」与「真正拦工具的档」是同一个函数的同一个返回值。这正是这个模块一直要的
@@ -55,31 +15,6 @@
 //! 远程工作区不在这套机制的作用范围里：远端的 pi 读**远端**自己的 settings.json，
 //! 本机的覆盖表对它一点影响都没有，所以远程会话的 scoped 写入一律拒绝并说明原因。
 //!
-//! # 生效时机
-//!
-//! **不需要重启网关**：扩展的 `tool_call` 处理器每次调用都
-//! `loadAndWatchConfig()`（直接读文件，无缓存），改文件下一次调用即生效。
-//! 已经打开的审批弹窗不受影响——它的超时在弹窗打开那一刻已按当时配置起算。
-//!
-//! # 审批卡超时（2026-10-07 本地补丁）
-//!
-//! 扩展侧的超时从「AI 落定后 5 分钟」改为「弹窗打开即起算、时长可配」：
-//! `permission.approvalTimeoutSec`（30–3600 秒，默认 300，到期 fail-closed
-//! 拒绝、不静默放行）。本模块读写这个字段；`pi_gateway.rs` 在审批卡的
-//! `clarify_request` 上附带同一数值，前端据此渲染卡片倒计时。
-//! `pi update --extensions` 会把就地补丁（本项 + 上面的 `approve` 档移除）
-//! 一并还原，更新后需重新打。
-//!
-//! # 存储位置（2026-10-06 本地定制）
-//!
-//! pi-permission 扩展已改为读写 `settings.json` 顶层 `permission` 键
-//! （不再用 `config/permission-ext-config.json`）。这里的读写必须与扩展一致，
-//! 否则又是「两套系统」。旧路径 `config/permission-ext-config.json` 的目录
-//! 曾因旧版 ensureConfigFile / 本模块旧路径反复重建，已废弃。
-//!
-//! 超时字段与档位同源同文件，但**只对本地实例生效**：远程工作区的 pi 读的是
-//! 远端自己的 settings.json（与档位切换同一限制；本地值只作卡片倒计时的显示锚点，
-//! 真正的到期拒绝在远端扩展侧执行）。
 
 use serde_json::{json, Value};
 use std::path::PathBuf;

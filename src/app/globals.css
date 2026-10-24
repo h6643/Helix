@@ -287,7 +287,15 @@
   color: var(--primary);
   font-style: normal;
   flex-shrink: 0;
-  display: inline-block;
+  /* inline-flex 而不是 inline-block：六个 ✱ 全是 position:absolute，盒子自身
+     没有任何行内内容，所以 inline-block 的基线只能取「底边」。一旦它所在的
+     容器不是 flex（或行盒由别的字号撑开），图标就会按那条假基线整体下移将近
+     一个字号，"✻" 落到标题下一行、和正文首行挤在一起（用户报的「思考顶部
+     变形」就是这种形态）。inline-flex 自带行内盒，图标在盒内居中，不再依赖
+     基线推算；配 align-items:center 与固定 0.9em 见方，任何字号下位置都稳定。 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   vertical-align: -0.12em;
   position: relative;
   width: 0.9em;

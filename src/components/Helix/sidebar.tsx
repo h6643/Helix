@@ -4,7 +4,6 @@ import {
   Plus,
   Search,
   Clock,
-  Puzzle,
   Settings,
   Cable,
   Loader2,
@@ -575,7 +574,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   const showScheduledTasksPanel = useHelixStore(
     (s) => s.showScheduledTasksPanel,
   );
-  const showSkillPanel = useHelixStore((s) => s.showSkillPanel);
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir);
   const directoryProjectDir = useHelixStore((s) => s.directoryProjectDir);
   const toggleDirectoryProject = useHelixStore((s) => s.toggleDirectoryProject);
@@ -647,11 +645,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
       void resolveBackendSid(id)
         .then((sid) => {
           if (!sid) {
-            showToast({
-              type: "warning",
-              title: "该对话还没有后端会话 ID",
-              description: "发送第一条消息后才会生成",
-            });
             return null;
           }
           return navigator.clipboard.writeText(sid).then(() => sid);
@@ -919,10 +912,9 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     // Returning to a conversation from the sidebar should dismiss the
     // full-area panels so the chat is visible again.
     const state = useHelixStore.getState();
-    if (state.showScheduledTasksPanel || state.showSkillPanel) {
+    if (state.showScheduledTasksPanel) {
       useHelixStore.setState({
         showScheduledTasksPanel: false,
-        showSkillPanel: false,
       });
     }
     onNewTask?.();
@@ -989,10 +981,9 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         // (helixSessionMapRef in agent-flow-panel); resetting the legacy global
         // id would be meaningless at best and confusing at worst.
         // Same as above: navigating to a session must close the panels.
-        if (state.showScheduledTasksPanel || state.showSkillPanel) {
+        if (state.showScheduledTasksPanel) {
           useHelixStore.setState({
             showScheduledTasksPanel: false,
-            showSkillPanel: false,
           });
         }
         // Load just the target session (single IndexedDB read) instead of
@@ -1583,18 +1574,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
       action: () => {
         useHelixStore.setState((s) => ({
           showScheduledTasksPanel: !s.showScheduledTasksPanel,
-          showSkillPanel: false,
-        }));
-      },
-    },
-    {
-      id: "plugins",
-      label: "插件",
-      icon: Puzzle,
-      action: () => {
-        useHelixStore.setState((s) => ({
-          showSkillPanel: !s.showSkillPanel,
-          showScheduledTasksPanel: false,
         }));
       },
     },
@@ -1607,8 +1586,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         <div className="flex-1 flex flex-col items-center pt-3 pb-2 gap-1 overflow-y-auto">
           {topActions.map((item) => {
             const isActive =
-              (item.id === "scheduled" && showScheduledTasksPanel) ||
-              (item.id === "plugins" && showSkillPanel);
+              item.id === "scheduled" && showScheduledTasksPanel;
             return (
               <button
                 key={item.id}
@@ -1670,8 +1648,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
             <div className="flex flex-col gap-0.5">
               {topActions.map((item) => {
                 const isActive =
-                  (item.id === "scheduled" && showScheduledTasksPanel) ||
-                  (item.id === "plugins" && showSkillPanel);
+                  item.id === "scheduled" && showScheduledTasksPanel;
                 return (
                   <button
                     key={item.id}
@@ -1851,9 +1828,8 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                       !isRemote &&
                       !currentSessionId &&
                       selectedWorkDir === project.dir &&
-                      // 计划/插件/看板等全屏面板打开时，项目不高亮——避免两处同时亮
-                      !showScheduledTasksPanel &&
-                      !showSkillPanel;
+                      // 计划等全屏面板打开时，项目不高亮——避免两处同时亮
+                      !showScheduledTasksPanel;
                     return (
                       <div
                         key={project.dir}

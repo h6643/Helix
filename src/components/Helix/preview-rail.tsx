@@ -207,14 +207,7 @@ export function BrowserToolbar({
 
   const togglePick = () => {
     const st = useHelixStore.getState();
-    if (!url) {
-      st.showToast({
-        type: "info",
-        title: "没有可选取的页面",
-        description: "先在地址栏输入网址，加载后再选取元素",
-      });
-      return;
-    }
+    if (!url) return;
     st.setBrowserPickPageId(st.browserPickPageId === pageId ? null : pageId);
   };
 
@@ -223,14 +216,7 @@ export function BrowserToolbar({
   // 的所有权在那儿，这里不越界去改别人的 state。
   const shoot = async () => {
     const st = useHelixStore.getState();
-    if (!url) {
-      st.showToast({
-        type: "info",
-        title: "没有可截图的页面",
-        description: "先在地址栏输入网址，加载后再截图",
-      });
-      return;
-    }
+    if (!url) return;
     setShooting(true);
     try {
       const dataUrl = await capturePagePng(pageId);

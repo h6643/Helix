@@ -75,6 +75,8 @@ export interface RemoteTunnelStatus {
   username?: string;
   /** 真正生效的远端目录（后端读 `pi.remote_cwd`），比前端记的值可信。 */
   remote_path?: string | null;
+  /** true = 目标是上次连接留下的落盘记录，当前隧道并未建立（重启后的常态）。 */
+  persisted?: boolean;
 }
 
 /** 后端 `remote_preflight` 的返回形状（向导第 2 步的体检结果）。 */
@@ -101,7 +103,7 @@ export function remoteProjectSubtitle(svc: ExternalService): string {
 }
 
 /** 三元组是否指向同一台机器。端口缺省 22（ssh 的约定）。 */
-function sameTarget(
+export function sameTarget(
   svc: ExternalService,
   host: string | undefined,
   port: number | undefined,
@@ -227,6 +229,37 @@ export async function listRemotePaths(
 /** helixApi 的存在性检查——非 Electron（浏览器预览）下远程功能整体不可用。 */
 export function remoteAvailable(): boolean {
   return typeof window !== "undefined" && !!helixApi()?.remoteTunnelStatus;
+}
+
+/**
+ * 远程探活（后端 `remote/probe`）：config.yaml 没配 `pi.remote_rpc` →
+ * `configured:false`（没用过远程模式）；配了但本地隧道口 2s 连不上 →
+ * `reachable:false`。**不 spawn、不碰凭证、不等 RPC**——启动路径靠它决定
+ * 「这个远程对话要不要恢复」：连不上就不恢复，绝不干等卡死。
+ *
+ * 任何异常都归一成「未配置/不可达」：探活是保守门，宁可跳过恢复也不要赌。
+ */
+export async function probeRemoteReachability(): Promise<{
+  configured: boolean;
+  reachable: boolean;
+  cooling?: boolean;
+}> {
+  try {
+    const api = helixApi();
+    if (!api?.send) return { configured: false, reachable: false };
+    const r = (await api.send("remote/probe", {})) as {
+      configured?: unknown;
+      reachable?: unknown;
+      cooling?: unknown;
+    };
+    return {
+      configured: r?.configured === true,
+      reachable: r?.reachable === true,
+      cooling: r?.cooling === true,
+    };
+  } catch {
+    return { configured: false, reachable: false };
+  }
 }
 
 // ── 远程项目的 workDir 身份 ─────────────────────────────────────────────

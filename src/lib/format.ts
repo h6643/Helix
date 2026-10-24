@@ -60,9 +60,11 @@ export function formatDurationSeconds(seconds: number): string {
  * `cacheRead / (input + output)` 之类的写法会算出几百 percent —— 上下文环本身
  * 就在 `pi_gateway.rs` 的 emit_usage 里踩过这个坑。
  *
- * `reported=false`：缓存两个字段全 0。这既可能是"供应商压根不上报缓存"（实测本机
- * 22 个会话里 7 个恒 0），也可能是"真的没命中"，两者数字一样、无法区分，所以
- * 调用方必须显示「未上报」而不是「0%」——后者是对一个没上报的供应商指控它缓存失效。
+ * `reported=false` → `percent` 恒为 `null`（不是 0）：缓存两个字段全 0，这既可能是
+ * "供应商压根不上报缓存"（实测本机 22 个会话里 7 个恒 0），也可能是"真的没命中"，
+ * 两者数字一样、无法区分。所以调用方必须显示「未上报」而不是「0%」——后者是对一个
+ * 没上报的供应商指控它缓存失效。这里不返回 0 是刻意的：0 是个可渲染的假数字，新的
+ * 调用方一旦只看 `percent` 就会把它当成真实的"命中率为零"。
  */
 export function promptCacheHit(counters: {
   input?: number;
@@ -74,7 +76,9 @@ export function promptCacheHit(counters: {
   const write = Math.max(0, counters?.cacheWrite || 0);
   const promptTotal = net + read + write;
   if (promptTotal <= 0) return { reported: false, percent: null };
-  return { reported: read + write > 0, percent: (read / promptTotal) * 100 };
+  // 缓存两项全 0 = 无法判断是"不上报"还是"没命中" → 不给出百分比。
+  if (read + write <= 0) return { reported: false, percent: null };
+  return { reported: true, percent: (read / promptTotal) * 100 };
 }
 
 /**

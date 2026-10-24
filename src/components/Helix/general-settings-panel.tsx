@@ -89,7 +89,6 @@ export function GeneralSettingsPanel() {
     themeStyle,
     editorTheme,
     startupGreeting,
-    terminalShell,
     agentMaxIterations,
     autoCompactContext,
     autoSaveSession,
@@ -98,8 +97,6 @@ export function GeneralSettingsPanel() {
     setAutoArchiveOldTasks,
     setAutoArchiveRetentionDays,
     reasoningEffort,
-    personality,
-    fastMode,
     externalServices,
     customShortcuts,
     customizedShortcutIds,
@@ -138,15 +135,12 @@ export function GeneralSettingsPanel() {
     // （<pi 数据根>/settings.json 的 permission 键），store 里的值只是缓存，
     // 导出一份副本等于制造第二条真相。要迁移请复制那个文件。
     "startupGreeting",
-    "terminalShell",
     "agentMaxIterations",
     "autoCompactContext",
     "autoSaveSession",
     "autoArchiveOldTasks",
     "autoArchiveRetentionDays",
     "reasoningEffort",
-    "personality",
-    "fastMode",
     "externalServices",
     "customShortcuts",
     "customizedShortcutIds",
@@ -175,15 +169,12 @@ export function GeneralSettingsPanel() {
     editorTheme,
     mcpServers,
     startupGreeting,
-    terminalShell,
     agentMaxIterations,
     autoCompactContext,
     autoSaveSession,
     autoArchiveOldTasks,
     autoArchiveRetentionDays,
     reasoningEffort,
-    personality,
-    fastMode,
     externalServices,
     customShortcuts,
     customizedShortcutIds: Array.from(customizedShortcutIds),
@@ -416,13 +407,7 @@ export function GeneralSettingsPanel() {
     setProxyBusy(true);
     try {
       const r = await electronApp.proxySet(proxyUrl);
-      if (r?.success) {
-        showToast({
-          type: "success",
-          title: "代理已保存",
-          description: "重启 Helix 后生效",
-        });
-      } else {
+      if (!r?.success) {
         showToast({ type: "error", title: "保存失败" });
       }
     } catch (e) {
@@ -459,11 +444,6 @@ export function GeneralSettingsPanel() {
           dataRootCustom: r.dataRootCustom,
         });
         setDataRootPath(r.dataRoot);
-        showToast({
-          type: "success",
-          title: "数据已复制到新位置",
-          description: "重启 Helix 后生效",
-        });
       } else {
         showToast({ type: "error", title: "设置失败" });
       }
@@ -485,11 +465,6 @@ export function GeneralSettingsPanel() {
           dataRootCustom: r.dataRootCustom,
         });
         setDataRootPath(r.dataRoot);
-        showToast({
-          type: "success",
-          title: "已恢复默认路径",
-          description: "重启 Helix 后生效",
-        });
       } else {
         showToast({ type: "error", title: "恢复失败" });
       }
@@ -630,7 +605,7 @@ export function GeneralSettingsPanel() {
         <SettingGroup>
           <SettingRow
             label="审批卡超时"
-            hint="弹窗出现即倒计时；到期未操作自动拒绝（拒绝执行，不放行）"
+            hint="弹窗出现即倒计时；到期未操作自动拒绝"
           >
             <PopupSelect
               value={String(approvalTimeoutSec)}
@@ -643,9 +618,6 @@ export function GeneralSettingsPanel() {
         </SettingGroup>
       </div>
 
-      {/* 通知：只管「要不要用系统 toast 把人叫回来」。应用内的审批卡 / 澄清浮条
-          永远照常弹，关掉这里只会少一条系统提醒。真相在 config.yaml，后端每次
-          弹之前现读，所以改完即生效。 */}
       <div className="pt-1">
         <div className="px-4 pt-3 pb-2">
           <h4 className="ui-subtitle font-semibold text-foreground">通知</h4>
@@ -653,7 +625,7 @@ export function GeneralSettingsPanel() {
         <SettingGroup>
           <SettingRow
             label="轮次完成通知"
-            hint="一轮跑完（含出错、定时任务与渠道签到结果）何时提醒；未聚焦=没有 Helix 窗口在前台时才弹"
+            hint="何时提醒；未聚焦=没有 Helix 窗口在前台时才弹"
           >
             <PopupSelect
               value={notifyPrefs.turnEndMode}
@@ -706,23 +678,7 @@ export function GeneralSettingsPanel() {
             <button
               type="button"
               onClick={() =>
-                void electronApp
-                  .openNotificationSettings()
-                  .then((r) => {
-                    if (!r?.ok)
-                      showToast({
-                        type: "error",
-                        title: "打不开系统设置",
-                        description: r?.error,
-                      });
-                  })
-                  .catch((e) =>
-                    showToast({
-                      type: "error",
-                      title: "打不开系统设置",
-                      description: String(e),
-                    })
-                  )
+                void electronApp.openNotificationSettings().catch(() => {})
               }
               className="rounded-md border border-border/50 px-2.5 py-1 text-xs text-foreground transition-colors hover:bg-muted"
             >
@@ -864,7 +820,6 @@ export function GeneralSettingsPanel() {
                     a.download = `helix-config-${new Date().toISOString().slice(0, 10)}.json`;
                     a.click();
                     URL.revokeObjectURL(url);
-                    showToast({ type: "success", title: "配置已导出" });
                   } catch {
                     showToast({ type: "error", title: "导出失败" });
                   }
