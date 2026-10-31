@@ -27,7 +27,7 @@ export function isSyntheticSubAgentToolRow(
  *  （扩展侧 SUBAGENT_TOOL_NAMES.WORKFLOW 的字面值，改名要同步）。 */
 export const WORKFLOW_TOOL_NAME = "SubagentWorkflow";
 
-export interface WorkflowMetaInfo {
+interface WorkflowMetaInfo {
   name?: string;
   description?: string;
   phases: string[];
@@ -141,7 +141,6 @@ const TOOL_LABELS: Record<string, string> = {
   task_update: "更新任务",
   task_complete: "完成任务",
   skill: "执行技能",
-  browser_navigate: "浏览器导航",
   browser_click: "浏览器点击",
   browser_type: "浏览器输入",
   browser_screenshot: "浏览器截图",
@@ -153,7 +152,6 @@ const TOOL_LABELS: Record<string, string> = {
   browser_drag: "浏览器拖拽",
   browser_wait: "等待页面内容",
   browser_eval: "页面执行脚本",
-  browser_upload: "上传本地文件",
   browser_dialog: "页面弹窗",
   describe_image: "视觉读图",
 };

@@ -19,7 +19,7 @@
 export const DEFAULT_CODE_FONT =
   '"Cascadia Code", "JetBrains Mono SemiBold", Consolas, "Lucida Console", monospace';
 
-export interface CodeFontOption {
+interface CodeFontOption {
   label: string;
   value: string;
   /**

@@ -35,7 +35,7 @@ export interface SidebarPage {
   url: string;
 }
 
-export interface AgentView {
+interface AgentView {
   id: string;
   name: string;
 }

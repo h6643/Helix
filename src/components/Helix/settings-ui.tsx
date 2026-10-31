@@ -118,19 +118,45 @@ export const PageHeader = ({
   description,
   action,
   className = "",
+  compact = false,
 }: {
   children: React.ReactNode;
   description?: React.ReactNode;
   action?: React.ReactNode;
   className?: string;
+  /** 嵌在 tab 面板里时用：标题降到与页签同号（--helix-transcript-size / 500），
+   *  否则 ui-title（界面字号 +6px）会比周围所有标题都大一圈。 */
+  compact?: boolean;
 }) => (
   <div className={className || ""}>
-    <div className="flex items-start justify-between gap-3">
-      <h3 className="ui-title font-semibold text-foreground tracking-tight">
+    <div
+      className={
+        compact
+          ? "relative flex items-center"
+          : "flex items-start justify-between gap-3"
+      }
+    >
+      <h3
+        className={
+          compact
+            ? "text-[length:var(--helix-transcript-size)] font-medium text-foreground"
+            : "ui-title font-semibold text-foreground tracking-tight"
+        }
+      >
         {children}
       </h3>
       {action && (
-        <div className="flex items-center gap-2 shrink-0">{action}</div>
+        <div
+          className={
+            // compact 下操作按钮脱离文档流：它通常比标题行（一行字 ≈ 21px）高，
+            // 参与布局会把标题行撑到按钮高度，导致下方首卡片比其他 tab 低一截。
+            compact
+              ? "absolute right-0 top-1/2 -translate-y-1/2 flex items-center gap-2"
+              : "flex items-center gap-2 shrink-0"
+          }
+        >
+          {action}
+        </div>
       )}
     </div>
     {description && (
@@ -188,7 +214,7 @@ export function NumberField({
         onKeyDown={(e) => {
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
         }}
-        className={`w-24 px-2 py-1 rounded-lg bg-muted/50 ${small ? "ui-text-sm2" : "ui-text"} text-foreground text-center border border-border disabled:cursor-not-allowed`}
+        className={`w-24 px-2 py-1 rounded-lg bg-background border border-border ${small ? "ui-text-sm2" : "ui-text"} text-foreground text-center disabled:cursor-not-allowed disabled:opacity-60`}
       />
       {suffix && (
         <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 w-8">
@@ -279,6 +305,15 @@ export function PopupSelect({
   // 展开期间锁定背景滚动容器，避免 fixed 弹窗与触发器错位（见 useLockScrollOnOpen）。
   useLockScrollOnOpen(open, btnRef);
 
+  // 字号：默认走「设置项右侧的值」档（.ui-text-sm2 = 界面字号 − 2px），与同一行
+  // 其它输入控件、以及展开后的选项列表保持一致。此前触发器不自带字号，会从 body
+  // 继承浏览器默认 16px —— 一旦「界面字号」被调小，行标签跟着缩、这里纹丝不动，
+  // 下拉里的值（如 streaming）就会显得特别大。调用方显式传了字号类时尊重调用方。
+  const hasOwnTextSize =
+    /\bui-text\b|\bui-text-sm2\b|\btext-\[|\btext-(?:xs|sm|base|lg|xl)\b/.test(
+      className,
+    );
+
   return (
     <div className="relative">
       <button
@@ -286,13 +321,16 @@ export function PopupSelect({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
-        className={`${className} flex items-center justify-between gap-2 text-left border border-border rounded-lg px-3 py-1.5 disabled:opacity-50 disabled:cursor-not-allowed hover:border-foreground/25 transition-colors`}
+        className={`${className} flex items-center justify-between gap-2 text-left border border-border rounded-lg px-3 py-1.5 bg-background disabled:cursor-not-allowed disabled:opacity-50 hover:bg-muted transition-colors`}
       >
-        <span className="truncate" style={currentFontStyle}>
+        <span
+          className={`truncate ${hasOwnTextSize ? "" : "ui-text-sm2"}`}
+          style={currentFontStyle}
+        >
           {currentLabel}
         </span>
         <ChevronDown
-          className={`size-3.5 shrink-0 text-muted-foreground/60 transition-transform ${open ? "rotate-180" : ""}`}
+          className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
         />
       </button>
 
@@ -407,7 +445,7 @@ export function SaveBar({
         variant="outline"
         onClick={onSave}
         disabled={disabled || saving}
-      >
+       className="bg-background shadow-none rounded-lg">
         {saving ? savingLabel : saveLabel}
       </Button>
       {status === "ok" && (

@@ -124,7 +124,7 @@ export function dataUrlToBlob(dataUrl: string): Blob {
  * **只认 image/png**，塞 image/jpeg 会直接抛 NotAllowedError。粘贴进来的截图
  * 大多被 `compressImage` 压成了 JPEG，所以复制前必须过一道 canvas 转 PNG。
  */
-export async function dataUrlToPngBlob(dataUrl: string): Promise<Blob> {
+async function dataUrlToPngBlob(dataUrl: string): Promise<Blob> {
   const blob = dataUrlToBlob(dataUrl);
   if (blob.type === "image/png") return blob;
 

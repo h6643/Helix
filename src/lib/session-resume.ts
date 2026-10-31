@@ -27,13 +27,13 @@ import { debug } from "@/lib/logger";
  * broken 由 Session 的生命周期决定，不由某个入口决定。
  * ─────────────────────────────────────────────────────────────────────────
  */
-export type ResumeErrorCode =
+type ResumeErrorCode =
   | "SESSION_NOT_FOUND"
   | "SESSION_RESTORE_FAILED"
   | "INVALID_REQUEST"
   | "INTERNAL";
 
-export type ResumeResult =
+type ResumeResult =
   | { ok: true; sessionId: string; messages?: unknown[] }
   | { ok: false; code: ResumeErrorCode; error: string };
 

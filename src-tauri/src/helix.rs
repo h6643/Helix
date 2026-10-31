@@ -7,7 +7,7 @@
 //! takes effect).
 
 use crate::config::{
-    apply_pi_provider_models, atomic_write, read_helix_config, read_pi_models, read_pi_settings,
+    atomic_write, read_helix_config, read_pi_models, read_pi_settings,
     register_pi_provider_models, set_model as config_set_model, write_helix_config,
     HelixConfig,
 };
@@ -198,69 +198,6 @@ pub fn helix_set_config(state: State<'_, Arc<AppState>>, config: Value) -> Value
     }
     let arc: Arc<AppState> = Arc::clone(&state);
     restart_gateway_soon(&arc, "模型/供应商配置写入（helix_set_config）");
-    json!({ "success": true, "changed": true })
-}
-
-/// Register a provider with its whole model list (settings 添加供应商 flow).
-/// Each model carries its own `contextWindow`; the first one becomes pi's
-/// `defaultModel`. Writes settings.json + models.json, then respawns pi so it
-/// picks the new registry up (pi snapshots its config at startup).
-#[tauri::command]
-pub fn helix_set_provider_models(state: State<'_, Arc<AppState>>, config: Value) -> Value {
-    let provider = config
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let base_url = config
-        .get("baseUrl")
-        .or_else(|| config.get("base_url"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let api_key = config
-        .get("apiKey")
-        .or_else(|| config.get("api_key"))
-        .and_then(|v| v.as_str());
-    let api = config
-        .get("api")
-        .or_else(|| config.get("apiFormat"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("openai-completions")
-        .to_string();
-    let models: Vec<(String, Option<u64>, Option<bool>, Option<Vec<String>>)> = config
-        .get("models")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| {
-                    let id = m
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        ?.trim()
-                        .to_string();
-                    if id.is_empty() {
-                        return None;
-                    }
-                    let reasoning = m.get("reasoning").and_then(|v| v.as_bool());
-                    Some((
-                        id,
-                        m.get("contextWindow").and_then(|v| v.as_u64()),
-                        reasoning,
-                        crate::config::parse_model_input(m),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let (changed, _key_changed) =
-        apply_pi_provider_models(&provider, &base_url, api_key, &api, &models);
-    if !changed {
-        return json!({ "success": true, "changed": false });
-    }
-    let arc: Arc<AppState> = Arc::clone(&state);
-    restart_gateway_soon(&arc, &format!("注册供应商模型列表（{provider}）"));
     json!({ "success": true, "changed": true })
 }
 
@@ -481,271 +418,6 @@ pub async fn helix_fetch_models(base_url: String, api_key: String) -> Value {
     }
 }
 
-// ── memories (MEMORY.md / USER.md) ─────────────────
-
-#[tauri::command]
-pub fn helix_list_memories() -> Value {
-    let dir = crate::memory::helix_memories_dir();
-    json!({
-        "memory": crate::memory::read_mem_file(&dir.join("MEMORY.md")),
-        "user": crate::memory::read_mem_file(&dir.join("USER.md")),
-        "manual": crate::memory::read_manual_markers(&dir),
-    })
-}
-
-/// pi-hermes-memory 记忆概览（设置「记忆」页）：全局 + 各项目记忆文件数、
-/// 最近更新时间、启用开关。数据源 = pi-hermes-memory 存储（~/.pi/agent/
-/// pi-hermes-memory 与 projects-memory/），开关存 hermes-memory-config.json。
-#[tauri::command]
-pub fn helix_memory_overview(state: State<'_, Arc<AppState>>) -> Value {
-    let agent = crate::paths::pi_agent_dir();
-    let global_dir = agent.join("pi-hermes-memory");
-    let projects_dir = agent.join("projects-memory");
-
-    // 开关（键缺失默认开启）
-    let cfg: Value = std::fs::read_to_string(agent.join("hermes-memory-config.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(Value::Null);
-    let is_enabled = |k: &str| -> bool {
-        cfg.get(k).and_then(Value::as_bool).unwrap_or(true)
-    };
-
-    // 统计目录：顶层 .md 文件数 + 最近修改时间（unix 秒）。
-    // 隐藏文件（.recovery* / .retired*）与子目录（skills/）不计入「记忆文件」。
-    let stat = |dir: &std::path::Path| -> Value {
-        let mut files = 0u64;
-        let mut last = 0u64;
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if !name.ends_with(".md") || name.starts_with('.') {
-                    continue;
-                }
-                if let Ok(md) = e.metadata() {
-                    if !md.is_file() {
-                        continue;
-                    }
-                    files += 1;
-                    if let Ok(t) = md.modified() {
-                        last = last.max(
-                            t.duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0),
-                        );
-                    }
-                }
-            }
-        }
-        json!({ "file_count": files, "last_updated": last })
-    };
-
-    let mut projects = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&projects_dir) {
-        for e in rd.flatten() {
-            if let Ok(md) = e.metadata() {
-                if !md.is_dir() {
-                    continue;
-                }
-                let name = e.file_name().to_string_lossy().into_owned();
-                let mut p = stat(&e.path());
-                if let Some(obj) = p.as_object_mut() {
-                    obj.insert("name".into(), Value::String(name));
-                    obj.insert(
-                        "dir".into(),
-                        Value::String(e.path().to_string_lossy().into_owned()),
-                    );
-                    obj.insert("enabled".into(), Value::Bool(is_enabled("projectMemoryEnabled")));
-                }
-                projects.push(p);
-            }
-        }
-    }
-    projects.sort_by(|a, b| {
-        a["name"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["name"].as_str().unwrap_or(""))
-    });
-
-    let current = state
-        .work_dir
-        .read()
-        .unwrap()
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-
-    json!({
-        "ok": true,
-        "global": {
-            "enabled": is_enabled("globalMemoryEnabled"),
-            "file_count": stat(&global_dir)["file_count"],
-            "last_updated": stat(&global_dir)["last_updated"],
-            "dir": global_dir.to_string_lossy(),
-        },
-        "current_project": current,
-        "projects": projects,
-        "config_path": agent.join("hermes-memory-config.json").to_string_lossy(),
-    })
-}
-
-/// 删除记忆文件（设置「记忆」页的垃圾桶图标，前端已二次确认）。
-/// `scope = "global"` 删 pi-hermes-memory/ 下的 .md；`scope = "project"`
-/// 删 projects-memory/<project>/ 下的 .md（含隐藏的 .retired-*.md 归档，
-/// 但不碰 skills/ 子目录）。项目名做路径逃逸校验。
-#[tauri::command]
-pub fn helix_delete_memory(scope: String, project: Option<String>) -> Value {
-    let agent = crate::paths::pi_agent_dir();
-    let dir = match scope.as_str() {
-        "global" => agent.join("pi-hermes-memory"),
-        "project" => {
-            let name = match project.as_deref() {
-                Some(n) if !n.is_empty() => n,
-                _ => return json!({ "ok": false, "error": "缺少项目名" }),
-            };
-            // 项目名只允许单层、无分隔符，防止 projects-memory/../../ 逃逸。
-            if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
-                return json!({ "ok": false, "error": "项目名不合法" });
-            }
-            agent.join("projects-memory").join(name)
-        }
-        _ => return json!({ "ok": false, "error": "未知的记忆范围" }),
-    };
-
-    if !dir.starts_with(&agent) || !dir.is_dir() {
-        return json!({ "ok": false, "error": "记忆目录不存在" });
-    }
-
-    let mut removed = Vec::new();
-    let mut failed: Vec<String> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for e in rd.flatten() {
-            let path = e.path();
-            // 只删顶层 .md（含 .retired-*.md / .recovery-*.md），跳过子目录。
-            let is_md = path
-                .extension()
-                .map(|x| x.eq_ignore_ascii_case("md"))
-                .unwrap_or(false);
-            if !is_md || !path.is_file() {
-                continue;
-            }
-            let name = e.file_name().to_string_lossy().into_owned();
-            match std::fs::remove_file(&path) {
-                Ok(()) => removed.push(name),
-                Err(err) => failed.push(format!("{name}: {err}")),
-            }
-        }
-    }
-
-    json!({
-        "ok": failed.is_empty(),
-        "removed": removed.len(),
-        "dir": dir.to_string_lossy(),
-        "errors": failed,
-    })
-}
-
-/// 记忆开关：`globalMemoryEnabled` / `projectMemoryEnabled` 写进
-/// hermes-memory-config.json（pi-hermes-memory 扩展同读这两个键）。
-#[tauri::command]
-pub fn helix_set_memory_enabled(scope: String, enabled: bool) -> Value {
-    let path = crate::paths::pi_agent_dir().join("hermes-memory-config.json");
-    let mut cfg: Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| json!({}));
-    if !cfg.is_object() {
-        cfg = json!({});
-    }
-    let key = match scope.as_str() {
-        "project" => "projectMemoryEnabled",
-        _ => "globalMemoryEnabled",
-    };
-    if let Some(obj) = cfg.as_object_mut() {
-        obj.insert(key.into(), Value::Bool(enabled));
-    }
-    let body = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
-    match crate::config::atomic_write(&path, &format!("{body}\n")) {
-        Ok(()) => json!({ "ok": true, "scope": scope, "enabled": enabled }),
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-    }
-}
-
-/// pi-hermes-memory 扩展的默认配置（与扩展 src/config.ts DEFAULT_CONFIG 对齐，
-/// 用于设置页展示未覆盖项的默认值；文件中的值优先）。
-fn default_memory_config() -> serde_json::Map<String, Value> {
-    let mut m = serde_json::Map::new();
-    // 枚举/字符串
-    m.insert("memoryPolicyStyle".into(), json!("full"));
-    m.insert("memoryOverflowStrategy".into(), json!("auto-consolidate"));
-    m.insert("sessionSearch".into(), json!({ "variant": "legacy" }));
-    // 数字
-    m.insert("memoryCharLimit".into(), json!(5000));
-    m.insert("userCharLimit".into(), json!(5000));
-    m.insert("projectCharLimit".into(), json!(5000));
-    m.insert("nudgeInterval".into(), json!(10));
-    m.insert("nudgeToolCalls".into(), json!(15));
-    m.insert("reviewRecentMessages".into(), json!(0));
-    m.insert("flushMinTurns".into(), json!(6));
-    m.insert("flushRecentMessages".into(), json!(0));
-    m.insert("failureInjectionMaxAgeDays".into(), json!(7));
-    m.insert("failureInjectionMaxEntries".into(), json!(5));
-    m.insert("sessionRetentionDays".into(), json!(0));
-    // 布尔
-    m.insert("reviewEnabled".into(), json!(true));
-    m.insert("flushOnCompact".into(), json!(true));
-    m.insert("flushOnShutdown".into(), json!(true));
-    m.insert("autoConsolidate".into(), json!(true));
-    m.insert("correctionDetection".into(), json!(true));
-    m.insert("failureInjectionEnabled".into(), json!(true));
-    m.insert("standingInstructionsEnabled".into(), json!(true));
-    m.insert("quickCheckOnOpen".into(), json!(true));
-    m
-}
-
-/// 读记忆扩展全量配置（默认值 + 文件覆盖），设置「记忆」页展示用。
-#[tauri::command]
-pub fn helix_memory_config() -> Value {
-    let path = crate::paths::pi_agent_dir().join("hermes-memory-config.json");
-    let file: Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(Value::Null);
-    let mut cfg = default_memory_config();
-    if let Some(obj) = file.as_object() {
-        for (k, v) in obj {
-            cfg.insert(k.clone(), v.clone());
-        }
-    }
-    json!({ "ok": true, "config": Value::Object(cfg) })
-}
-
-/// 通用更新记忆扩展配置：逐键合并写回 hermes-memory-config.json（保留其它键）。
-#[tauri::command]
-pub fn helix_set_memory_config(updates: Value) -> Value {
-    let path = crate::paths::pi_agent_dir().join("hermes-memory-config.json");
-    let mut cfg: Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| json!({}));
-    if !cfg.is_object() {
-        cfg = json!({});
-    }
-    if let Some(upd) = updates.as_object() {
-        if let Some(obj) = cfg.as_object_mut() {
-            for (k, v) in upd {
-                obj.insert(k.clone(), v.clone());
-            }
-        }
-    }
-    let body = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
-    match crate::config::atomic_write(&path, &format!("{body}\n")) {
-        Ok(()) => json!({ "ok": true }),
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-    }
-}
-
 /// Codemode 配置（读 pi settings.json）：`defaultTools` 是否含 codemode、
 /// `codemode.mode`（on/only）、`codemode.inlineBudget`。
 #[tauri::command]
@@ -829,47 +501,6 @@ pub fn helix_set_codemode_config(updates: Value) -> Value {
     }
     crate::config::write_pi_settings(&s);
     json!({ "ok": true })
-}
-
-#[tauri::command]
-pub fn helix_add_memory_entry(target: String, text: String) -> Value {
-    let dir = crate::memory::helix_memories_dir();
-    let file = if target == "user" {
-        dir.join("USER.md")
-    } else {
-        dir.join("MEMORY.md")
-    };
-    let mut entries = crate::memory::read_mem_file(&file);
-    let t = text.trim().to_string();
-    if t.is_empty() {
-        return json!({ "ok": false, "error": "empty" });
-    }
-    if !entries.contains(&t) {
-        entries.push(t.clone());
-        crate::memory::write_mem_file(&file, &entries);
-    }
-    if target != "user" {
-        crate::memory::add_manual_marker(&dir, &t);
-    }
-    json!({ "ok": true, "entries": entries })
-}
-
-#[tauri::command]
-pub fn helix_remove_memory_entry(target: String, text: String) -> Value {
-    let dir = crate::memory::helix_memories_dir();
-    let file = if target == "user" {
-        dir.join("USER.md")
-    } else {
-        dir.join("MEMORY.md")
-    };
-    let entries = crate::memory::read_mem_file(&file);
-    let t = text.trim().to_string();
-    let next: Vec<String> = entries.into_iter().filter(|e| e != &t).collect();
-    crate::memory::write_mem_file(&file, &next);
-    if target != "user" {
-        crate::memory::remove_manual_marker(&dir, &t);
-    }
-    json!({ "ok": true, "entries": next })
 }
 
 
@@ -1031,6 +662,20 @@ fn set_npm_package_enabled(
     Ok(())
 }
 
+/// 禁用条目正文：目录目标用 `!<dir>/**`，文件目标用 `-<file>`（见下）。
+fn disable_entry_body(target: &str, is_dir: bool) -> String {
+    // pi 的 `-<path>` 强制排除按精确相等命中它实际装载的**入口文件**（目录
+    // 扩展是 `<dir>/index.ts`，manifest 包还可能是嵌套路径），目录名本身永远
+    // 命不中。目录目标用 `!<dir>/**` 全局排除：pi 的 minimatch 能命中目录下
+    // 任何入口形态，且 core 归一后回环到目录本身，开关再切换时能被正确清理。
+    // 文件目标保持 pi config 同款 `-<file>`。
+    if is_dir {
+        format!("!{target}/**")
+    } else {
+        format!("-{target}")
+    }
+}
+
 /// Enable/disable a local extension via the top-level `extensions` array.
 /// pi matches auto-discovered `~/.pi/agent/extensions/<file>` entries against
 /// override patterns: `-<pattern>` force-excludes, `+<pattern>` force-includes
@@ -1089,10 +734,10 @@ fn set_local_extension_enabled(
         .collect();
 
     if !enabled {
-        // pi config writes a `-<path>` force-exclude for a disabled resource.
-        // Mirror that exact shape so a later enable (which just removes it)
-        // round-trips, and the next toggle's core-equality filter finds it.
-        updated.push(Value::String(format!("-{target}")));
+        let is_dir = crate::paths::pi_agent_dir().join(&target).is_dir();
+        updated.push(Value::String(disable_entry_body(
+            &target, is_dir,
+        )));
     }
     // enable: removing the override restores the auto-discovered default (on).
 
@@ -1410,8 +1055,9 @@ fn scan_pi_extensions(dir: &std::path::Path, items: &mut Vec<Value>, patterns: &
                                     &[&format!("extensions/{entry_name}/index.ts")],
                                 ),
                                 // Toggle identifier: dir relative to the agent dir;
-                                // `set_local_extension_enabled` resolves it to the
-                                // concrete index entry when it exists.
+                                // `set_local_extension_enabled` disables it with a
+                                // `!<dir>/**` glob — pi's exact `-<path>` excludes
+                                // only hit concrete entry files.
                                 "packageId": entry_rel,
                             }));
                             emitted_manifest = true;
@@ -2299,8 +1945,8 @@ pub async fn pi_check_updates() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        glob_match, ingest_extension_source, is_exact_npm_version, merge_lite_wrappers,
-        set_local_extension_enabled,
+        disable_entry_body, glob_match, ingest_extension_source, is_exact_npm_version,
+        merge_lite_wrappers, set_local_extension_enabled,
     };
     use serde_json::Value;
 
@@ -2374,9 +2020,10 @@ mod tests {
             "enabling must drop the pi-cron glob only"
         );
 
-        // Disabling it writes an exact `-<file>` override (pi config style),
-        // not a glob. The dir has no index on the filesystem in this test, so
-        // the concrete target stays the dir path.
+        // Disabling it adds an override entry. The shape depends on the
+        // filesystem (`disable_entry_body`): a dir target gets `!<dir>/**`,
+        // a file target gets the exact `-<file>`. pi-cron's dir does not
+        // exist in the test environment, so either shape is a valid outcome.
         set_local_extension_enabled(&mut settings, "extensions/pi-cron", false)
             .unwrap();
         assert!(
@@ -2386,6 +2033,21 @@ mod tests {
                 .iter()
                 .any(|e| e == "-extensions/pi-cron" || e == "!extensions/pi-cron/**"),
             "disabling must add an override entry for pi-cron"
+        );
+    }
+
+    #[test]
+    fn dir_targets_disable_by_glob_file_targets_by_exact() {
+        // pi's force-exclude `-<path>` needs the exact entry file; a dir name
+        // never matches, so dir disables must be the `!<dir>/**` glob — the
+        // same shape web_search.rs uses to disable web-access.
+        assert_eq!(
+            disable_entry_body("extensions/pi-cron", true),
+            "!extensions/pi-cron/**"
+        );
+        assert_eq!(
+            disable_entry_body("extensions/foo.ts", false),
+            "-extensions/foo.ts"
         );
     }
 

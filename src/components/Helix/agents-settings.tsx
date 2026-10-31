@@ -77,18 +77,6 @@ interface SubagentDraft {
 const truncate = (s: string, n: number) =>
   s.length > n ? s.slice(0, n) + "…" : s;
 
-// 来源徽标的取值来自后端 SubagentPreset.source（skills.rs::helix_list_subagents）：
-// 内置预设与 pi-subagents 扩展自带文件都是 "default"，`.pi/agents` → "project"，
-// `.agents/agents` → "workspace"，`~/.pi/agent/agents` → "global"。
-const SOURCE_LABEL: Record<string, string> = {
-  default: "内置",
-  project: "项目",
-  workspace: "工作区",
-  global: "全局",
-};
-
-
-
 const SubagentModelPicker = ({
   id,
   current,
@@ -280,9 +268,6 @@ const PresetSubagentItem = ({
               >
                 {p.name?.trim() || p.id}
               </p>
-              <span className="shrink-0 rounded border border-border/20 bg-muted/40 px-1.5 py-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70">
-                {SOURCE_LABEL[p.source] ?? p.source ?? "未知"}
-              </span>
             </div>
             {p.description?.trim() && (
               <p className="text-[calc(var(--helix-transcript-size)*0.8571)] leading-snug text-muted-foreground/70">
@@ -350,17 +335,8 @@ const PresetSubagentItem = ({
           )}
         </div>
       </div>
-      <div className="flex flex-wrap gap-1.5">
-        {Array.isArray(p.tools) &&
-          p.tools.map((t: string) => (
-            <span
-              key={t}
-              className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/60 bg-muted/20 border border-border/15 rounded px-1.5 py-0.5 font-mono"
-            >
-              {t}
-            </span>
-          ))}
-      </div>
+      {/* 卡片上不展示 `tools`（可用工具清单）：这属于实现细节，用户关心的是
+          这个子智能体「是什么、能做什么」，而不是它拿到哪几个工具句柄。 */}
       {p.thinking && (
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60">
           <span>思考强度：{p.thinking}</span>
@@ -384,13 +360,11 @@ const PresetSubagentItem = ({
   );
 };
 
-// PageHeader ~line 693: 保持独立称号「子智能体」；嵌入扩展管理 Tab 时
-// SkillPanel 通过 addRequest 递增触发 startAdd，onCount 上报子智能体数量。
+// PageHeader 的括号里直接带数量；嵌入扩展管理 Tab 时 SkillPanel 通过
+// addRequest 递增触发 startAdd。
 export function AgentsSettings({
-  onCount,
   addRequest,
 }: {
-  onCount?: (n: number) => void;
   addRequest?: number;
 } = {}) {
   const [cfg, setCfg] = useState<DelegationConfig>(DEFAULTS);
@@ -606,10 +580,6 @@ export function AgentsSettings({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addRequest]);
-  useEffect(() => {
-    onCount?.(presets.length);
-  }, [presets, onCount]);
-
   // 取消/关闭添加页：未保存时丢弃 startAdd 插入的空白草稿；已保存后只是
   // 退出编辑页（身份已写入，不应再删除），与「保存 Hooks 配置」停留显示一致。
   const cancelAdd = () => {
@@ -711,9 +681,12 @@ export function AgentsSettings({
   );
 
   return (
-    <div className="space-y-6">
+    // space-y-3 = 标题下 12px，与其他三个扩展管理 tab 的 `mb-3` 对齐；
+    // 用 space-y-6(24px) 会让首张卡片比「扩展/技能/MCP」页签低一截。
+    <div className="space-y-3">
       {/* ── Header ── */}
       <PageHeader
+        compact
         action={
           adding ? (
             <button
@@ -736,14 +709,14 @@ export function AgentsSettings({
               variant="outline"
               size="sm"
               onClick={() => setShowSettings(true)}
-              className="shrink-0"
+              className="shrink-0 bg-background shadow-none rounded-lg"
             >
               设置
             </Button>
           )
         }
       >
-        子智能体
+        子智能体 ({presets.length})
       </PageHeader>
 
       <div className="max-w-3xl space-y-4">

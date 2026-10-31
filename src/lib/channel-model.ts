@@ -15,7 +15,7 @@ const BARE_NUMBER_RE = /^\d+(?:\.\d+)?$/;
 
 const FREE_RE = /^免费$/;
 
-export type ChannelModelLabel = {
+type ChannelModelLabel = {
   name: string;
   /** 右对齐的倍率列，如 `x0.50`；免费 = `x0.00`；无倍率时为空串。 */
   factor: string;

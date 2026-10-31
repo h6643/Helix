@@ -1,4 +1,4 @@
-export interface DiffChange {
+interface DiffChange {
   fileId: string;
   fileName: string;
   filePath: string;

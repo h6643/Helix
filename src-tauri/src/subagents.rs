@@ -97,22 +97,6 @@ fn read_legacy_subagents_json() -> Option<Map<String, Value>> {
     Some(filtered)
 }
 
-/// Load the effective global subagent settings for the renderer: prefer the
-/// config.yaml block, fall back to the legacy file. When the legacy file is
-/// used and config.yaml is writable, migrate it into config.yaml and delete
-/// the file (one-time, guarded by `migrate_legacy=true`).
-///
-/// Exposed as `load_subagents_settings` for callers that only want the
-/// merged global view (skills.rs) without the one-time migration side
-/// effect.
-pub(crate) fn load_subagents_settings() -> Map<String, Value> {
-    let yaml = read_yaml_subagents(false);
-    if !yaml.is_empty() {
-        return yaml;
-    }
-    read_legacy_subagents_json().unwrap_or_default()
-}
-
 /// Migration-capable load: when only the legacy file is present, import it
 /// into config.yaml and delete the file. `subagents_settings_list` uses
 /// this so the user's UI reflects the canonical location after the first

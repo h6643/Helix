@@ -44,7 +44,7 @@ export function useLockScrollOnOpen(
   }, [open, btnRef]);
 }
 
-export interface AnchoredPos {
+interface AnchoredPos {
   left: number;
   top: number;
   width: number;

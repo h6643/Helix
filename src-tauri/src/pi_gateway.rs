@@ -97,8 +97,8 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 /// context — and it only ever runs when the context is at its largest, so the
 /// generic 60s budget times out on big sessions (the "压缩超时" seen from
 /// /compact and auto-compaction). 5 min leaves ~60s of the frontend's
-/// COMPRESS_RPC_TIMEOUT_MS (360s, serve-gateway.ts) for the trailing
-/// get_session_stats / get_messages round-trips in session.compress.
+/// 360s compress budget for the trailing get_session_stats / get_messages
+/// round-trips in session.compress.
 const COMPACT_RPC_TIMEOUT: Duration = Duration::from_secs(300);
 /// pi 的 **in-run 自动压缩**（`compaction_start` → `compaction_end`，发生在两
 /// 次 assistant 调用之间）本身就是一次完整的 LLM 摘要调用，期间主事件流必然
@@ -1287,12 +1287,28 @@ pub fn is_active() -> bool {
     // The app is "connected" when the main instance is live. Session
     // instances come and go; only the main one's death is a gateway-level
     // disconnect.
-    INSTANCES
+    {
+        let instances = INSTANCES.lock().unwrap();
+        if let Some(main) = instances.get("") {
+            if main.initialized.load(Ordering::SeqCst) {
+                return true;
+            }
+        }
+    }
+    // 主实例还在冷启动握手时（当天第一次 pi 进程实测 31-35s，见 spawn() 里的
+    // 2026-10-25 注释），只要池里有一只**握手已过的** spare 就视为 connected：
+    // 会话只认 spare / restore 也认领 spare（restore_session_instance），真正
+    // 挡住用户的就只有这一条；而主实例专供的 sessionless RPC（模型列表、
+    // get_commands）在 instance_for_session("") 里排队等主实例的 spawn_lock，
+    // 主实例握手完自动返回，不用 UI 先等。这把启动读条从「主实例大握手」改成
+    // 「首个热备就绪」——热备在 spawn() 里与主实例并发补热，冷启动天 ~6s 就绪。
+    // 主实例随后挂掉、spare 活着：死亡记账仍按 key="" 发 gateway.disconnected
+    // 触发自愈，这里保持 true 只是为了别把「正在重生」误报成断网。
+    WARM_SPARES
         .lock()
         .unwrap()
-        .get("")
-        .map(|i| i.initialized.load(Ordering::SeqCst))
-        .unwrap_or(false)
+        .iter()
+        .any(|spare| spare.initialized.load(Ordering::SeqCst))
 }
 
 /// Kill every pi child process (main + all session instances + warm spares).
@@ -1415,13 +1431,24 @@ pub fn spawn(state: &Arc<AppState>) -> Result<(), String> {
     log_spawn_diag("spawn: acquired LIFECYCLE_LOCK, spawning main instance");
     start_reaper();
     warm_session_file_index();
+    // 补热与主实例握手**并发**，而不是等主实例握手完再补热。实测差异巨大
+    // （helix-recover.log 2026-10-25）：pi 冷启动的大头是「当天的第一个 pi 进程」
+    // ——冷盘读 bundle + Defender 扫描，主实例握手能到 31-35s；同一启动窗口里
+    // 稍后并发起的后备 spare/restore 实例握手只要 5-6s。所以：spare 先动手，当天
+    // 冷启动时它大概率比主实例**先**握手完成，配合 is_active() 的 spare 放宽，
+    // 启动页在 ~6s 就退出，用户开新会话也立刻有热 spare 可认领 —— 不再为
+    // 「主实例 31s 的大握手」把会话可用性一起拖住。占位互斥（SPARE_INFLIGHT）
+    // 保证后面的 spawn 后补热看到位子已满会跳过，不会重复起两个 spare。
+    rearm_warm_spares(state);
     let result = spawn_instance(String::new(), None, false, state).map(|_| ());
     log_spawn_diag(&match &result {
         Ok(()) => "spawn: main instance initialized, gateway ready".to_string(),
         Err(e) => format!("spawn: main instance FAILED: {e}"),
     });
     // (Re)fill the warm-spare pool after the main instance is up — its spawn
-    // cost is paid off the user's critical path.
+    // cost is paid off the user's critical path. 主实例已就绪时 spare 多半也在
+    // 池里/在途了，这一发是幂等的（位子已满即跳过）；主实例冷启动失败时这里
+    // 重试一次，别让失败的启动把池子留下永远空着。
     rearm_warm_spares(state);
     result
 }
@@ -4030,7 +4057,17 @@ async fn instance_for_session(
     state: &Arc<AppState>,
 ) -> Result<Arc<PiInstance>, String> {
     if session_id.is_empty() {
-        return spawn_instance(String::new(), None, false, state);
+        // ready 现在会在「spare 就绪」时提前翻转，主实例的大握手
+        // （冷启动天 31-35s）期间 UI 就会发 sessionless RPC（模型列表、
+        // get_commands）。得用 spawn_blocking 包住：spawn_instance 会同步等
+        // 主实例的 spawn_lock 直到握手完成，直接在 async worker 上跑会占死
+        // 一个 tokio worker，卡住其他 Tauri 命令。
+        let state2 = Arc::clone(state);
+        return tokio::task::spawn_blocking(move || {
+            spawn_instance(String::new(), None, false, &state2)
+        })
+        .await
+        .map_err(|e| format!("main instance spawn task failed: {e}"))?;
     }
     if let Some(instance) = INSTANCES.lock().unwrap().get(session_id) {
         if instance.initialized.load(Ordering::SeqCst) {

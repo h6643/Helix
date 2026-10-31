@@ -1,4 +1,4 @@
-// The 25 palettes below are transcribed verbatim from the user's AnuPpuccin
+// The palettes below are transcribed verbatim from the user's AnuPpuccin
 // theme CSS (`--ctp-ext-*` RGB triplets). Each flavor is mapped onto Helix's
 // shadcn-style CSS custom properties so the whole UI re-skins when applied.
 //
@@ -6,6 +6,9 @@
 // Inline styles win over the `:root` / `.dark` rules in globals.css, so a
 // selected flavor fully overrides the built-in cream palette without us having
 // to ship a giant CSS block.
+//
+// 配色风格只保留两档：浅色（陶土晨光）/ 深色（灰黑）。内置奶油与陶土终端
+// 已下架——旧存的 styleId 由 normalizeThemeStyle 迁移到最近的新档。
 
 type ThemeMode = "light" | "dark";
 
@@ -53,36 +56,6 @@ interface HelixThemeDef {
 const P = (p: CtpPalette): CtpPalette => p;
 
 // ── Light flavors ─────────────────────────────────────────────────────────────
-const atomLight: CtpPalette = P({
-  rosewater: "229, 148, 121",
-  flamingo: "197, 103, 131",
-  pink: "166, 37, 104",
-  mauve: "166, 37, 164",
-  red: "231, 85, 69",
-  maroon: "231, 101, 69",
-  peach: "227, 86, 73",
-  yellow: "152, 104, 0",
-  green: "78, 162, 76",
-  teal: "0, 188, 182",
-  sky: "0, 132, 188",
-  sapphire: "0, 119, 188",
-  blue: "61, 116, 246",
-  lavender: "152, 84, 151",
-  text: "56, 58, 66",
-  subtext1: "77, 80, 91",
-  subtext0: "99, 102, 116",
-  overlay2: "123, 124, 138",
-  overlay1: "148, 148, 158",
-  overlay0: "174, 173, 179",
-  surface2: "201, 197, 197",
-  surface1: "218, 216, 216",
-  surface0: "237, 237, 237",
-  base: "250, 250, 250",
-  mantle: "234, 234, 235",
-  crust: "219, 219, 220",
-});
-
-
 const whiteLight: CtpPalette = P({
   rosewater: "238, 158, 125",
   flamingo: "228, 140, 128",
@@ -106,14 +79,11 @@ const whiteLight: CtpPalette = P({
   overlay0: "185, 185, 185",
   surface2: "222, 222, 222",
   surface1: "238, 238, 238",
-  surface0: "248, 248, 248",
+  surface0: "246, 246, 246",
   base: "255, 255, 255",
-  mantle: "250, 250, 250",
-  crust: "240, 240, 240",
+  mantle: "255, 255, 255",
+  crust: "252, 252, 252",
 });
-
-
-
 
 const genericDark: CtpPalette = P({
   rosewater: "245, 224, 220",
@@ -139,63 +109,54 @@ const genericDark: CtpPalette = P({
   surface2: "105, 105, 105",
   surface1: "84, 84, 84",
   surface0: "63, 63, 63",
-  base: "42, 42, 42",
-  mantle: "21, 21, 21",
-  crust: "0, 0, 0",
-});
-
-const royalVelvetDark: CtpPalette = P({
-  rosewater: "246, 201, 153",
-  flamingo: "245, 189, 166",
-  pink: "228, 157, 248",
-  mauve: "197, 146, 222",
-  red: "240, 120, 160",
-  maroon: "230, 102, 102",
-  peach: "230, 195, 125",
-  yellow: "241, 250, 140",
-  green: "130, 235, 130",
-  teal: "114, 224, 214",
-  sky: "139, 233, 253",
-  sapphire: "104, 197, 240",
-  blue: "95, 126, 222",
-  lavender: "154, 141, 247",
-  text: "248, 248, 242",
-  subtext1: "211, 211, 197",
-  subtext0: "191, 191, 181",
-  overlay2: "139, 143, 167",
-  overlay1: "110, 114, 145",
-  overlay0: "88, 92, 116",
-  surface2: "68, 71, 90",
-  surface1: "56, 59, 76",
-  surface0: "48, 50, 65",
-  base: "30, 30, 36",
-  mantle: "25, 25, 30",
-  crust: "20, 20, 25",
+  base: "44, 44, 44",
+  mantle: "26, 26, 26",
+  crust: "16, 16, 16",
 });
 
 const THEMES: Record<string, HelixThemeDef> = {
   "ctp-terracotta-light": {
     id: "ctp-terracotta-light",
-    label: "陶土晨光",
+    label: "浅色",
     mode: "light",
     ctp: whiteLight,
     primaryOverride: "30, 30, 30",
   },
   "ctp-generic-dark": {
     id: "ctp-generic-dark",
-    label: "Grayscale 灰黑",
+    label: "深色",
     mode: "dark",
     ctp: genericDark,
-  },
-  "ctp-royal-velvet": {
-    id: "ctp-royal-velvet",
-    label: "陶土终端",
-    mode: "dark",
-    ctp: royalVelvetDark,
   },
 };
 
 const DEFAULT_THEME_STYLE = "default";
+
+/** 保留的浅色档（界面显示名「浅色」，源自陶土晨光调色板）。 */
+const LIGHT_THEME_STYLE = "ctp-terracotta-light";
+/** 保留的深色档（界面显示名「深色」，源自灰黑调色板）。 */
+const DARK_THEME_STYLE = "ctp-generic-dark";
+
+/**
+ * 迁移表：已下架风格 → 保留档。内置奶油（浅色基调）落到陶土晨光，
+ * 陶土终端（深色）落到灰黑。normalizeThemeStyle 兜底未知值也归浅色档。
+ */
+const REMOVED_STYLE_FALLBACK: Record<string, string> = {
+  [DEFAULT_THEME_STYLE]: LIGHT_THEME_STYLE,
+  "ctp-royal-velvet": DARK_THEME_STYLE,
+};
+
+/**
+ * 归一任意历史/未知 styleId 到仍存在的两档之一。所有读取入口
+ * （localStorage 直读、持久化恢复、合并兜底）都必须先过这里，否则
+ * 旧存的 "default" / "ctp-royal-velvet" 会让下拉框显示不出选中项，
+ * 甚至把已删的调色板重新应用回界面。
+ */
+export function normalizeThemeStyle(styleId: string | null | undefined): string {
+  const raw = styleId?.trim() || "";
+  if (!raw) return LIGHT_THEME_STYLE;
+  return REMOVED_STYLE_FALLBACK[raw] ?? (THEMES[raw] ? raw : LIGHT_THEME_STYLE);
+}
 
 /** Returns the theme definition, or null for the built-in cream default. */
 function getThemeMeta(
@@ -250,7 +211,7 @@ function buildHelixVars(c: CtpPalette, primaryOverride?: string): Record<string,
   };
 }
 
-const VAR_NAMES = Object.keys(buildHelixVars(atomLight));
+const VAR_NAMES = Object.keys(buildHelixVars(whiteLight));
 
 /**
  * Applies a theme style by writing inline CSS variables onto <html>.
@@ -305,8 +266,12 @@ export function applyHelixPalette(styleId: string | null | undefined): void {
  *
  * default（奶油）保持与 shiki-code.tsx 的 SHIKI_THEMES 完全一致：
  * 实际对话里的代码块就用这一对，预览必须与之一致，否则预览毫无参考价值。
+ *
+ * 配色只留两档后仍按档配对：陶土晨光 → Latte / GitHub 深色，
+ * 灰黑 → GitHub 浅色 / Vitesse Black。未知 id（不应再发生，
+ * normalizeThemeStyle 已归一）回落到陶土晨光那一对。
  */
-export interface CodeThemePair {
+interface CodeThemePair {
   light: string;
   dark: string;
   /** 卡副标题用的中文主题名（不暴露裸 id，避免被误读成字体）。 */
@@ -315,33 +280,21 @@ export interface CodeThemePair {
 }
 
 const CODE_THEMES: Record<string, CodeThemePair> = {
-  [DEFAULT_THEME_STYLE]: {
-    light: "github-light-default",
-    dark: "github-dark-dimmed",
-    lightLabel: "GitHub 浅色",
-    darkLabel: "GitHub 深色",
-  },
-  "ctp-terracotta-light": {
+  [LIGHT_THEME_STYLE]: {
     light: "catppuccin-latte",
     dark: "github-dark-dimmed",
     lightLabel: "Catppuccin Latte",
     darkLabel: "GitHub 深色",
   },
-  "ctp-generic-dark": {
+  [DARK_THEME_STYLE]: {
     light: "github-light-default",
     dark: "vitesse-black",
     lightLabel: "GitHub 浅色",
     darkLabel: "Vitesse Black",
   },
-  "ctp-royal-velvet": {
-    light: "vitesse-light",
-    dark: "catppuccin-mocha",
-    lightLabel: "Vitesse Light",
-    darkLabel: "Catppuccin Mocha",
-  },
 };
 
-const DEFAULT_CODE_THEMES = CODE_THEMES[DEFAULT_THEME_STYLE];
+const DEFAULT_CODE_THEMES = CODE_THEMES[LIGHT_THEME_STYLE];
 
 /** 取某风格对应的代码主题对；未知/空 id 回落到默认那一对。 */
 export function codeThemesFor(styleId: string | null | undefined): CodeThemePair {
@@ -354,17 +307,10 @@ export const THEME_SELECT_GROUPS: {
   options: { value: string; label: string }[];
 }[] = [
   {
-    label: "浅色",
+    label: "配色",
     options: [
-      { value: DEFAULT_THEME_STYLE, label: "奶油" },
-      { value: "ctp-terracotta-light", label: "陶土晨光" },
-    ],
-  },
-  {
-    label: "深色",
-    options: [
-      { value: "ctp-generic-dark", label: "灰黑" },
-      { value: "ctp-royal-velvet", label: "陶土终端" },
+      { value: LIGHT_THEME_STYLE, label: "浅色" },
+      { value: DARK_THEME_STYLE, label: "深色" },
     ],
   },
 ];

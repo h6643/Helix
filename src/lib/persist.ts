@@ -1,6 +1,6 @@
 /**
  * IndexedDB persistence layer for Helix
- * Stores: memories, tasks, notes, checkpoints, chat history, file snapshots
+ * Stores: tasks, notes, chat history, file snapshots
  */
 import { encryptApiKey, decryptApiKey } from "./crypto";
 import type { PendingChange } from "@/stores/helix-types";
@@ -29,13 +29,6 @@ export function setPersistCurrentSessionGetter(
   getCurrentSessionId = fn;
 }
 
-interface PersistedMemory {
-  id: string;
-  content: string;
-  category: string;
-  createdAt: number;
-}
-
 interface PersistedTask {
   id: string;
   label: string;
@@ -43,15 +36,6 @@ interface PersistedTask {
   children?: PersistedTask[];
   parentId: string | null;
   depth: number;
-}
-
-interface PersistedCheckpoint {
-  id: string;
-  label: string;
-  timestamp: number;
-  taskIds: string[];
-  memorySnapshot: string;
-  tasks?: PersistedTask[];
 }
 
 export interface PersistedChatMessage {
@@ -70,7 +54,7 @@ export interface PersistedChatMessage {
   /** Interleaved thinking/text/tool_group/file_change blocks. Was dropped from
    *  persistence for a long time, so reloaded messages lost their thinking
    *  cards and tool cards ("重启后思考卡片不能展开"). */
-  blocks?: import("@/stores/helix-store").ChatMessage["blocks"];
+  blocks?: import("@/stores/helix-types").ChatMessage["blocks"];
   images?: Array<{
     id: string;
     dataUrl: string;
@@ -92,7 +76,7 @@ interface PersistedFileSnapshot {
   children?: PersistedFileSnapshot[];
 }
 
-export interface PersistedProject {
+interface PersistedProject {
   id: string;
   name: string;
   folder: string;
@@ -110,9 +94,7 @@ export interface PersistedOpenTab {
   isDirty?: boolean;
 }
 
-export type PersistedEditorTab = PersistedOpenTab;
-
-export interface PersistedScheduledTask {
+interface PersistedScheduledTask {
   id: string;
   label: string;
   prompt: string;
@@ -148,10 +130,8 @@ export interface PersistedSession {
   pinnedInProject?: boolean;
   workDir: string | null;
   goal: string | null;
-  memories: PersistedMemory[];
   tasks: PersistedTask[];
   notes: string;
-  checkpoints: PersistedCheckpoint[];
   chatMessages: PersistedChatMessage[];
   files: PersistedFileSnapshot[];
   openTabs: PersistedOpenTab[];
@@ -175,12 +155,16 @@ function openDB(): Promise<IDBDatabase> {
 
     request.onupgradeneeded = (event) => {
       const db = request.result;
+      // "memories" store 不再被读写（Helix 自带记忆已移除），但保留创建：
+      // 删掉它要动 DB_VERSION 与迁移，旧用户的库里也一样留着，得不偿失。
       if (!db.objectStoreNames.contains("memories")) {
         db.createObjectStore("memories", { keyPath: "id" });
       }
       if (!db.objectStoreNames.contains("tasks")) {
         db.createObjectStore("tasks", { keyPath: "id" });
       }
+      // "checkpoints" store 不再读写（checkpoint 系统已移除），保留创建以免动
+      // DB_VERSION 与迁移；旧用户的库里本来就有。
       if (!db.objectStoreNames.contains("checkpoints")) {
         db.createObjectStore("checkpoints", { keyPath: "id" });
       }
@@ -271,24 +255,6 @@ const SESSION_CACHE_MAX = 12;
 const sessionCache = new Map<string, PersistedSession>();
 
 export const persistence = {
-  // --- Memories ---
-  async saveMemories(memories: PersistedMemory[]): Promise<void> {
-    const db = await openDB();
-    const transaction = db.transaction("memories", "readwrite");
-    const store = transaction.objectStore("memories");
-    store.clear();
-    for (const m of memories) store.put(m);
-    await new Promise<void>((resolve, reject) => {
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-    });
-  },
-
-  async loadMemories(): Promise<PersistedMemory[]> {
-    const db = await openDB();
-    return txAll<PersistedMemory>(db, "memories", "readonly", () => {});
-  },
-
   // --- Tasks ---
   async saveTasks(tasks: PersistedTask[]): Promise<void> {
     const db = await openDB();
@@ -330,24 +296,6 @@ export const persistence = {
       }
     }
     return roots;
-  },
-
-  // --- Checkpoints ---
-  async saveCheckpoints(checkpoints: PersistedCheckpoint[]): Promise<void> {
-    const db = await openDB();
-    const transaction = db.transaction("checkpoints", "readwrite");
-    const store = transaction.objectStore("checkpoints");
-    store.clear();
-    for (const cp of checkpoints) store.put(cp);
-    await new Promise<void>((resolve, reject) => {
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-    });
-  },
-
-  async loadCheckpoints(): Promise<PersistedCheckpoint[]> {
-    const db = await openDB();
-    return txAll<PersistedCheckpoint>(db, "checkpoints", "readonly", () => {});
   },
 
   // --- Chat Messages ---
@@ -513,10 +461,8 @@ export const persistence = {
   // --- Full Session Save/Restore ---
   async saveSession(data: {
     goal: string | null;
-    memories: PersistedMemory[];
     tasks: PersistedTask[];
     notes: string;
-    checkpoints: PersistedCheckpoint[];
     chatMessages: PersistedChatMessage[];
     files: PersistedFileSnapshot[];
     openTabs: PersistedOpenTab[];
@@ -842,7 +788,6 @@ export const persistence = {
         files: session.files,
         openTabs: session.openTabs,
         tasks: session.tasks,
-        memories: session.memories,
         notes: session.notes,
       },
     };
@@ -910,9 +855,7 @@ export const persistence = {
         files: s.files || [],
         openTabs: s.openTabs || [],
         tasks: s.tasks || [],
-        memories: s.memories || [],
         notes: s.notes || "",
-        checkpoints: [],
       };
       await this.saveSession(session);
       return session;
@@ -1006,9 +949,7 @@ export const persistence = {
         files: [],
         openTabs: [],
         tasks: [],
-        memories: [],
         notes: "",
-        checkpoints: [],
       };
       await this.saveSession(session);
       return session;

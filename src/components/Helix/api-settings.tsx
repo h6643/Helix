@@ -16,7 +16,6 @@ import {
   RefreshCw,
   Trash2,
   Folder,
-  Brain,
   Compass,
   Puzzle,
 } from "lucide-react";
@@ -32,7 +31,6 @@ import { BrowserSettingsPanel } from "./browser-settings";
 import { ChannelModelSettings } from "./channel-model-settings";
 import { GeneralSettingsPanel } from "./general-settings-panel";
 import { HookSettings } from "./hook-settings";
-import { MemorySettingsPanel } from "./memory-settings";
 import { PageHeader, PopupSelect, SettingGroup } from "./settings-ui";
 import { ShortcutsPage } from "./shortcuts-page";
 import { SkillPanel } from "./skill-panel";
@@ -44,6 +42,7 @@ import { persistence } from "@/lib/persist";
 import { getAllProviders, getBaseUrl } from "@/lib/providers";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore, type ApiConfig } from "@/stores/helix-store";
+import type { TaskNode } from "@/stores/helix-types";
 
 const ALL_PROVIDERS = getAllProviders();
 
@@ -83,7 +82,6 @@ type SettingsPage =
   | "hook"
   | "usage"
   | "help"
-  | "memory"
   | "browser"
 
 interface NavItem {
@@ -112,7 +110,6 @@ const NAV_GROUPS: NavGroup[] = [
       { id: "api", label: "模型", icon: Globe },
       { id: "plugins", label: "扩展管理", icon: Puzzle },
       { id: "usage", label: "用量", icon: Activity },
-      { id: "memory", label: "记忆", icon: Brain },
       { id: "browser", label: "浏览器", icon: Compass },
     ],
   },
@@ -500,6 +497,12 @@ export function ApiSettings({
   useEffect(() => {
     void loadPiModels();
     void useHelixStore.getState().refreshPiChannelProviders();
+    // 渠道模型目录是扩展后台热身的（WorkBuddy refreshModels / Trae live 拉取），
+    // 打开设置瞬间的快照可能还没含全部渠道：几秒后补一次刷新，少关一次设置页。
+    const t = setTimeout(() => {
+      void useHelixStore.getState().refreshPiChannelProviders();
+    }, 5000);
+    return () => clearTimeout(t);
   }, [loadPiModels]);
 
   // 把 pi models.json 里该模型的 contextWindow / reasoning 回填进
@@ -1144,6 +1147,13 @@ export function ApiSettings({
       useHelixStore.setState({
         chatMessages: msgs,
         activeSessionWorkDir: session.workDir ?? null,
+        // 恢复任务态：goal / tasks / notes 只存在会话记录里，冷启动走
+        // restoreFromStorage 能读回全局快照，但任何加载/切换路径都不还原。
+        // 不在这里放回 store，下一次 flushSessionPersist 会用当前内存里的空值
+        // 把会话记录里的这三样抹掉，任务退化成普通对话。
+        tasks: (session.tasks ?? []) as TaskNode[],
+        goal: session.goal ?? null,
+        notes: session.notes ?? "",
       });
       // selectedWorkDir 同步到恢复的对话所属项目，让 Git 分支选择器等 UI 跟随对话。
       if (session.workDir) {
@@ -1477,7 +1487,7 @@ export function ApiSettings({
                               setModelSearch("");
                               setShowAddModelDialog(true);
                             }}
-                          >
+                           className="bg-background shadow-none rounded-lg">
                             添加模型
                           </Button>
                         </div>
@@ -1867,7 +1877,7 @@ export function ApiSettings({
                                 variant="outline"
                                 onClick={confirmAddModel}
                                 disabled={!pickedModel.trim() && !manualModel.trim()}
-                              >
+                               className="bg-background shadow-none rounded-lg">
                                 添加
                               </Button>
                             </div>
@@ -2106,9 +2116,6 @@ export function ApiSettings({
             <PageHeader>帮助</PageHeader>
           </div>
         );
-
-      case "memory":
-        return <MemorySettingsPanel />;
 
       case "browser":
         return <BrowserSettingsPanel />;

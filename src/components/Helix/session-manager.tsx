@@ -671,7 +671,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                 variant="outline"
                 size="sm"
                 onClick={() => setDeleteTarget(null)}
-              >
+               className="bg-background shadow-none rounded-lg">
                 取消
               </Button>
             </div>

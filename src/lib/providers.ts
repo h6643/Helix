@@ -3,7 +3,7 @@
  * Actual provider resolution is handled by Helix.
  */
 
-export interface ProviderConfig {
+interface ProviderConfig {
   id: string;
   name: string;
   baseUrl: string;

@@ -29,7 +29,7 @@ import { electronApp } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 import type { BrowserHandoff } from "@/stores/helix-types";
 
-export interface BrowserExecRequest {
+interface BrowserExecRequest {
   op:
     | "navigate"
     | "read"
@@ -47,7 +47,6 @@ export interface BrowserExecRequest {
     | "drag"
     | "wait"
     | "eval"
-    | "upload"
     | "dialog";
   url?: string;
   reqId: string;
@@ -74,17 +73,13 @@ export interface BrowserExecRequest {
     js?: string;
     /** wait：等待超时秒数。 */
     seconds?: number;
-    /** upload：项目目录内的文件路径（字节由 Rust 读，页内赋值）。 */
-    path?: string;
-    /** upload：页内读到的文件字节（base64），由前端填充后注入页面。 */
-    files?: Array<{ name?: string; type?: string; base64?: string }>;
     /** dialog：设定下一个 confirm/prompt 的应答策略 / 清空记录。 */
     accept?: boolean;
     clear?: boolean;
   };
 }
 
-export interface BrowserExecResult {
+interface BrowserExecResult {
   ok: boolean;
   error?: string;
   url?: string;
@@ -106,7 +101,6 @@ export interface BrowserExecResult {
   modifiers?: string;
   hovered?: string;
   dragged?: string;
-  uploaded?: string;
   selected?: string;
   scrolled?: { x: number; y: number; viewportHeight: number; pageHeight: number };
   /** browser_eval 的同步返回值（字符串或 JSON 串）。 */
@@ -503,32 +497,6 @@ const PAGE_SCRIPT = `
     try { v = typeof out === 'string' ? out : JSON.stringify(out); } catch (e) { v = String(out); }
     return { ok: true, value: v === undefined ? null : String(v === undefined ? '' : v).slice(0, 20000), url: location.href };
   }
-  // 页内赋 File：Chromium 允许 new DataTransfer() + 构造 File，赋给 input.files
-  // 后派发 change，多数上传组件就能走通（比 CDP 那套轻，代价是 isTrusted=false）。
-  function doUpload(params) {
-    var el = findByRefOrSelector(params);
-    if (!el) return { ok: false, error: '找不到目标 input（重新 read 一次再试）' + describe(params) };
-    if ((el.tagName || '').toLowerCase() !== 'input' || (el.getAttribute('type') || '').toLowerCase() !== 'file') {
-      return { ok: false, error: 'browser_upload 只能打在 <input type="file"> 上' };
-    }
-    var files = (params && params.files) || [];
-    if (!files.length) return { ok: false, error: '没有可写入的文件内容' };
-    try {
-      var dt = new DataTransfer();
-      files.forEach(function (f) {
-        var bin = atob(String(f.base64 || ''));
-        var arr = new Uint8Array(bin.length);
-        for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-        dt.items.add(new File([arr], String(f.name || 'file'), { type: String(f.type || 'application/octet-stream') }));
-      });
-      el.files = dt.files;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return { ok: true, uploaded: files.map(function (f) { return f.name; }).join(', ').slice(0, 300) };
-    } catch (e) {
-      return { ok: false, error: '写入文件失败：' + String((e && e.message) || e) };
-    }
-  }
   // 原生 alert/confirm/prompt 由初始化脚本改成了「记录 + 立即返回」，见 Rust 的
   // DIALOG_SHIM_SCRIPT：真弹窗会占住页面的脚本线程，之后每条注入都要等到超时。
   function doDialog(params) {
@@ -627,7 +595,6 @@ const PAGE_SCRIPT = `
       if (op === 'scroll') return doScroll(params);
       if (op === 'drag') return doDrag(params);
       if (op === 'eval') return doEval(params);
-      if (op === 'upload') return doUpload(params);
       if (op === 'dialog') return doDialog(params);
       if (op === 'loginprobe') return doLoginProbe(params);
       return { ok: false, error: '未知的 op: ' + op };
@@ -964,12 +931,11 @@ const HANDOFF_BLOCKED_OPS = new Set<BrowserExecRequest["op"]>([
   "forward",
   "refresh",
   // 会改动页面或抢走人类视野/焦点的那一类：滚动会挪走他正在填的表单，hover 会
-  // 弹掉他点开的菜单，eval 什么都能干，upload/drag 直接动控件。
+  // 弹掉他点开的菜单，eval 什么都能干，drag 直接动控件。
   "hover",
   "scroll",
   "drag",
   "eval",
-  "upload",
 ]);
 
 let handoffExpiry: ReturnType<typeof setTimeout> | null = null;
@@ -1297,44 +1263,7 @@ async function doWait(
 }
 
 /**
- * 把项目目录内的一个文件塞进 `<input type=file>`。
- * 字节由 Rust 读（`browser_read_upload_file` 负责边界与体积），base64 随注入脚本
- * 进页面，页内用 DataTransfer + File 赋值 —— WebView2 没有 CDP 那套
- * `DOM.setFileInputFiles`，这是不引调试协议能走通的最远一步。
- */
-async function doUpload(
-  params: BrowserExecRequest["params"],
-): Promise<BrowserExecResult> {
-  const page = requirePageId();
-  const path = (params?.path ?? "").trim();
-  if (!path) {
-    return { ok: false, error: "browser_upload 需要 path（项目目录内的文件路径）" };
-  }
-  const st = useHelixStore.getState();
-  const workDir = st.activeSessionWorkDir ?? st.selectedWorkDir ?? "";
-  if (workDir.startsWith("remote://")) {
-    return {
-      ok: false,
-      error: "远程工作区下不能上传本地文件（文件边界按本地项目目录判定）",
-    };
-  }
-  let file: { name?: string; type?: string; base64?: string };
-  try {
-    file = await invoke<{ name?: string; type?: string; base64?: string }>(
-      "browser_read_upload_file",
-      { path, workDir },
-    );
-  } catch (e) {
-    return { ok: false, error: errText(e) };
-  }
-  return evalInPage<BrowserExecResult>(
-    page,
-    opScript("upload", { ...params, files: [file] }),
-    OP_TIMEOUT_MS,
-  );
-}
-
-/** 截图 = 启动 + 轮询全局变量（ExecuteScript 不 await Promise）。 */
+ * 截图 = 启动 + 轮询全局变量（ExecuteScript 不 await Promise）。 */
 async function inPageScreenshot(page: string): Promise<BrowserExecResult> {
   await evalInPage<{ ok: boolean }>(
     page,
@@ -1412,7 +1341,6 @@ async function dispatch(
       };
     }
   }
-  if (req.op === "upload") return doUpload(req.params);
   if (req.op === "navigate") {
     const url = httpish(req.url);
     if (!url) return { ok: false, error: "navigate 需要一个 http/https 地址" };

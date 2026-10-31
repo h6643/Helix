@@ -180,7 +180,7 @@ export function HookSettings() {
                   variant="outline"
                   onClick={() => addHook(type)}
                   aria-label="添加"
-                >
+                 className="bg-background shadow-none rounded-lg">
                   <Plus className="size-4" />
                 </Button>
               </div>
@@ -246,7 +246,7 @@ export function HookSettings() {
       </SettingGroup>
 
       <div className="flex items-center justify-end gap-3 pt-4">
-        <Button size="sm" variant="outline" onClick={save} disabled={saving}>
+        <Button size="sm" variant="outline" onClick={save} disabled={saving} className="bg-background shadow-none rounded-lg">
           {saving ? "保存并重启网关…" : "保存 Hooks 配置"}
         </Button>
         {saveState === "ok" && (

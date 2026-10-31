@@ -73,7 +73,6 @@ helix.json
 .env*
 
 AI tool
-.mimocode/
 .claude/
 
 

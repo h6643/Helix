@@ -61,6 +61,7 @@ import { resolveBackendSid, removeConversationIndex } from "@/lib/session-map";
 import { mapBackendMessages } from "@/lib/session-resync";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore, type ExternalService } from "@/stores/helix-store";
+import type { TaskNode } from "@/stores/helix-types";
 
 // Module-level in-flight dedup for session/prepare: the backend dedupes live
 // instances but not in-flight restore calls, so two concurrent prepares for
@@ -1048,6 +1049,12 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         useHelixStore.setState({
           chatMessages: merged,
           activeSessionWorkDir: fresh.workDir ?? null,
+          // 恢复任务态（同 api-settings 取消归档的还原）：goal / tasks / notes
+          // 只存在会话记录里，不还原的话下一次落盘会用内存空值抹掉，
+          // 任务重新打开后退化成普通对话。
+          tasks: (fresh.tasks ?? []) as TaskNode[],
+          goal: fresh.goal ?? null,
+          notes: fresh.notes ?? "",
         });
         if (fresh.workDir) {
           // 远程项目的 workDir 是 `remote://<id>/<path>` 虚拟键，**不是本机

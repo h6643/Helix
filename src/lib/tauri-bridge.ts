@@ -162,7 +162,6 @@ function buildTauriAPI(): ElectronAPI {
     edit: (filePath: string, oldString: string, newString: string) =>
       invoke("edit", { filePath, oldString, newString }),
     readdir: (dirPath: string) => invoke("readdir", { dirPath }),
-    helixMemoryDir: () => invoke("helix_memory_dir"),
     stat: (filePath: string) => invoke("stat", { filePath }),
     rename: (oldPath: string, newPath: string) =>
       invoke("rename", { oldPath, newPath }),
@@ -356,20 +355,6 @@ function buildTauriAPI(): ElectronAPI {
         apiKey: params.apiKey,
       }),
     onEvent: onHelixEvent,
-    listMemories: () => invoke("helix_list_memories"),
-    addMemoryEntry: (target: "memory" | "user", text: string) =>
-      invoke("helix_add_memory_entry", { target, text }),
-    removeMemoryEntry: (target: "memory" | "user", text: string) =>
-      invoke("helix_remove_memory_entry", { target, text }),
-    // pi-hermes-memory 概览 + 开关（设置「记忆」页）
-    memoryOverview: () => invoke("helix_memory_overview"),
-    setMemoryEnabled: (scope: "global" | "project", enabled: boolean) =>
-      invoke("helix_set_memory_enabled", { scope, enabled }),
-    memoryConfig: () => invoke("helix_memory_config"),
-    deleteMemory: (scope: "global" | "project", project?: string) =>
-      invoke("helix_delete_memory", { scope, project: project ?? null }),
-    setMemoryConfig: (updates: Record<string, unknown>) =>
-      invoke("helix_set_memory_config", { updates }),
     codemodeConfig: () => invoke("helix_codemode_config"),
     setCodemodeConfig: (updates: Record<string, unknown>) =>
       invoke("helix_set_codemode_config", { updates }),

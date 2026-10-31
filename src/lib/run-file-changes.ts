@@ -161,7 +161,7 @@ function pickUsableDiff(
   return null;
 }
 
-export type FileChangeSink = {
+type FileChangeSink = {
   /** 本次 run 累积的改动（最后挂到最终消息的 fileChanges 上）。 */
   runChanges: PendingChange[];
   /** store 的 addPendingChange（返回新建条目的 id）。 */

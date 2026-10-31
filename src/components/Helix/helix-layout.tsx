@@ -77,7 +77,6 @@ import {
   toRemoteTarget,
 } from "@/lib/remote-projects";
 import { startScheduledTaskRunner } from "@/lib/scheduled-task-runner";
-import { isServeActive, getServeClient } from "@/lib/serve-gateway";
 import { resolveBackendSids } from "@/lib/session-map";
 import { applyHelixPalette } from "@/lib/themes";
 import { useGatewayStore } from "@/stores/gateway-store";
@@ -338,6 +337,14 @@ export function HelixLayout() {
   const dragStartW = useRef(0);
   const rightDragStartX = useRef(0);
   const rightDragStartW = useRef(0);
+  // 拖动期间直接写 DOM 宽度（不经 setState）：宽度 state 每 tick 变化会让
+  // 整棵布局树（含 AgentFlowPanel / RightSidebar / 浏览器 webview）以 60fps
+  // 重渲染，直接把 UI 卡死。松手时才把最终宽度提交进 state 并落盘。
+  const leftPaneOuterRef = useRef<HTMLDivElement>(null);
+  const leftPaneInnerRef = useRef<HTMLDivElement>(null);
+  const rightPaneRef = useRef<HTMLDivElement>(null);
+  const dragNextW = useRef(0);
+  const rightDragNextW = useRef(0);
   // 打开「旁路问答」之前用户原本的右栏宽度（null = 没有待恢复的临时加宽）。
   const rightWidthBeforeBylineRef = useRef<number | null>(null);
 
@@ -495,7 +502,10 @@ export function HelixLayout() {
           SIDEBAR_MIN,
           Math.min(cap, dragStartW.current + delta),
         );
-        setSidebarWidth(next);
+        dragNextW.current = next;
+        const w = `${next}px`;
+        if (leftPaneOuterRef.current) leftPaneOuterRef.current.style.width = w;
+        if (leftPaneInnerRef.current) leftPaneInnerRef.current.style.width = w;
       });
     };
     const onUp = () => {
@@ -503,10 +513,9 @@ export function HelixLayout() {
       document.body.style.userSelect = "";
       document.body.style.cursor = "";
       setIsDragging(false);
-      setSidebarWidth((w) => {
-        saveSidebarWidth(w);
-        return w;
-      });
+      const finalW = dragNextW.current || dragStartW.current;
+      setSidebarWidth(finalW);
+      saveSidebarWidth(finalW);
     };
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
@@ -545,7 +554,8 @@ export function HelixLayout() {
           RIGHT_SIDEBAR_MIN,
           Math.min(cap, rightDragStartW.current + delta),
         );
-        setRightSidebarWidth(next);
+        rightDragNextW.current = next;
+        if (rightPaneRef.current) rightPaneRef.current.style.width = `${next}px`;
       });
     };
     const onUp = () => {
@@ -553,10 +563,9 @@ export function HelixLayout() {
       document.body.style.userSelect = "";
       document.body.style.cursor = "";
       setIsRightDragging(false);
-      setRightSidebarWidth((w) => {
-        saveRightSidebarWidth(w);
-        return w;
-      });
+      const finalW = rightDragNextW.current || rightDragStartW.current;
+      setRightSidebarWidth(finalW);
+      saveRightSidebarWidth(finalW);
       // 用户亲手拖过 = 以他的选择为准，离开「旁路问答」时不再把宽度还原回去。
       rightWidthBeforeBylineRef.current = null;
     };
@@ -1130,22 +1139,10 @@ export function HelixLayout() {
         pushConfigKeyValue("agent.reasoning_effort", effort);
         // Live-update thinking level. Pi has no persistent thinking-level
         // config key, so we broadcast to every live instance; new sessions
-        // get it re-applied at spawn time in Rust (pi_gateway). serve mode
-        // honors agent.reasoning_effort via config.set instead.
-        if (isServeActive()) {
-          const gw = useGatewayStore.getState();
-          getServeClient()
-            ?.rpc("config.set", {
-              key: "agent.reasoning_effort",
-              value: effort,
-              session_id: gw.helixSessionId,
-            })
-            .catch(() => {});
-        } else {
-          window.electron?.helix
-            ?.piSetThinkingLevelAll?.(effort)
-            .catch?.(() => {});
-        }
+        // get it re-applied at spawn time in Rust (pi_gateway).
+        window.electron?.helix
+          ?.piSetThinkingLevelAll?.(effort)
+          .catch?.(() => {});
       }, 150);
     });
     return () => {
@@ -1169,19 +1166,9 @@ export function HelixLayout() {
       autoCompactTimer.current = setTimeout(() => {
         const enabled = useHelixStore.getState().autoCompactContext;
         pushConfigKeyValue("agent.auto_compaction", enabled);
-        if (isServeActive()) {
-          const gw = useGatewayStore.getState();
-          getServeClient()
-            ?.rpc("set_auto_compaction", {
-              enabled,
-              session_id: gw.helixSessionId,
-            })
-            .catch(() => {});
-        } else {
-          window.electron?.helix
-            ?.piSetAutoCompactionAll?.(enabled)
-            .catch?.(() => {});
-        }
+        window.electron?.helix
+          ?.piSetAutoCompactionAll?.(enabled)
+          .catch?.(() => {});
       }, 150);
     });
     return () => {
@@ -2036,10 +2023,12 @@ export function HelixLayout() {
         {/* Sidebar — hidden in settings mode (owned by ApiSettings there). */}
         {showSidebar && !showSettings && (
           <div
+            ref={leftPaneOuterRef}
             className={`flex-1 shrink-0 overflow-hidden relative ${isDragging ? "" : "transition-[width] duration-200 ease-out"}`}
             style={{ width: sidebarPixelWidth }}
           >
             <div
+              ref={leftPaneInnerRef}
               className="h-full overflow-hidden"
               style={{ width: sidebarPixelWidth }}
             >
@@ -2756,6 +2745,7 @@ export function HelixLayout() {
             removes the "flash / white-screen on first open and on every tab
             switch". */}
                 <div
+                  ref={rightPaneRef}
                   className={`relative ${codeFullscreen ? "flex-1 min-w-0" : "shrink-0"} ${rightSidebarVisible && !(showScheduledTasksPanel || showRuntimePanel || showWorktreePanel || showSubAgentPanel) ? "" : "hidden"}`}
                   style={
                     codeFullscreen

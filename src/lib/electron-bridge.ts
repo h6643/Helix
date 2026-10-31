@@ -1,4 +1,3 @@
-import { getServeHelixFacade } from "@/lib/serve-gateway";
 import { installTauriBridge, isTauri } from "@/lib/tauri-bridge";
 import type { ElectronAPI, GitNumstatFailureCode } from "@/types/electron";
 
@@ -18,54 +17,21 @@ export function isElectron(): boolean {
   return false;
 }
 
-// serve 模式下包裹 window.electron 的 Proxy 缓存：
-// 拦截 `.helix` 返回网关门面，其余属性透传原 contextBridge 对象。
-// （contextBridge 暴露的 window.electron 不可重赋值，只能在读取层分流。）
-//
-// 关键坑：contextBridge 暴露的对象属性是 non-writable + non-configurable，
-// JS Proxy 不变量要求 get 陷阱对这类属性必须原样返回 target 上的值——
-// 直接以 window.electron 为 target 并对 `helix` 返回门面会抛
-// "property 'helix' is a read-only and non-configurable data property..."。
-// 解法：以空对象为 target（无自有属性 → 不受不变量约束），闭包转发到真实 api。
-let serveProxyCache: ElectronAPI | null = null;
-
-function wrapWithServeProxy(api: ElectronAPI): ElectronAPI {
-  if (serveProxyCache) return serveProxyCache;
-  serveProxyCache = new Proxy({} as Record<string | symbol, unknown>, {
-    get(_target, prop: string | symbol) {
-      if (prop === "helix") {
-        const facade = getServeHelixFacade();
-        if (facade) return facade;
-      }
-      return (api as unknown as Record<string | symbol, unknown>)[prop];
-    },
-    has(_target, prop: string | symbol) {
-      return prop in (api as unknown as Record<string | symbol, unknown>);
-    },
-  }) as unknown as ElectronAPI;
-  return serveProxyCache;
-}
-
 /**
  * Get Electron API
- * serve 网关激活时返回 Proxy（`.helix` 分流到网关门面），否则原样返回。
  */
 export function getElectronAPI(): ElectronAPI | null {
   if (isElectron()) {
-    if (getServeHelixFacade()) return wrapWithServeProxy(window.electron!);
     return window.electron!;
   }
   return null;
 }
 
 /**
- * 获取 helix API（模式感知）。
- * serve 模式 → 网关门面（WS/REST 直连）；acp 模式 → 原 IPC 桥。
+ * 获取 helix API。
  * 渲染层所有直摸 `window.electron.helix` 的调用点应改用本函数。
  */
 export function helixApi(): ElectronAPI["helix"] | null {
-  const facade = getServeHelixFacade();
-  if (facade) return facade;
   return (
     (typeof window !== "undefined" ? window.electron?.helix : null) ?? null
   );
@@ -136,17 +102,6 @@ export const electronFS = {
       return api.fs.readdir(dirPath);
     }
     throw new Error("File system not available in browser mode");
-  },
-
-  // Absolute Helix memory directory, computed in the main process.
-  // Use this instead of deriving the path from process.env in the renderer
-  // (which is undefined in a Next.js client bundle).
-  async memoryDir(): Promise<string | null> {
-    const api = getElectronAPI();
-    if (api && typeof api.fs.helixMemoryDir === "function") {
-      return api.fs.helixMemoryDir();
-    }
-    return null;
   },
 
   async stat(filePath: string) {

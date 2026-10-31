@@ -561,13 +561,14 @@ export function GeneralSettingsPanel() {
                 value={proxyUrl}
                 onChange={(e) => setProxyUrl(e.target.value)}
                 placeholder="例如 http://127.0.0.1:10809"
-                className="w-64 ui-text-sm2 px-2 py-1 rounded-md border border-border bg-background text-foreground"
+                className="w-64 ui-text-sm2 px-3 py-1.5 rounded-lg border border-border bg-background text-foreground"
               />
               <Button
                 size="sm"
                 variant="outline"
                 onClick={applyProxy}
                 disabled={proxyBusy}
+                className="bg-background shadow-none rounded-lg"
               >
                 {proxyBusy ? "保存中…" : "保存"}
               </Button>
@@ -680,7 +681,7 @@ export function GeneralSettingsPanel() {
               onClick={() =>
                 void electronApp.openNotificationSettings().catch(() => {})
               }
-              className="rounded-md border border-border/50 px-2.5 py-1 text-xs text-foreground transition-colors hover:bg-muted"
+              className="rounded-md border border-border/50 px-2.5 py-1 ui-text-sm2 text-foreground transition-colors hover:bg-muted"
             >
               打开系统设置
             </button>
@@ -766,9 +767,9 @@ export function GeneralSettingsPanel() {
                 value={dataRootPath}
                 onChange={(e) => setDataRootPath(e.target.value)}
                 placeholder={dataRootInfo.dataRootDefault || "未设置"}
-                className="w-72 ui-text-sm2 px-2 py-1 rounded-md border border-border bg-background text-foreground"
+                className="w-72 ui-text-sm2 px-3 py-1.5 rounded-lg border border-border bg-background text-foreground"
               />
-              <Button size="sm" variant="outline" onClick={pickDataRoot}>
+              <Button size="sm" variant="outline" onClick={pickDataRoot} className="bg-background shadow-none rounded-lg">
                 选择文件夹
               </Button>
               <Button
@@ -776,6 +777,7 @@ export function GeneralSettingsPanel() {
                 variant="outline"
                 onClick={applyDataRoot}
                 disabled={dataRootBusy}
+                className="bg-background shadow-none rounded-lg"
               >
                 {dataRootBusy ? "复制中…" : "应用"}
               </Button>
@@ -785,7 +787,7 @@ export function GeneralSettingsPanel() {
                   variant="outline"
                   onClick={resetDataRoot}
                   disabled={dataRootBusy}
-                >
+                 className="bg-background shadow-none rounded-lg">
                   恢复默认
                 </Button>
               )}

@@ -28,7 +28,7 @@ import { useHelixStore } from "@/stores/helix-store";
 // 同样的快捷命令，命令名/description/执行逻辑必须一字不差——注册表和执行器
 // 各一份，两处直接 import，谁都不再复制粘贴。
 
-export interface BuiltinCommand {
+interface BuiltinCommand {
   name: string;
   description: string;
   action: "compact" | "btw" | "review";
@@ -60,7 +60,7 @@ export const BUILTIN_SLASH_COMMANDS: BuiltinCommand[] = [
  * `git diff` 并按需 Read——上下文小一个量级，而且能审到 `git diff` 根本不包含
  * 的未跟踪新文件（本项目 write 出来的文件大多是这类）。
  */
-export const REVIEW_PROMPT = `请审查当前项目里**未提交**的改动。这是审查任务，不是实现任务：不要修改或创建任何文件，也不要提交。
+const REVIEW_PROMPT = `请审查当前项目里**未提交**的改动。这是审查任务，不是实现任务：不要修改或创建任何文件，也不要提交。
 
 步骤：
 1. \`git status --porcelain\` 看清改动范围，再 \`git diff HEAD\` 读已跟踪文件的 diff。
@@ -126,7 +126,7 @@ function rebindSessionSid(
   map.set(cid, { ...next, sids: [...sids] });
 }
 
-export interface CompactContext {
+interface CompactContext {
   /** 组件里的 live 映射（ref.current），按 cid 查 sid 的主来源。 */
   sessionMap: Map<string, SessionMapEntry>;
   /** live 映射缺失时的全局兜底 sid（组件 ref / gateway store）。 */
@@ -136,7 +136,7 @@ export interface CompactContext {
   customInstructions?: string;
 }
 
-export type CompactResult = "ok" | "busy" | "no-session" | "error";
+type CompactResult = "ok" | "busy" | "no-session" | "error";
 
 /**
  * /compact 的完整执行体：调后端 session.compress、处理「会话不在内存」的

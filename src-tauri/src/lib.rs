@@ -16,7 +16,6 @@ mod github;
 mod helix;
 mod hooks;
 mod mcp;
-mod memory;
 mod office_preview;
 mod page_fetch;
 mod paths;
@@ -155,6 +154,9 @@ pub fn run() {
             // names in Helix sessions).
             pi_extensions::install_browser_extension();
             pi_extensions::remove_legacy_browser_extension();
+            // 历史版本写出的 `-<目录>` 禁用条目 pi 精确匹配命不中，收敛成
+            // `!<目录>/**`（幂等，稳态无写入）。
+            pi_extensions::migrate_extension_disable_patterns();
 
             std::thread::spawn(move || {
                 if let Err(e) = pi_gateway::spawn(&app_state) {
@@ -268,7 +270,6 @@ pub fn run() {
             helix::helix_fetch_models,
             helix::helix_get_config,
             helix::helix_set_config,
-            helix::helix_set_provider_models,
             helix::helix_set_yaml_key,
             helix::helix_set_delegation_identities,
             helix::helix_set_config_key_value,
@@ -280,9 +281,6 @@ pub fn run() {
             approval_policy::helix_set_permission_mode,
             approval_policy::helix_clear_permission_override,
             approval_policy::helix_set_approval_timeout_sec,
-            // 用户规则（settings.json → permission.userRules）读写口
-            approval_policy::helix_get_permission_rules,
-            approval_policy::helix_set_permission_rules,
             // 系统通知开关（config.yaml → notifications: 块）
             desktop_notify::helix_notification_config,
             desktop_notify::helix_set_notification_config,
@@ -296,14 +294,6 @@ pub fn run() {
             helix::browser_write_result,
             helix::helix_set_model,
             helix::helix_register_provider_models,
-            helix::helix_list_memories,
-            helix::helix_add_memory_entry,
-            helix::helix_remove_memory_entry,
-            helix::helix_memory_overview,
-            helix::helix_set_memory_enabled,
-            helix::helix_delete_memory,
-            helix::helix_memory_config,
-            helix::helix_set_memory_config,
             helix::helix_codemode_config,
             helix::helix_set_codemode_config,
             // Memory status
@@ -321,7 +311,6 @@ pub fn run() {
             fs::delete,
             fs::scan_tree,
             fs::allow_root,
-            fs::helix_memory_dir,
             // 会话级文件快照：一轮 run 前存「改动前」的内容，可整轮回滚
             fs::snapshot_save,
             fs::snapshot_restore,
@@ -393,12 +382,10 @@ pub fn run() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_kill,
-            // page fetch (browser pick-element) + iframe 嵌入能力探测
+            // page fetch (browser pick-element)
             page_fetch::page_fetch,
-            page_fetch::page_frame_policy,
             browser_webview::browser_webview_open,
             browser_webview::browser_webview_set_rect,
-            browser_webview::browser_webview_navigate,
             browser_webview::browser_webview_history,
             browser_webview::browser_webview_eval,
             browser_webview::browser_webview_screenshot,
@@ -410,7 +397,6 @@ pub fn run() {
             // 人工接管超时（config.yaml → browser.handoff_timeout_min）
             browser_webview::browser_handoff_config,
             browser_webview::browser_set_handoff_config,
-            browser_webview::browser_read_upload_file,
             // git
             git::status,
             git::diff,

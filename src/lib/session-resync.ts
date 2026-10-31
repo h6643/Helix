@@ -1,4 +1,4 @@
-﻿import { resolveBackendSid } from "@/lib/session-map";
+import { resolveBackendSid } from "@/lib/session-map";
 import {
   brokenReasonFromResume,
   isSessionGone,
@@ -58,7 +58,7 @@ export function isGatewayNoteMessage(m: {
  * （tui_gateway/server.py::_history_to_messages）：正文在 `text` 而非 `content`；
  * `row_id` 透传以便本地撤回/删除能同步回后端历史。标 unknown 的字段是后端
  * 动态 JSON 字段，在校验/收窄前不能盲信其类型。 */
-export interface BackendHistoryMessage {
+interface BackendHistoryMessage {
   id?: unknown;
   row_id?: unknown;
   role?: unknown;
@@ -102,7 +102,7 @@ export function mapBackendMessages(
     });
 }
 
-export interface ResyncOptions {
+interface ResyncOptions {
   /** Session to resync; defaults to the active session. */
   sessionId?: string;
   /** Show a toast when done / on error. Default false. */

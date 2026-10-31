@@ -10,18 +10,44 @@ import { warn } from "@/lib/logger";
 const fetchingProviderModels = new Set<string>();
 
 /** pi-connect 渠道 provider 的占位 baseUrl（扩展 registerProvider 时写死的值，
- *  真实请求走扩展自己的本地 shim）。pi 的模型快照里按它识别「渠道 provider」：
- *  这些 provider 不在 Helix 的 profiles/models.json 里，凭据由扩展管理，前端
- *  只做展示与按会话的 set_model 透传。 */
+ *  真实请求走扩展自己的本地 shim）。渠道 provider 不在 Helix 的
+ *  profiles/models.json 里，凭据由扩展管理，前端只做展示与按会话的 set_model
+ *  透传。识别渠道用 isChannelBaseUrl（本常量只是占位符的原始形态）。 */
 export const PI_CHANNEL_BASE_URL = "http://127.0.0.1:0/v1";
 
-/** 渠道 provider 的显示名（pi 注册 id → 界面名）。未知 id 回落原 id。 */
+/** 渠道 shim 的回环地址族。占位符（127.0.0.1:0）只是 shim 未启动时的注册值；
+ *  会话用过任一该渠道的模型后 shim 启动，快照里的 baseUrl 变成
+ *  http://127.0.0.1:<真实端口>/v1。严格等值比较会把「用过」的渠道行抹掉。 */
+const CHANNEL_LOOPBACK = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/v1$/i;
+
+/** 归一化 baseUrl：去尾斜杠、统一小写，用于用户自有 provider 的排除比较。 */
+const normBaseUrl = (u?: string | null): string =>
+  (u ?? "").trim().replace(/\/+$/, "").toLowerCase();
+
+/** 该 baseUrl 是否是渠道 shim 的回环地址（任意端口）。ownChannels 是用户自己
+ *  注册在本机回环上的 provider（如 ollama）——它们有对话行覆盖，不算渠道。 */
+const isChannelBaseUrl = (baseUrl: string, ownChannels: Set<string>): boolean =>
+  CHANNEL_LOOPBACK.test(baseUrl) && !ownChannels.has(normBaseUrl(baseUrl));
+
+/** 渠道 provider 注册 id → 界面名。 */
 const PI_CHANNEL_NAMES: Record<string, string> = {
   workbuddy1: "WorkBuddy",
   trae: "Trae",
-  "trae-global": "Trae Global",
   qoder: "Qoder",
   "qoder-cn": "Qoder CN",
+};
+
+/** 未登记 id 的显示名：家族内编号 / 地区变体（workbuddy2、trae-global）在基础
+ *  名后带后缀，避免多账号渲染成几行同名。 */
+const channelDisplayName = (id: string): string => {
+  const exact = PI_CHANNEL_NAMES[id];
+  if (exact) return exact;
+  const m = id.match(/^(workbuddy|trae|qoder)(?:-(.+))?(\d*)$/);
+  if (!m || !PI_CHANNEL_NAMES[m[1]]) return id;
+  const parts = [PI_CHANNEL_NAMES[m[1]]];
+  if (m[2]) parts.push(m[2]);
+  if (m[3] && m[3] !== "1") parts.push(m[3]);
+  return parts.join(" · ");
 };
 
 export interface ApiConfigSlice {
@@ -107,9 +133,10 @@ export interface ApiConfigSlice {
    *  model selector re-fetches live instead of relying on a possibly-stale
    *  persisted list. Called on save to keep stored config free of a stale list. */
   clearProviderModels: (providerId: string) => void;
-  /** 拉取 pi 的权威模型快照（get_available_models RPC），按渠道占位 baseUrl
-   *  （PI_CHANNEL_BASE_URL）过滤出渠道 provider 并按 provider 分组存入
-   *  piChannelProviders。网关未就绪 / pi 未启动时静默返回，保留上一次的列表。 */
+  /** 拉取 pi 的权威模型快照（get_available_models RPC），按渠道 shim 的回环
+   *  地址族（占位符或任意真实端口，见 isChannelBaseUrl）过滤出渠道 provider
+   *  并按 provider 分组存入 piChannelProviders。网关未就绪 / pi 未启动时静默
+   *  返回，保留上一次的列表。 */
   refreshPiChannelProviders: () => Promise<void>;
   /** Switch the active provider. If the current model doesn't belong to the new
    *  provider, reselect its defaultModel (or models[0]). Mirrors the new
@@ -619,9 +646,20 @@ export const createApiConfigSlice: StateCreator<
       const models: Awaited<
         ReturnType<typeof window.electron.helix.piGetAvailableModels>
       >["models"] = Array.isArray(r?.models) ? r.models : [];
+      // 用户自有 provider 也可能注册在本机回环（如 ollama）——已有对话行，
+      // 不能再冒一条渠道行。
+      const ownChannels = new Set(
+        [
+          ...get().apiProfiles.map((p) => p.config?.baseUrl),
+          ...get().providers.map((p) => p.baseUrl),
+        ]
+          .map(normBaseUrl)
+          .filter(Boolean),
+      );
       const grouped = new Map<string, { id: string; label: string }[]>();
       for (const m of models) {
-        if (!m?.id || !m?.provider || m.baseUrl !== PI_CHANNEL_BASE_URL) continue;
+        if (!m?.id || !m?.provider || !isChannelBaseUrl(m.baseUrl ?? "", ownChannels))
+          continue;
         // label = pi 的 name。扩展刻意把倍率/促销后缀拼进 name（listModels
         // 只透传 id/name），id 保持裸值只做路由——UI 展示用 label，勾选/发送
         // 仍用 id。name 缺失时回落 id。
@@ -637,7 +675,7 @@ export const createApiConfigSlice: StateCreator<
       set({
         piChannelProviders: [...grouped.entries()].map(([id, entries]) => ({
           id,
-          name: PI_CHANNEL_NAMES[id] || id,
+          name: channelDisplayName(id),
           models: entries,
         })),
       });

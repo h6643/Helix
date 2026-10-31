@@ -1,4 +1,4 @@
-﻿import type { McpServerConfig } from "@/stores/helix-types";
+import type { McpServerConfig } from "@/stores/helix-types";
 
 interface AcpEnvVar {
   name: string;
@@ -16,7 +16,7 @@ interface AcpMeta {
   envPassthrough?: boolean;
 }
 
-export type AcpMcpServer =
+type AcpMcpServer =
   | {
       name: string;
       command: string;

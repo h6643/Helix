@@ -26,7 +26,7 @@ export function extractDiffStats(content: string): {
 
 // ── Content type detection ───────────────────────────────────────────────
 
-export type ResultKind = "diff" | "image" | "search" | "plain";
+type ResultKind = "diff" | "image" | "search" | "plain";
 
 export function detectResultKind(toolName: string, content: string): ResultKind {
   const name = (toolName || "").toLowerCase();

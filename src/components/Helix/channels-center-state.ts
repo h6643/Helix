@@ -49,7 +49,7 @@ function writeCheckinStamp(date: string) {
   }
 }
 
-export type ChannelsState = {
+type ChannelsState = {
   blocks: string[] | null;
   checkinResults: NotifyMessage[] | null;
   updatedAt: Date | null;
@@ -190,8 +190,7 @@ function checkinRunCompleted(msgs: NotifyMessage[]): boolean {
   return sawDone;
 }
 
-/** 签到按钮视角的今日状态。 */
-export type CheckinToday = "done" | "none" | "ready";
+type CheckinToday = "done" | "none" | "ready";
 
 /**
  * 判定签到按钮该显示什么：
@@ -257,7 +256,6 @@ export function query(action: "status" | "checkin", opts?: { silent?: boolean })
   return inflight;
 }
 
-/** 只跑一次（ErrorBoundary 恢复等导致的重复挂载不重跑）。 */
 let preheated = false;
 
 /**

@@ -119,7 +119,7 @@ function sanitizeControlChars(s: string): string {
  * 即便出现也只删一个孤立片段，不破坏结构）。
  */
 const SPECIAL_TOKEN_RE = /<\|[A-Za-z0-9_]+\|>/g;
-export function stripSpecialTokens(s: string): string {
+function stripSpecialTokens(s: string): string {
   // 快速门控：没有「<|」就不可能是模板 token，直接返回，避开正则开销。
   if (!s || !s.includes("<|")) return s;
   return s.replace(SPECIAL_TOKEN_RE, "");

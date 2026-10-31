@@ -4,7 +4,6 @@ import { lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import "@/app/globals.css";
 import "@/app/reconnect-keyframes.css";
-import { ErrorBoundary } from "@/components/Helix/error-boundary";
 import { installTauriBridge } from "@/lib/tauri-bridge";
 
 // 重组件懒加载：首屏只拉布景，面板代码在首次渲染时才拉。
@@ -23,8 +22,6 @@ createRoot(document.getElementById("root")!).render(
     // 瞬间就是一片正常的界面底色，而不是突兀的纯黑。
     fallback={<div className="fixed inset-0 z-[10000] bg-background" />}
   >
-    <ErrorBoundary>
-      <HelixLayout />
-    </ErrorBoundary>
+    <HelixLayout />
   </Suspense>,
 );

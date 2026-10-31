@@ -115,11 +115,9 @@ export function SkillPanel() {
   // 页签计数与「添加」分发：连接器 / 智能体数量由子面板上报，
   // 添加动作通过递增序号传给子面板（0 = 从未触发）。
   const [mcpCount, setMcpCount] = useState(0);
-  const [agentCount, setAgentCount] = useState(0);
   const [mcpAddRequest, setMcpAddRequest] = useState(0);
   const [agentAddRequest, setAgentAddRequest] = useState(0);
   const handleMcpCount = useCallback((n: number) => setMcpCount(n), []);
-  const handleAgentCount = useCallback((n: number) => setAgentCount(n), []);
   const handleAddClick = useCallback(() => {
     if (activeTab === "plugins") setShowBrowse(true);
     else if (activeTab === "skills") {
@@ -154,7 +152,7 @@ export function SkillPanel() {
 
   // Skills state
   const [skills, setSkills] = useState<HelixSkill[]>([]);
-  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [, setSkillsLoading] = useState(false);
 
   // ── Plugins ──
   // 插件更新检查：piCheckUpdates 一次拿回全部 npm 插件的最新版本，
@@ -736,15 +734,17 @@ export function SkillPanel() {
     if (sectionItems.length === 0) return null;
     return (
       <div className="space-y-1.5">
-        <div className="flex items-center gap-2 px-1 pb-1">
-          {icon}
-          <h3 className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-muted-foreground/70">
-            {title}
-          </h3>
-          <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 font-mono">
-            {sectionItems.length}
-          </span>
-        </div>
+        {title ? (
+          <div className="flex items-center gap-2 px-1 pb-1">
+            {icon}
+            <h3 className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-muted-foreground/70">
+              {title}
+            </h3>
+            <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 font-mono">
+              {sectionItems.length}
+            </span>
+          </div>
+        ) : null}
         {sectionItems.map((item, i) => renderItem(item, i))}
       </div>
     );
@@ -853,14 +853,13 @@ export function SkillPanel() {
 
         {!showBrowse ? (
           <div className="flex items-center justify-between gap-3 mt-5">
-            {/* Tab pills — 插件 / 技能 / 连接器 / 智能体，带已安装计数 */}
             <div className="inline-flex items-center rounded-xl bg-muted/60 p-1">
               {(
                 [
-                  { key: "plugins", label: "插件", count: extensions.length },
-                  { key: "skills", label: "技能", count: skills.length },
-                  { key: "mcp", label: "MCP", count: mcpCount },
-                  { key: "agents", label: "子智能体", count: agentCount },
+                  { key: "plugins", label: "插件" },
+                  { key: "skills", label: "技能" },
+                  { key: "mcp", label: "MCP" },
+                  { key: "agents", label: "子智能体" },
                 ] as const
               ).map((tab) => (
                 <button
@@ -871,18 +870,8 @@ export function SkillPanel() {
                       ? "bg-background shadow-sm border border-border/60 text-foreground font-medium"
                       : "text-muted-foreground hover:text-foreground"
                   }`}
-                  data-tip={
-                    tab.key === "mcp"
-                      ? "管理 MCP 连接器"
-                      : tab.key === "agents"
-                        ? "管理子智能体"
-                        : undefined
-                  }
                 >
                   {tab.label}
-                  <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60">
-                    {tab.count}
-                  </span>
                 </button>
               ))}
             </div>
@@ -903,7 +892,7 @@ export function SkillPanel() {
               <Button
                 variant="outline"
                 onClick={handleAddClick}
-                className="h-10 rounded-xl"
+                className="h-10 rounded-xl bg-background shadow-none rounded-lg"
               >
                 添加
               </Button>
@@ -915,7 +904,7 @@ export function SkillPanel() {
             <Button
               variant="outline"
               onClick={() => setShowBrowse(false)}
-              className="h-10 rounded-xl"
+              className="h-10 rounded-xl bg-background shadow-none rounded-lg"
             >
               返回
             </Button>
@@ -925,11 +914,18 @@ export function SkillPanel() {
 
       <div className="pt-2 pb-8">
         {activeTab === "mcp" ? (
-          <McpPanel
-            onCount={handleMcpCount}
-            addRequest={mcpAddRequest}
-            searchQuery={searchQuery}
-          />
+          <>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
+                MCP ({mcpCount})
+              </h2>
+            </div>
+            <McpPanel
+              onCount={handleMcpCount}
+              addRequest={mcpAddRequest}
+              searchQuery={searchQuery}
+            />
+          </>
         ) : activeTab === "plugins" ? (
             showBrowse ? (
               <>
@@ -987,7 +983,7 @@ export function SkillPanel() {
                         <Button
                           size="sm"
                           variant="outline"
-                          className="h-7 gap-1.5"
+                          className="h-7 gap-1.5 bg-background shadow-none rounded-lg"
                           disabled={loadingMore}
                           onClick={() => void doSearch({ append: true })}
                         >
@@ -1010,6 +1006,11 @@ export function SkillPanel() {
             ) : (
               <>
                 {/* Installed view */}
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
+                    扩展 ({extensions.length})
+                  </h2>
+                </div>
                 {loading && items.length === 0 ? (
                   <div className="text-center py-12 text-[length:var(--helix-transcript-size)] text-muted-foreground/60 flex items-center justify-center gap-2">
                     <Loader2 className="size-4 animate-spin" /> 加载中...
@@ -1030,19 +1031,19 @@ export function SkillPanel() {
                   </div>
                 ) : (
                   <div className="space-y-5">
-                    {renderSection("扩展", extensions, null)}
+                    {renderSection("", extensions, null)}
                   </div>
                 )}
               </>
             )
           ) : activeTab === "agents" ? (
-            <AgentsSettings onCount={handleAgentCount} addRequest={agentAddRequest} />
+            <AgentsSettings addRequest={agentAddRequest} />
           ) : (
             <>
               {/* Skills tab */}
               <div className="flex items-center justify-between mb-3">
-                <h2 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
-                  已安装 ({filteredSkills.length})
+                <h2 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
+                  技能 ({filteredSkills.length})
                 </h2>
               </div>
 
@@ -1064,14 +1065,6 @@ export function SkillPanel() {
                           {!isActive && (
                             <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground/70">
                               已禁用
-                            </span>
-                          )}
-                          {skill.source && (
-                            <span
-                              className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-primary/10 text-primary/80 font-mono"
-                              data-tip={`来源: ${skill.source}`}
-                            >
-                              {skill.source}
                             </span>
                           )}
                         </div>
@@ -1127,7 +1120,7 @@ export function SkillPanel() {
                 <Download className="size-5 text-primary" />
               </div>
               <div>
-                <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
+                <h3 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
                   插件有新版本
                 </h3>
               </div>

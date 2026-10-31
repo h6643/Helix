@@ -28,7 +28,7 @@ import type { ChatMessage } from "@/stores/helix-types";
 /** pi 的 user message 摘要（`get_fork_messages` 的返回元素）。 */
 type PiForkMessage = { entryId?: string; text?: string };
 
-export type ForkTarget = {
+type ForkTarget = {
   /** pi 的 fork entryId；空串表示「定位失败，调用方应跳过后端分叉」。 */
   entryId: string;
   /** 诊断用：pi 侧一共几条 user 消息、本地前几条对齐成功。 */

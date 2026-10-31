@@ -10,7 +10,6 @@ use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use rand::RngCore;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tauri::{AppHandle, State};
@@ -207,13 +206,4 @@ pub async fn save_file(app: AppHandle, options: Option<Value>) -> Option<String>
         });
     });
     rx.await.unwrap_or(None)
-}
-
-// ── diagnostics helper ───────────────────────
-
-#[allow(dead_code)]
-pub fn sha256_hex(data: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(data);
-    hex::encode(h.finalize())
 }

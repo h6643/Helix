@@ -9,7 +9,7 @@ import { create } from "zustand";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export type GatewayState = "idle" | "connecting" | "open" | "closed" | "error";
+type GatewayState = "idle" | "connecting" | "open" | "closed" | "error";
 
 interface GatewayStateStore {
   // ── Gateway connection state machine ─────────────────────────────────────

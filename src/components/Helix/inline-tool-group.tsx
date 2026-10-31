@@ -32,7 +32,6 @@ const PREVIEW_TAIL_CHARS = 1200;
 
 const TOOL_CATEGORY: Record<string, string> = {
   open_browser: "浏览器",
-  browser_navigate: "浏览器导航",
   browser_read: "浏览器读取",
   browser_click: "浏览器点击",
   browser_type: "浏览器输入",
@@ -41,7 +40,6 @@ const TOOL_CATEGORY: Record<string, string> = {
   browser_drag: "浏览器",
   browser_wait: "浏览器",
   browser_eval: "浏览器",
-  browser_upload: "浏览器",
   browser_dialog: "浏览器",
   read: "读取",
   read_file: "读取",

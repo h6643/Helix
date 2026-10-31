@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { Globe, Maximize2, Minimize2, Plus, X } from "lucide-react";
-import { useCallback, useEffect, useRef, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { AgentWorkPanel } from "./agent-work-panel";
 import { BylinePanel } from "./byline-panel";
 import { CodeEditorPanel } from "./code-editor-panel";
@@ -110,7 +110,7 @@ const PANEL_ORDER: PageKind[] = [
  * in band 1). The "+" button opens the 更多操作 page（浏览器 / 审阅 /
  * 终端 / 旁路问答）。
  */
-export function RightSidebar() {
+function RightSidebarImpl() {
   const tab = useHelixStore((s) => s.rightSidebarTab);
   const setTab = useHelixStore((s) => s.setRightSidebarTab);
   const previewRailUrl = useHelixStore((s) => s.previewRailUrl);
@@ -734,6 +734,7 @@ export function RightSidebar() {
                       pageId={p.id}
                       url={p.url}
                       onUrlChange={(u) => updatePageUrl(p.id, u)}
+                      active={isActive}
                     />
                   )}
                   {p.kind === "diff" && <DiffSidebarPanel />}
@@ -765,3 +766,5 @@ export function RightSidebar() {
     </div>
   );
 }
+
+export const RightSidebar = memo(RightSidebarImpl);

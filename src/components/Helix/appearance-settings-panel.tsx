@@ -109,7 +109,7 @@ function ThemeStylePicker({
         ref={btnRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 flex items-center justify-between gap-2 text-left transition-colors"
+        className="w-40 ui-text-sm2 text-foreground border border-border bg-background rounded-lg px-3 py-1.5 flex items-center justify-between gap-2 text-left hover:bg-muted transition-colors"
       >
         <span className="truncate">{currentLabel}</span>
         <ChevronDown
@@ -172,7 +172,7 @@ const fontSelect = (
     onChange={onChange}
     options={options}
     placeholder="默认"
-    className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 transition-colors"
+    className="w-40 ui-text-sm2 text-foreground border border-border rounded-lg px-3 py-1.5 transition-colors"
   />
 );
 
@@ -303,7 +303,7 @@ export function AppearanceSettingsPanel({
                 size="sm"
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-              >
+               className="bg-background shadow-none rounded-lg">
                 选择图片
               </Button>
               {bootBackgroundImage && (
@@ -312,7 +312,7 @@ export function AppearanceSettingsPanel({
                   size="sm"
                   type="button"
                   onClick={() => setBootBackgroundImage(null)}
-                >
+                 className="bg-background shadow-none rounded-lg">
                   恢复默认
                 </Button>
               )}

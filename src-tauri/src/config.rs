@@ -624,185 +624,20 @@ fn apply_pi_model_config(
     (changed, key_changed)
 }
 
-/// Register a provider with its full model list in pi's models.json and set
-/// the first entry as pi's default model.
-///
-/// The settings "添加供应商" flow collects several models first, each with its
-/// own context limit. `apply_pi_model_config` handles exactly one model and
-/// replaces the provider's `models` array, so it would drop every other entry;
-/// this one merges instead, so bundled models pi already registered survive a
-/// re-save. Returns (changed, key_changed) so the caller only respawns the
-/// gateway when something actually changed.
-pub fn apply_pi_provider_models(
-    provider: &str,
-    base_url: &str,
-    api_key: Option<&str>,
-    api: &str,
-    // (id, context_window, reasoning, input_types): reasoning == Some(true) turns the model's
-    // thinking mode ON in pi's models.json; None leaves any existing flag untouched.
-    models: &[(String, Option<u64>, Option<bool>, Option<Vec<String>>)],
-) -> (bool, bool) {
-    let _guard = crate::config::config_write_lock();
-    let pi_provider = provider.trim();
-    let base = base_url.trim().trim_end_matches('/');
-    let api = if api.trim().is_empty() {
-        "openai-completions".to_string()
-    } else {
-        api.trim().to_string()
-    };
-    let default_model = models
-        .iter()
-        .find(|(id, _, _, _)| !id.trim().is_empty())
-        .map(|(id, _, _, _)| id.trim().to_string());
-    if pi_provider.is_empty() || base.is_empty() || default_model.is_none() {
-        return (false, false);
-    }
-    let default_model = default_model.unwrap();
-
-    let old_settings = read_pi_settings();
-    let old_provider = old_settings
-        .get("defaultProvider")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let old_model = old_settings
-        .get("defaultModel")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let mut models_doc = read_pi_models();
-    if models_doc
-        .get("providers")
-        .and_then(|v| v.as_object())
-        .is_none()
-    {
-        models_doc["providers"] = serde_json::json!({});
-    }
-    let old_entry: serde_json::Value = models_doc
-        .pointer(&format!("/providers/{pi_provider}"))
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-
-    // Keep the stored key when the caller sent nothing (startup re-assert must
-    // not rotate it to an empty string).
-    let mut new_key = api_key
-        .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty())
-        .unwrap_or_default();
-    if new_key.is_empty() {
-        new_key = pi_provider_api_key(pi_provider);
-    }
-
-    let mut entries: Vec<serde_json::Value> = old_entry
-        .get("models")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.clone())
-        .unwrap_or_default();
-    for (id, context_window, reasoning, input_types) in models {
-        let id = id.trim().to_string();
-        if id.is_empty() {
-            continue;
-        }
-        let mut entry = entries
-            .iter()
-            .position(|m| m.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
-            .map(|i| entries.remove(i))
-            .unwrap_or_else(|| serde_json::json!({ "id": id }));
-        entry["id"] = serde_json::Value::String(id.clone());
-        entry["name"] = serde_json::Value::String(id);
-        apply_context_window_to_entry(&mut entry, *context_window);
-        if *reasoning == Some(true) {
-            entry["reasoning"] = serde_json::json!(true);
-        }
-        // input: 模型声明的输入类型。pi 只读 "image" 这一个值来决定图片是否
-        // 原生透传（否则 paste 走视觉转述管道）。不写时保留已有值；写了就覆盖，
-        // 这样从 UI 取消勾选图片能真的关掉原生透传。
-        if let Some(inp) = input_types {
-            if inp.is_empty() {
-                entry.as_object_mut().map(|o| o.remove("input"));
-            } else {
-                entry["input"] = serde_json::json!(inp);
-            }
-        }
-        if entry.get("maxTokens").and_then(|v| v.as_u64()).is_none() {
-            entry["maxTokens"] = serde_json::json!(65536);
-        }
-        entries.push(entry);
-    }
-    if entries.is_empty() {
-        return (false, false);
-    }
-
-    // Models-only edits leave defaultProvider/defaultModel untouched, so the
-    // pair above would report "unchanged" and skip the write. Compare what
-    // would be written against what is already on disk.
-    let endpoint_changed = old_entry
-        .get("baseUrl")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        != base
-        || old_entry
-            .get("api")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            != api.as_str();
-    let models_changed = old_entry
-        .get("models")
-        .and_then(|v| v.as_array())
-        .map(|old| serde_json::Value::Array(old.clone()) != serde_json::Value::Array(entries.clone()))
-        .unwrap_or(true);
-
-    let mut provider_entry = serde_json::json!({
-        "baseUrl": base,
-        "api": api,
-        "models": entries,
-    });
-    if !new_key.is_empty() {
-        provider_entry["apiKey"] = serde_json::Value::String(new_key.clone());
-    }
-    // Preserve extra fields the user may have set (compat, headers, …).
-    if let Some(old) = old_entry.as_object() {
-        for (k, v) in old {
-            if !provider_entry.as_object().unwrap().contains_key(k) {
-                provider_entry[k] = v.clone();
-            }
-        }
-    }
-    models_doc["providers"][pi_provider] = provider_entry;
-
-    let mut settings = old_settings.clone();
-    settings["defaultProvider"] = serde_json::Value::String(pi_provider.to_string());
-    settings["defaultModel"] = serde_json::Value::String(default_model.clone());
-
-    let changed = old_provider != pi_provider
-        || old_model != default_model
-        || endpoint_changed
-        || models_changed;
-    let key_changed = new_key != pi_provider_api_key(pi_provider);
-    if changed || key_changed {
-        write_pi_settings(&settings);
-        write_pi_models(&models_doc);
-    }
-    (changed, key_changed)
-}
-
 /// Register / refresh ONE provider's entry in pi's models.json **without**
 /// touching settings.json's defaultProvider/defaultModel and **without**
 /// respawning pi.
 ///
 /// The chat input's per-conversation model switch uses this: the provider must
 /// be known to pi so a later per-session set_model can select it, but the
-/// GLOBAL default must stay whatever the Settings page set. Writing the default
-/// here (apply_pi_provider_models does) makes the last input-bar selection the
-/// default for every conversation that has no per-session override — "所有对话
-/// 共享一个模型配置".
+/// GLOBAL default must stay whatever the Settings page set — writing the
+/// default here would make the last input-bar selection the default for every
+/// conversation that has no per-session override（"所有对话共享一个模型配置"）.
 ///
-/// Same merge semantics as apply_pi_provider_models (bundled entries survive a
-/// re-save); only the settings.json write is dropped. Returns whether models.json
-/// was actually rewritten. pi snapshots models.json at instance startup, so a
-/// brand-new endpoint only reaches the NEXT instance — an already-registered
-/// provider is usable immediately.
+/// Bundled entries survive a re-save; only the settings.json write is dropped.
+/// Returns whether models.json was actually rewritten. pi snapshots models.json
+/// at instance startup, so a brand-new endpoint only reaches the NEXT instance
+/// — an already-registered provider is usable immediately.
 pub fn register_pi_provider_models(
     provider: &str,
     base_url: &str,
@@ -1400,8 +1235,8 @@ mod pi_roundtrip_tests {
     /// 每条 models.json 写入路径在「用户没填窗口」时都必须把条目补成256k。
     ///
     /// 回归背景：兜底原先只写在 `apply_pi_model_config`（setConfig，且只作用于
-    /// 模型列表第1 项），`apply_pi_provider_models` / `register_pi_provider_models`
-    /// 的循环里是裸的 `if let Some(cw)`。于是第 2..N 个模型条目在 models.json 里
+    /// 模型列表第1 项），`register_pi_provider_models` 的循环里是裸的
+    /// `if let Some(cw)`。于是第 2..N 个模型条目在 models.json 里
     /// 裸奔，pi 用自己的 `?? 128e3` 兜底 ⇒ 上下文环分母变成 128k。
     #[test]
     fn context_window_fallback_backfills_missing_entries() {

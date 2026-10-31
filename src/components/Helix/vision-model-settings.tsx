@@ -256,7 +256,7 @@ export function VisionModelSettings() {
               variant="outline"
               onClick={runTest}
               disabled={testing || saving}
-            >
+             className="bg-background shadow-none rounded-lg">
               {testing ? "测试中..." : "测试连接"}
             </Button>
             <Button
@@ -264,7 +264,7 @@ export function VisionModelSettings() {
               variant="outline"
               onClick={() => save()}
               disabled={saving}
-            >
+             className="bg-background shadow-none rounded-lg">
               {saving ? "保存中..." : "保存"}
             </Button>
           </div>

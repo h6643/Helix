@@ -188,13 +188,14 @@ export function WebSearchSettings() {
             value={tavilyDraft}
             onChange={(e) => setTavilyDraft(e.target.value)}
             placeholder="粘贴 Tavily API Key"
-            className="w-56 px-2 py-1 rounded-md border border-border bg-background ui-text-sm2 font-mono text-foreground placeholder:text-muted-foreground/40"
+            className="w-56 px-3 py-1.5 rounded-lg border border-border bg-background ui-text-sm2 font-mono text-foreground placeholder:text-muted-foreground/40"
           />
           <Button
             size="sm"
             variant="outline"
             onClick={() => void save()}
             disabled={saving || !dirty}
+            className="bg-background shadow-none rounded-lg"
           >
             {saving ? "保存中…" : "保存"}
           </Button>

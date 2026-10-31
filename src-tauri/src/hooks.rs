@@ -1,6 +1,6 @@
 //! Hooks IPC — read/write the `hooks:` block + `hooks_auto_accept` in Helix
 //! config.yaml. Port of `electron/ipc/hooks.js`. Helix registers hooks at
-//! GATEWAY STARTUP, so a save restarts the gateway (acp mode only).
+//! GATEWAY STARTUP, so a save restarts the gateway.
 //!
 //! NOTE: This file is byte-level YAML editing (no js-yaml dep) so the rest of
 //! the config file is preserved untouched.

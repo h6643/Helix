@@ -43,7 +43,7 @@ export interface PptxSlide {
   notes?: string;
 }
 
-export interface PptxPara {
+interface PptxPara {
   text: string;
   /** 缩进层级（OOXML 的 lvl，0..8）。 */
   level: number;
@@ -67,7 +67,7 @@ export interface XlsxSheet {
 // ── 文件类型识别 ─────────────────────────────────────────────────────────────
 
 /** 侧栏能内嵌预览的扩展名 → 预览器。不含的一律走外部程序打开。 */
-export type PreviewKind =
+type PreviewKind =
   | "pptx"
   | "docx"
   | "xlsx"

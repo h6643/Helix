@@ -39,6 +39,7 @@ import React, {
   useEffect,
   useCallback,
   useMemo,
+  memo,
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -130,7 +131,6 @@ import {
   syncTaskToBackend,
   type DetectedTask,
 } from "@/lib/schedule-utils";
-import { isServeActive } from "@/lib/serve-gateway";
 import {
   ensureSessionMapLoaded,
   loadSessionMap,
@@ -935,15 +935,73 @@ export function BusyBehaviorSelector({
   const setBusy = useHelixStore((s) => s.setBusyBehavior);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
 
+  // portal 到 body + fixed 定位：弹层放进带 backdrop-filter 的输入卡时，
+  // WebView2 分数缩放 (125%/150% DPI) 会触发合成 bug——背景不绘制。定位与
+  // 视口顶 clamp 规则同模型下拉。
+  const computePos = useCallback(() => {
+    const r = ref.current?.getBoundingClientRect();
+    if (!r) return null;
+    const bottom0 = window.innerHeight - r.top + 8;
+    const panelH = panelRef.current?.getBoundingClientRect().height ?? 0;
+    const bottom =
+      panelH > 0
+        ? Math.min(bottom0, Math.max(8, window.innerHeight - panelH - 8))
+        : bottom0;
+    return { left: Math.round(r.left), bottom: Math.round(bottom) };
+  }, []);
+
+  const openMenu = () => {
+    setOpen((v) => !v);
+    // 首帧同步算位（面板未挂载，clamp 由下方 effect 补）。
+    setPos(computePos());
+  };
+
+  // 外点关闭：portal 面板不在外壳 ref 树内，两个 ref 都要查。
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (
+        !ref.current?.contains(e.target as Node) &&
+        !panelRef.current?.contains(e.target as Node)
+      )
+        setOpen(false);
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
+
+  // 跟随：scroll/resize 重算位置，ResizeObserver 补面板首帧的视口顶 clamp。
+  useEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    const update = () => {
+      const next = computePos();
+      if (next)
+        setPos((prev) =>
+          prev && prev.left === next.left && prev.bottom === next.bottom
+            ? prev
+            : next,
+        );
+    };
+    update();
+    let ro: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined" && panelRef.current) {
+      ro = new ResizeObserver(update);
+      ro.observe(panelRef.current);
+    }
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [open, computePos]);
 
   const cur = BUSY_BEHAVIOR_OPTIONS.find((o) => o.value === behavior);
 
@@ -951,7 +1009,7 @@ export function BusyBehaviorSelector({
     <div className="relative shrink-0" ref={ref}>
       <button
         type="button"
-        onClick={() => setOpen(!open)}
+        onClick={openMenu}
         className="flex items-center gap-1.5 px-2.5 h-8 rounded-xl ui-text-sm2 transition-colors duration-150 text-muted-foreground hover:text-foreground hover:bg-muted/50"
       >
         <ListOrdered className="size-3.5 shrink-0" />
@@ -960,47 +1018,54 @@ export function BusyBehaviorSelector({
         )}
         <ChevronDown className="size-3" />
       </button>
-      {open && (
-        <div className="absolute bottom-full left-0 mb-2 w-[260px] bg-card rounded-lg border border-border/40 shadow-xl py-0.5 z-50 animate-scale-in">
-          {BUSY_BEHAVIOR_OPTIONS.map((o) => {
-            const Icon = o.icon;
-            const active = behavior === o.value;
-            return (
-              <button
-                key={o.value}
-                type="button"
-                onClick={() => {
-                  setBusy(o.value);
-                  setOpen(false);
-                }}
-                className={`w-full flex items-start gap-2 px-2 py-1 text-left hover:bg-muted transition-colors ${active ? "bg-primary/5" : ""}`}
-              >
-                <div className="mt-0.5 shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center">
-                  <Icon className="size-3 text-foreground/70" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="ui-text-sm2 font-medium text-foreground leading-tight">
-                    {o.label}
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            ref={panelRef}
+            style={{ position: "fixed", left: pos.left, bottom: pos.bottom }}
+            className="w-[260px] bg-card rounded-lg border border-border/40 shadow-xl py-0.5 z-50 animate-scale-in"
+          >
+            {BUSY_BEHAVIOR_OPTIONS.map((o) => {
+              const Icon = o.icon;
+              const active = behavior === o.value;
+              return (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => {
+                    setBusy(o.value);
+                    setOpen(false);
+                  }}
+                  className={`w-full flex items-start gap-2 px-2 py-1 text-left hover:bg-muted transition-colors ${active ? "bg-primary/5" : ""}`}
+                >
+                  <div className="mt-0.5 shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center">
+                    <Icon className="size-3 text-foreground/70" />
                   </div>
-                  <div className="text-[calc(var(--helix-transcript-size)*0.78)] text-muted-foreground leading-snug">
-                    {o.tip}
+                  <div className="flex-1 min-w-0">
+                    <div className="ui-text-sm2 font-medium text-foreground leading-tight">
+                      {o.label}
+                    </div>
+                    <div className="text-[calc(var(--helix-transcript-size)*0.78)] text-muted-foreground leading-snug">
+                      {o.tip}
+                    </div>
                   </div>
-                </div>
-                {active && (
-                  <div className="mt-0.5 shrink-0">
-                    <Check className="size-3.5 text-primary" />
-                  </div>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      )}
+                  {active && (
+                    <div className="mt-0.5 shrink-0">
+                      <Check className="size-3.5 text-primary" />
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
 
-export function AgentFlowPanel() {
+function AgentFlowPanelImpl() {
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
   // 忙时行为：队列卡片的「立即发送」按钮文案跟着它变（插话 / 排队）。
   const busyBehavior = useHelixStore((s) => s.busyBehavior);
@@ -1498,7 +1563,7 @@ export function AgentFlowPanel() {
       ]);
     };
 
-    // serve 模式的门面（helixApi()）可能晚于本组件挂载才就绪，桥没通时返回
+    // IPC 桥（helixApi()）可能晚于本组件挂载才就绪，桥没通时返回
     // null —— 挂不上就轮询到挂上为止（卸载时清掉）。
     let detach: (() => void) | null = null;
     let poll: ReturnType<typeof setInterval> | null = null;
@@ -4668,9 +4733,8 @@ export function AgentFlowPanel() {
       // 能走到这里的是空闲发送或带附件的发送，直接往下发 prompt，
       // opts.busyBehavior 让后端在 busy 错误时按声明的 behavior 重试一次。
 
-      // Check API key — serve 模式下密钥由后端托管，Helix 侧 apiConfig.apiKey
-      // 为空，跳过该门否则发送会被永久拦截（"发送按钮无效"）。
-      if (!hasApiKey && !isServeActive()) {
+      // Check API key
+      if (!hasApiKey) {
         storeActions.toggleSettings("api");
         return;
       }
@@ -5766,8 +5830,8 @@ export function AgentFlowPanel() {
                     rawInput: u.rawInput,
                   };
                 }
-                // 工具完成/失败：serve 模式下 tool.complete 走这里（status='completed'/'failed'），
-                // 没有独立的 tool_result 事件。必须转发为 tool_result，否则 tool_call
+                // 工具完成/失败（status='completed'/'failed'，无独立的
+                // tool_result 事件）。必须转发为 tool_result，否则 tool_call
                 // 一直保持 running，卡片永远显示"执行"而不是"已执行"。
                 if (
                   u.status === "completed" ||
@@ -5924,9 +5988,7 @@ export function AgentFlowPanel() {
         };
 
         // ── 子代理实时事件 → store.subAgents ──────────────────────────────
-        // serve 模式下后端把子任务进度以 subagent.* 事件中继到父会话（见
-        // tui_gateway/server.py _on_tool_progress 的 subagent.* 分支）。
-        // 这些事件经 serve-gateway.ts 的 default 分支原样透传，这里消费并写入
+        // 后端把子任务进度以 subagent.* 事件中继到父会话，这里消费并写入
         // store，让 DelegationsPanel 顶部的"实时"区能显示运行中的子任务。
         // 磁盘 live 日志（delegation_live_log.py）仍由后端独立维护，作为兜底。
         const handleSubagentEvent = (
@@ -6107,11 +6169,11 @@ export function AgentFlowPanel() {
         // Disconnect recovery — aligned with the official client: on a WS drop the
         // run is NOT killed. The backend detaches the session (drop sentinel) and
         // keeps executing (running sessions are never reaped — server.py
-        // _ws_session_is_orphaned returns False for running=True). serve-gateway
-        // reconnects and calls session.resume to re-bind the transport; the event
-        // stream resumes and run.completed lands normally. So a disconnect only
+        // _ws_session_is_orphaned returns False for running=True). On reconnect
+        // the session is re-bound via session.resume; the event stream resumes
+        // and run.completed lands normally. So a disconnect only
         // shows a notice here — the run is ended only by the real completion, or
-        // by serve-gateway rejecting the prompt when resume fails for good.
+        // by the backend rejecting the prompt when resume fails for good.
         function dequeue(): string | null {
           return queue.length > 0 ? queue.shift()! : null;
         }
@@ -6288,11 +6350,10 @@ export function AgentFlowPanel() {
           }, idleWindow);
         };
 
-        // IMPORTANT: subscribe through helixApi() (the mode-aware facade), NOT
-        // window.electron.helix. In serve mode agent stream events (session/update,
-        // tool.*, message.*) arrive over the WS client inside serve-gateway.ts and
-        // never hit the IPC bridge — subscribing to the raw IPC onEvent left the
-        // run with "正在思考" forever (no tool cards, no text).
+        // IMPORTANT: subscribe through helixApi(), NOT
+        // window.electron.helix directly — keep event routing on one path so
+        // stream events (session/update, tool.*, message.*) and IPC bridge
+        // state can't diverge.
         unsubscribe = helixApi()!.onEvent(
           async (method: string, params: Record<string, unknown>) => {
             const mySid = sessionId;
@@ -6339,7 +6400,7 @@ export function AgentFlowPanel() {
             }
             try {
               // WS 断连：对齐官方——run 不结束。后端把运行中的会话 detach 继续
-              // 执行（running 会话不会被 reap），serve-gateway 会重连并 session.resume
+              // 执行（running 会话不会被 reap），重连后 session.resume
               // 恢复事件流。这里只显示提示并重新武装超长兜底（断连/重连期间模型
               // 可能仍在思考、无 delta；兜底已是 5 分钟级，不会像旧 8s 那样把恢复
               // 中的 run 砍掉）。run 的收尾交给真实完成事件或 resume 失败的 reject。
@@ -6359,7 +6420,7 @@ export function AgentFlowPanel() {
                 }
                 return;
               }
-              // Reconnect completed (serve-gateway already re-ran session.resume).
+              // Reconnect completed (session.resume already re-bound the run).
               // The event stream is about to resume — clear the notice.
               if (method === "gateway.reconnected") {
                 useHelixStore.getState().setConnectionNotice({
@@ -6375,7 +6436,7 @@ export function AgentFlowPanel() {
                 }, 2000);
                 return;
               }
-              // serve-gateway 已不再主动驱逐并行会话；保留此分支仅作防御：
+              // 后端已不再主动驱逐并行会话；保留此分支仅作防御：
               // 若未来后端在个别配置下真的回收/挤掉本 run 的会话，立即收尾，
               // 避免静默挂到 5 分钟兜底。用户重发该消息即可在新会话上重新执行。
               if (method === "session.evicted") {
@@ -6391,7 +6452,7 @@ export function AgentFlowPanel() {
                 queueDone = true;
                 return;
               }
-              // 主进程/serve-gateway 自动恢复了本 run 的会话（"session not found" →
+              // 主进程自动恢复了本 run 的会话（"session not found" →
               // 重建并重放 prompt）。把 conversation→session 映射改绑到新 id，后续
               // 消息与 RPC 使用新会话；事件流已按 WS 同序保证在新 id 下继续到达。
               if (method === "gateway.sessionReplaced" && params?.newId) {
@@ -6516,61 +6577,6 @@ export function AgentFlowPanel() {
               }
               if (method === "gateway.retry") {
                 const phase = params?.phase as string | undefined;
-                if (isServeActive()) {
-                  if (phase === "recovered") {
-                    useHelixStore.getState().setConnectionNotice({
-                      phase: "recovered",
-                      message: "连接已恢复",
-                      ts: Date.now(),
-                    });
-                    setTimeout(() => {
-                      useHelixStore.getState().setConnectionNotice(null);
-                      if (myCid) {
-                        useHelixStore
-                          .getState()
-                          .setSessionRetryNotice(myCid, null);
-                      }
-                    }, 2000);
-                  } else {
-                    const attempt = (params?.attempt as number) ?? 1;
-                    const total = (params?.total as number) ?? 4;
-                    const serveMsg =
-                      "上游连接不稳定，正在重连（第 " +
-                      attempt +
-                      "/" +
-                      total +
-                      " 次）…";
-                    useHelixStore.getState().setConnectionNotice({
-                      phase: "retrying",
-                      attempt,
-                      total,
-                      message: serveMsg,
-                      ts: Date.now(),
-                    });
-                    if (myCid) {
-                      useHelixStore.getState().setSessionRetryNotice(myCid, {
-                        phase: "retrying",
-                        attempt,
-                        total,
-                        message: serveMsg,
-                        ts: Date.now(),
-                      });
-                    }
-                    setTimeout(() => {
-                      const st = useHelixStore.getState();
-                      if (st.connectionNotice?.phase === "retrying") {
-                        st.setConnectionNotice(null);
-                      }
-                      if (
-                        myCid &&
-                        st.sessionRetryNotices[myCid]?.phase === "retrying"
-                      ) {
-                        st.setSessionRetryNotice(myCid, null);
-                      }
-                    }, 30000);
-                  }
-                  return;
-                }
                 if (phase === "error") {
                   textBufferRef.current = "";
                   thoughtBufferRef.current = "";
@@ -7031,7 +7037,7 @@ export function AgentFlowPanel() {
               currentSessionId,
               result,
             });
-            // 防御性分支（当前后端不再返回新 session_id）：serve-gateway 的
+            // 防御性分支（当前后端不再返回新 session_id）：后端的
             // prompt.submit 已改为纯 ack（{status:"streaming"}），session not
             // found 原样上抛、由本 run 的 catch 走权威 resume 检查判定 broken。
             // 保留此分支防止后端将来重新引入透明换绑时前端漏处理。
@@ -7059,7 +7065,7 @@ export function AgentFlowPanel() {
 
             // prompt.submit 只面对**已经恢复的** active session，它自己不做任何
             // 恢复/重建（恢复是统一 resumeSession 的职责）。所以后端回
-            // "session not found" 时不能直接判 broken——serve 模式下的
+            // "session not found" 时不能直接判 broken——
             // "session not found" 指的是**内存里的 ui_session 丢了**（网关重启/
             // 回收），持久化文件可能还在、可以再恢复。这里用一次**权威 resume
             // 检查**来区分「会话真的没了」和「只是没 attach」，再决定要不要标
@@ -10389,7 +10395,7 @@ export function AgentFlowPanel() {
                 />
               </div>
               <div className="flex items-center gap-1.5 min-w-0 shrink flex-wrap justify-end gap-y-1">
-                {hasApiKey || isServeActive() ? (
+                {hasApiKey ? (
                   renderModelSelector(compact)
                 ) : (
                   <button
@@ -10453,8 +10459,7 @@ export function AgentFlowPanel() {
                 />
               </div>
               <div className="flex items-center gap-1.5 min-w-0 shrink flex-wrap justify-end gap-y-1">
-                {(hasApiKey || isServeActive()) &&
-                  renderModelSelector(compact)}
+                {hasApiKey && renderModelSelector(compact)}
                 <ReasoningEffortControl
                   value={reasoningEffort}
                   onChange={(v) => storeActions.setReasoningEffort(v)}
@@ -11490,3 +11495,4 @@ export function AgentFlowPanel() {
     </div>
   );
 }
+export const AgentFlowPanel = memo(AgentFlowPanelImpl);

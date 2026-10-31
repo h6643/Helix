@@ -12,12 +12,6 @@
 "use client";
 
 import { isElectron } from "@/lib/electron-bridge";
-import {
-  isServeActive,
-  getServeClient,
-  getGatewayMode,
-  initServeGateway,
-} from "@/lib/serve-gateway";
 
 type ConfigValue = string | number | boolean | null | undefined;
 
@@ -51,9 +45,8 @@ export function pushConfigKeyValue(
     return;
   }
 
-  const serve = isServeActive() ? getServeClient() : null;
   const helix = window.electron?.helix;
-  if (!serve && !helix?.setConfigKeyValue) return;
+  if (!helix?.setConfigKeyValue) return;
 
   const payload = { key, value, session_id: sessionId };
   const json = JSON.stringify(payload);
@@ -64,16 +57,9 @@ export function pushConfigKeyValue(
   if (pushCooldown) clearTimeout(pushCooldown);
   pushCooldown = setTimeout(() => {
     pushCooldown = null;
-    if (serve) {
-      // serve 模式：官方 WS config.set，live 生效，无需重启网关
-      serve
-        .rpc("config.set", { key, value, session_id: sessionId })
-        .catch(() => {});
-    } else {
-      helix
-        .setConfigKeyValue({ key, value, session_id: sessionId })
-        .catch(() => {});
-    }
+    helix
+      .setConfigKeyValue({ key, value, session_id: sessionId })
+      .catch(() => {});
   }, 150);
 }
 
@@ -125,39 +111,10 @@ export function pushModelConfig(payload: {
     return;
   }
 
-  // 按"模式"分流，而不是按"连接状态"（isServeActive）分流。
-  // 关键竞态：App 启动时 helix-layout 立即调本函数，此刻 serve 还在冷启动、
-  // WS 未连上 → isServeActive()===false → 若据此落 IPC，会触发
-  // helix:setConfig 直写 config.yaml（原样写入私有 provider 名）并
-  // restartGatewayDebounced 杀掉 serve → 新实例读坏配置 → agent 构建 30s 超时。
-  // getGatewayMode 从第一秒起就能拿到真实模式（pending 也返回 mode），
-  // serve 模式下等网关就绪后走 REST，绝不落 IPC。
-  void (async () => {
-    const mode = await getGatewayMode();
-    if (mode === "serve") {
-      if (!hasModelPayload) return;
-      try {
-        const c = isServeActive() ? getServeClient() : await initServeGateway();
-        if (!c) {
-          console.warn(
-            "[config-sync] serve 网关不可用，模型配置推送跳过（将由建会话预同步兜底）",
-          );
-          return;
-        }
-        await c.setModel({
-          ...modelPayload,
-          model: modelPayload.model || "",
-        });
-      } catch (e) {
-        console.warn("[config-sync] serve setModel 失败（不回落 IPC）:", e);
-      }
-      return;
-    }
-    pushModelConfigViaIpc(modelPayload, hasModelPayload);
-  })();
+  pushModelConfigViaIpc(modelPayload, hasModelPayload);
 }
 
-/** acp 模式的原有链路：冷启动缓存 + IPC setConfig（会写 config.yaml 并重启网关） */
+/** 冷启动缓存 + IPC setConfig（会写 config.yaml 并重启网关） */
 function pushModelConfigViaIpc(
   payload: {
     model?: string;

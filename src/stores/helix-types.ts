@@ -185,11 +185,6 @@ export interface EditorTab {
   isDirty: boolean;
 }
 
-export interface CursorPosition {
-  line: number;
-  column: number;
-}
-
 export interface ToastMessage {
   id: string;
   type: "success" | "error" | "info" | "warning";
@@ -304,7 +299,7 @@ export type PermissionTier = "ask" | "auto" | "full";
  * 绝不因为解析失败就把 UI 上的档位改掉（那会让显示与实际再度分裂）。
  * 全项目只有这一个归一函数：后端已经映射过一层，前端这层只兜历史值。
  */
-export function normalizePermissionTier(
+function normalizePermissionTier(
   v: unknown,
 ): PermissionTier | undefined {
   if (v === "ask" || v === "strict") return "ask";
@@ -325,7 +320,7 @@ export type PermissionScopeId = "global" | "project" | "session";
  * 生效档是被哪一层决定的。`disabled` = 扩展总开关（`enabled=false`）被关掉，
  * 此刻连覆盖表都不跑，实际全放行 —— 显示必须跟到这个事实。
  */
-export type PermissionScopeSource = PermissionScopeId | "disabled";
+type PermissionScopeSource = PermissionScopeId | "disabled";
 
 /**
  * `helix_get_permission_mode` 的作用域视图。配置里其实还留着全局/项目两层
@@ -534,27 +529,6 @@ export interface Skill {
   createdAt: number;
 }
 
-export type MemoryCategory =
-  | "user"
-  | "feedback"
-  | "project"
-  | "reference"
-  | "architecture"
-  | "rule"
-  | "decision"
-  | "pattern"
-  | "gotcha";
-
-export interface MemoryEntry {
-  id: string;
-  content: string;
-  category: MemoryCategory;
-  createdAt: number;
-  /** Origin of a MEMORY.md entry: 'manual' (added via Helix UI) vs 'auto'
-   * (appended by Helix self-evolution). Undefined for user-profile entries. */
-  source?: "manual" | "auto";
-}
-
 export interface AvailableCommand {
   name: string;
   description?: string;
@@ -567,17 +541,6 @@ export interface TaskNode {
   children?: TaskNode[];
   parentId: string | null;
   depth: number;
-}
-
-export interface SessionCheckpoint {
-  id: string;
-  label: string;
-  timestamp: number;
-  taskIds: string[];
-  memorySnapshot: string;
-  /** Full task-tree snapshot so restoreCheckpoint can rebuild tasks faithfully.
-   *  Absent on checkpoints saved by older builds — those fall back to taskIds. */
-  tasks?: TaskNode[];
 }
 
 export interface ScheduledTask {
@@ -650,7 +613,7 @@ export interface SubAgent {
 }
 
 // Used as the `customShortcuts` value shape across the app.
-export interface CustomShortcutEntry {
+interface CustomShortcutEntry {
   keys: string[];
   action: string;
   description: string;

@@ -18,9 +18,13 @@ import { isTauri } from "@/lib/tauri-bridge";
 import { cleanUrl, normalizeUrl, summarizeUrl } from "@/lib/url-utils";
 import { useHelixStore } from "@/stores/helix-store";
 
-/** 面板矩形 → 子窗口边界的采样间隔。几何真相在 DOM，这里只做脏检查后推送。
- *  60ms：拖侧栏宽度/改窗口大小时子窗口最多落后一个周期，太大会看出「橡皮筋」。 */
-const SYNC_INTERVAL_MS = 60;
+/** 几何同步的兜底周期。几何真相在 DOM，但**不能靠轮询**去发现它变了：
+ *  以前这里是 60ms 的 setInterval，每次都要 getBoundingClientRect + 5 次
+ *  elementFromPoint + 遍历 body 子节点 getComputedStyle —— 右侧栏停在浏览器面时
+ *  主线程每秒要付 ~84 次命中测试，点击触发重渲染还会让回调积压后连发（每个都强制
+ *  flush 布局），表现为「点一下就卡死」。现在改成事件驱动（尺寸 / 浮层 / 滚动 /
+ *  窗口变化）+ rAF 合并，这个 1.5s 只是防止漏触发的兜底。 */
+const SYNC_FALLBACK_MS = 1500;
 
 /** 遮挡采样的内缩距离：贴边的点会打到相邻元素的边界上。 */
 const OCCLUDE_INSET = 4;
@@ -37,15 +41,40 @@ const OCCLUDE_INSET = 4;
  * 必须让它让路 —— 遮挡判定见 isOccluded，DOM 几何是可见性的唯一真相。
  */
 
-/** 面板是否被 Helix 自己的浮层（模态、下拉、命令面板、tooltip）盖住。两层判定：
+/** body 直属、会挡住原生子窗口的浮层候选：fixed + 可交互 + z >= 50。
+ *
+ *  这份清单**必须缓存**：早先每个 tick 都对 body 的每个直属子节点调
+ *  getComputedStyle（强制 style recalc），而真正命中的通常只有 0~2 个 —— 这是
+ *  「点击右侧栏就卡死」的一半来源。只在 body 直属节点增删、或其 class/style 变化
+ *  时重建（调用方挂着 MutationObserver）。
+ *
+ *  z 阈值 50：菜单 z-[200]、toast z-[60]、命令面板 z-[310] 都在之上；更低的是
+ *  面板内局部元素，不经过 body。pointer-events:none 的（tooltip 就是）不会挡住
+ *  鼠标，也不挡子窗口的观感，直接排除。 */
+function collectOccluders(): HTMLElement[] {
+  const list: HTMLElement[] = [];
+  for (const node of document.body.children) {
+    if (!(node instanceof HTMLElement)) continue;
+    const s = getComputedStyle(node);
+    if (s.position !== "fixed" || s.pointerEvents === "none") continue;
+    const z = Number(s.zIndex);
+    if (!Number.isFinite(z) || z < 50) continue;
+    list.push(node);
+  }
+  return list;
+}
+
+/** 面板是否被 Helix 自己的浮层（模态、下拉、命令面板）盖住。两层判定：
  *
  *  1. 五点采样（中心 + 四角）：抓大浮层 —— 全屏遮罩、大面积弹窗必压中其中一点。
- *  2. body 直属 fixed 浮层扫描：抓「小浮层压大面板」—— 加号菜单、toast 只有
- *     一两百像素宽，挂在角落，五个采样点全落在它外面 → 漏判 → 原生子窗口压住
- *     菜单。这些浮层（菜单/toast/命令面板）一律 portal 到 body 且 position:fixed，
- *     只要矩形与面板相交就让路。z 阈值 50：菜单 z-[200]、toast z-[60]、命令面板
- *     z-[310] 都在之上；更低的都是面板内局部元素，不经过 body。 */
-function isOccluded(el: HTMLElement, r: DOMRect): boolean {
+ *  2. occluders 矩形相交：抓「小浮层压大面板」—— 加号菜单、toast 只有一两百
+ *     像素宽，挂在角落，五个采样点全落在它外面 → 漏判 → 原生子窗口压住菜单。
+ *     这些浮层一律 portal 到 body 且 position:fixed，只要矩形与面板相交就让路。 */
+function isOccluded(
+  el: HTMLElement,
+  r: DOMRect,
+  occluders: HTMLElement[],
+): boolean {
   const points: Array<[number, number]> = [
     [r.left + r.width / 2, r.top + r.height / 2],
     [r.left + OCCLUDE_INSET, r.top + OCCLUDE_INSET],
@@ -58,12 +87,8 @@ function isOccluded(el: HTMLElement, r: DOMRect): boolean {
     return !top || !el.contains(top);
   });
   if (pointHit) return true;
-  for (const node of document.body.children) {
-    if (!(node instanceof HTMLElement) || el.contains(node)) continue;
-    const s = getComputedStyle(node);
-    if (s.position !== "fixed" || s.pointerEvents === "none") continue;
-    const z = Number(s.zIndex);
-    if (!Number.isFinite(z) || z < 50) continue;
+  for (const node of occluders) {
+    if (el.contains(node)) continue;
     const cr = node.getBoundingClientRect();
     if (cr.width < 1 || cr.height < 1) continue;
     if (
@@ -344,10 +369,17 @@ export function BrowserView({
   pageId,
   url,
   onUrlChange,
+  active = true,
 }: {
   pageId: string;
   url: string;
   onUrlChange: (url: string) => void;
+  /** 这一页当前是否显示在面板上。false = 被 `display:none` 藏起来了。
+   *
+   *  藏起来的页**绝不能继续跑几何同步**：它每 tick 都要 getBoundingClientRect
+   *  （强制 layout），多开几个网页页就是几份白烧的 CPU —— 而用户看不到它。
+   *  隐藏的那一刻推一次 visible:false 让原生子窗口让路，之后彻底停手。 */
+  active?: boolean;
 }) {
   const native = isTauri();
   const call = useCallback(
@@ -451,18 +483,73 @@ export function BrowserView({
 
   // 几何同步 + 显隐。面板矩形是唯一真相：尺寸变了、面板被收起、被浮层盖住、进入
   // 元素选取，都只在这里判定并推给后端。
+  //
+  // 触发方式是**事件驱动 + rAF 合并**，不是轮询（历史见 SYNC_FALLBACK_MS 注释）：
+  // 尺寸看 ResizeObserver，遮挡看 body 浮层增删（MutationObserver），位置看滚动与
+  // 窗口变化，1.5s 只做兜底。rAF 保证一帧最多推一次 —— 一次 React 渲染之后绝不会
+  // 连发一串强制 layout，这正是「点一下右侧栏就卡死」的正反馈断点。
   useEffect(() => {
     if (!native) return;
+
+    // 藏起来的页：推一次「不可见」让原生子窗口立刻让路，然后彻底停手。
+    // 不推这一下会出现「切到「更改」面，网页还浮在上面」。
+    if (!active) {
+      const off = requestAnimationFrame(() => {
+        const node = contentRef.current;
+        if (!node || !loadedRef.current) return;
+        const r = node.getBoundingClientRect();
+        void call("browser_webview_set_rect", {
+          x: r.left,
+          y: r.top,
+          w: r.width,
+          h: r.height,
+          dpr: window.devicePixelRatio || 1,
+          visible: false,
+        }).catch(() => {});
+      });
+      return () => cancelAnimationFrame(off);
+    }
+
     let lastKey = "";
+    let lastOccluded = false;
+    let lastRect: DOMRect | null = null;
+    let frame = 0;
+    // 遮挡候选（body 直属浮层）与「遮挡结论是否还新鲜」。两者都只在浮层增删或
+    // 面板几何变化时重算，而不是每个 tick 重扫一遍 body。
+    let occluders: HTMLElement[] | null = null;
+    let occlusionDirty = true;
+
     const push = () => {
-      const el = contentRef.current;
-      if (!el) return;
+      frame = 0;
+      const node = contentRef.current;
+      if (!node) return;
       // 还没打开任何页面时后端没有子窗口，推几何只会拿到「页面不存在」，白跑一趟 IPC。
       if (!loadedRef.current) return;
-      const r = el.getBoundingClientRect();
+      const r = node.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
-      const visible =
-        r.width >= 1 && r.height >= 1 && !pickMode && !isOccluded(el, r);
+      const sized = r.width >= 1 && r.height >= 1;
+
+      let occluded = false;
+      if (sized && !pickMode) {
+        const moved =
+          !lastRect ||
+          Math.abs(lastRect.left - r.left) > 0.5 ||
+          Math.abs(lastRect.top - r.top) > 0.5 ||
+          Math.abs(lastRect.width - r.width) > 0.5 ||
+          Math.abs(lastRect.height - r.height) > 0.5;
+        if (moved || occlusionDirty) {
+          // 5 次 elementFromPoint 是这里最贵的一步，只在几何/浮层真的变了时做。
+          if (!occluders) occluders = collectOccluders();
+          occluded = isOccluded(node, r, occluders);
+          occlusionDirty = false;
+        } else {
+          occluded = lastOccluded;
+        }
+      }
+      lastRect = r;
+      lastOccluded = occluded;
+
+      const visible = sized && !pickMode && !occluded;
       const key = `${Math.round(r.left)}|${Math.round(r.top)}|${Math.round(
         r.width,
       )}|${Math.round(r.height)}|${visible ? 1 : 0}|${dpr}`;
@@ -484,10 +571,50 @@ export function BrowserView({
         );
       });
     };
-    push();
-    const timer = setInterval(push, SYNC_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [native, call, pickMode]);
+
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(push);
+    };
+
+    // body 直属节点增删（portal 浮层挂载/卸载）或它们的 class/style 变化 → 遮挡
+    // 候选与结论都失效。tooltip 这类 pointer-events:none 的仍会被 childList 打到，
+    // 但它进不了候选集合，最终 key 不变、不会发 IPC。
+    const invalidate = () => {
+      occluders = null;
+      occlusionDirty = true;
+      schedule();
+    };
+    const mo = new MutationObserver(invalidate);
+    mo.observe(document.body, {
+      childList: true,
+      attributes: true,
+      attributeFilter: ["class", "style", "hidden"],
+      subtree: false,
+    });
+
+    const ro = new ResizeObserver(schedule);
+    if (contentRef.current) ro.observe(contentRef.current);
+
+    const onWindowChange = () => schedule();
+    window.addEventListener("resize", onWindowChange);
+    // 捕获阶段拿所有滚动容器（不带它，面板跟着外层滚动移位时子窗口会「橡皮筋」）。
+    document.addEventListener("scroll", onWindowChange, {
+      capture: true,
+      passive: true,
+    });
+    const fallback = setInterval(schedule, SYNC_FALLBACK_MS);
+    schedule();
+
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      mo.disconnect();
+      ro.disconnect();
+      window.removeEventListener("resize", onWindowChange);
+      document.removeEventListener("scroll", onWindowChange, true);
+      clearInterval(fallback);
+    };
+  }, [native, call, pickMode, active]);
 
   // 页面关闭（组件卸载）→ 销毁子窗口。
   useEffect(() => {

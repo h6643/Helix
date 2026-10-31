@@ -14,7 +14,7 @@
  * 判定放在这一处，前端两处与 Rust 一处共用同一语义。
  */
 
-export const SESSION_BACKFILL_PREFIX = "🧠 Session backfill";
+const SESSION_BACKFILL_PREFIX = "🧠 Session backfill";
 
 /** 是否为 pi-hermes-memory 的 session backfill 例行播报。 */
 export function isSessionBackfillNotice(text: string): boolean {

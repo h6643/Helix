@@ -67,7 +67,7 @@ fn exists(cwd: &Path, name: &str) -> bool {
 
 /// The checks this project can actually run. Nothing is invented: a check
 /// appears only when both the project marker and the tool itself are present.
-pub(crate) fn detect_checks(cwd: &Path) -> Vec<Check> {
+fn detect_checks(cwd: &Path) -> Vec<Check> {
     let mut out: Vec<Check> = Vec::new();
 
     if exists(cwd, "tsconfig.json") {

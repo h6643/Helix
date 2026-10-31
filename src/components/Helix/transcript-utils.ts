@@ -34,7 +34,7 @@ export function segmentizeProcessBlocks<T extends { type: string }>(
   });
 }
 
-export type ProcessSegment<T extends { type: string }> = {
+type ProcessSegment<T extends { type: string }> = {
   kind: "text" | "thinking" | "tasks";
   blocks: T[];
 };

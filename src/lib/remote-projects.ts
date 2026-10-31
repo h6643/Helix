@@ -103,7 +103,7 @@ export function remoteProjectSubtitle(svc: ExternalService): string {
 }
 
 /** 三元组是否指向同一台机器。端口缺省 22（ssh 的约定）。 */
-export function sameTarget(
+function sameTarget(
   svc: ExternalService,
   host: string | undefined,
   port: number | undefined,

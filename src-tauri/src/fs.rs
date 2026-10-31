@@ -1,7 +1,6 @@
 //! `fs:*` commands — path-validated file operations scoped to the working
 //! directory. Port of `electron/ipc/fs.js`.
 
-use crate::paths::helix_data_dir;
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -41,12 +40,6 @@ fn safe_path(state: &AppState, file_path: &str) -> Option<PathBuf> {
     } else {
         work_dir.join(file_path)
     };
-
-    // Allow helix memory directory (used by learning view).
-    let memory_dir = helix_data_dir().join("memories");
-    if norm(&resolved.display().to_string()).starts_with(&norm(&memory_dir.display().to_string())) {
-        return Some(resolved);
-    }
 
     // Canonicalize the input (when it exists) before checking root membership.
     // Windows paths are case-insensitive but compared as strings, and the roots
@@ -167,11 +160,6 @@ pub fn readdir(state: State<'_, Arc<AppState>>, dir_path: String) -> Result<Valu
         }));
     }
     Ok(json!(out))
-}
-
-#[tauri::command]
-pub fn helix_memory_dir() -> String {
-    helix_data_dir().join("memories").display().to_string()
 }
 
 #[tauri::command]

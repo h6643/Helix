@@ -742,12 +742,6 @@ pub fn forget_window(label: &str) {
     r.used_labels.remove(label);
 }
 
-#[tauri::command]
-pub async fn browser_webview_navigate(app: AppHandle, page: String, url: String) -> Result<(), String> {
-    let target = http_url(&url)?;
-    window_of(&app, &page)?.navigate(target).map_err(|e| e.to_string())
-}
-
 /// 后退/前进/刷新。历史由 webview 自己持有，所以直接 eval 历史 API —— 比让前端记
 /// 访问栈更可靠（页面自身的 302、`location.replace` 都算在里面）。
 #[tauri::command]
@@ -1018,99 +1012,6 @@ pub async fn browser_webview_focus(app: AppHandle, page: String) -> Result<(), S
     let win = window_of(&app, &page)?;
     let _ = win.unminimize();
     win.set_focus().map_err(|e| e.to_string())
-}
-
-/// `browser_upload` 的单文件体积上限：注入脚本时整个 base64 串要随 JS 一起过
-/// ExecuteScript，再大而空的字符串只会把这次 op 拖到超时。
-const UPLOAD_MAX_BYTES: u64 = 8 * 1024 * 1024;
-
-/// 读出要上传的本地文件字节（base64）+ 文件名 + MIME，供前端注入页面赋给
-/// `<input type=file>`。
-///
-/// 为什么限制在项目目录内：模型本来就能读本地文件、也能把任意文本敲进任何输入框，
-/// 「读文件 + 传到任意网站」这条外传通道不是这里新开的；但内置浏览器是用户正看着的
-/// 那扇窗，所以把可选范围收在「当前项目」之内 —— 一次误调用不会把家目录里的密钥
-/// 送出去。越界直接拒绝，没有绕过路径。
-#[tauri::command]
-pub async fn browser_read_upload_file(
-    path: String,
-    work_dir: String,
-) -> Result<serde_json::Value, String> {
-    use base64::Engine;
-    use std::path::Path;
-
-    if work_dir.trim().is_empty() {
-        return Err("没有选定的项目工作目录：browser_upload 只在项目目录之内取文件".to_string());
-    }
-    let cand = Path::new(&path);
-    let joined = if cand.is_absolute() {
-        cand.to_path_buf()
-    } else {
-        Path::new(&work_dir).join(cand)
-    };
-    // canonicalize 而不是词法拼接：项目里一条指向别处的符号链接就能绕过前缀判断。
-    let real = joined.canonicalize().map_err(|e| format!("读不到文件：{e}"))?;
-    let root = Path::new(&work_dir)
-        .canonicalize()
-        .map_err(|e| format!("项目目录不可用：{e}"))?;
-    if real.strip_prefix(&root).is_err() {
-        return Err(format!(
-            "只能上传项目目录内的文件：{} 不在 {} 下",
-            real.display(),
-            root.display()
-        ));
-    }
-    let meta = std::fs::metadata(&real).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("不是一个文件".to_string());
-    }
-    if meta.len() > UPLOAD_MAX_BYTES {
-        return Err(format!(
-            "文件 {:.1} MB，超过 8 MB 上限",
-            meta.len() as f64 / 1_048_576.0
-        ));
-    }
-    let bytes = std::fs::read(&real).map_err(|e| e.to_string())?;
-    let name = real
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "file".to_string());
-    Ok(serde_json::json!({
-        "name": name,
-        "type": mime_for_ext(
-            real.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or_default()
-        ),
-        "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-    }))
-}
-
-/// 扩展名 → MIME。只覆盖会走表单上传的常见类型，认不出的一律 octet-stream
-/// （页面上的上传组件按 `file.type` 判格式，猜错比给个空串更容易被拒）。
-fn mime_for_ext(ext: &str) -> &'static str {
-    match ext.to_ascii_lowercase().as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "avif" => "image/avif",
-        "pdf" => "application/pdf",
-        "zip" => "application/zip",
-        "gz" => "application/gzip",
-        "json" => "application/json",
-        "csv" => "text/csv",
-        "txt" | "md" | "log" => "text/plain",
-        "html" | "htm" => "text/html",
-        "xml" => "application/xml",
-        "js" | "ts" | "tsx" | "jsx" | "css" => "text/plain",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "mp4" => "video/mp4",
-        "mov" => "video/quicktime",
-        _ => "application/octet-stream",
-    }
 }
 
 /// 传给 WebView2 的 UDF 根目录（我们自己的那一份，与主窗口分开）。

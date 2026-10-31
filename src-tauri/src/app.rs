@@ -399,11 +399,6 @@ pub fn get_status() -> Value {
     })
 }
 
-// ── Raw Config ──────────────────────────
-
-// (helix_get/set_raw_config removed — config edits go through
-// helix_set_config / helix_set_yaml_key / helix_set_config_key_value.)
-
 // ── Update Check & Install ─────────────────────────
 
 /// 检查 GitHub Release 上的 Helix 更新（tauri-plugin-updater；签名公钥在

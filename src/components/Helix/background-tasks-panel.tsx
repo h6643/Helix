@@ -39,7 +39,7 @@ function formatDuration(ms: number): string {
 /** 任务记录里只有一个 pi 会话 id（sid），这张表把它翻回"属于哪个对话"。
  *  `key` = 前端对话 id（cid），同一个对话的多个历史 sid 会指向同一个 key；
  *  `current` = 该 sid 属于当前打开的这个对话。 */
-export interface BgTaskConversation {
+interface BgTaskConversation {
   key: string;
   label: string;
   current: boolean;

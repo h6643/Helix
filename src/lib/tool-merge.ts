@@ -9,7 +9,7 @@ const TOOL_STEP_RULES: Array<{ test: RegExp; verb: string; kind: string }> = [
   // 而是一次派发多个子代理的编排调用）。
   { test: /subagentworkflow|_?workflow$/i, verb: "工作流", kind: "工作流" },
   { test: /^agent$|delegate|spawn_agent|sub_agent|subagent|get_sub_agent/i, verb: "子代理", kind: "子代理" },
-  { test: /browser_navigate|browser_go|open_browser|navigate/i, verb: "浏览器", kind: "导航" },
+  { test: /open_browser|navigate/i, verb: "浏览器", kind: "导航" },
   { test: /browser_click/i, verb: "浏览器", kind: "点击" },
   { test: /browser_type|browser_input/i, verb: "浏览器", kind: "输入" },
   { test: /browser_scroll/i, verb: "浏览器", kind: "滚动" },
@@ -21,7 +21,6 @@ const TOOL_STEP_RULES: Array<{ test: RegExp; verb: string; kind: string }> = [
   { test: /browser_drag/i, verb: "浏览器", kind: "拖拽" },
   { test: /browser_wait/i, verb: "浏览器", kind: "等待" },
   { test: /browser_eval/i, verb: "浏览器", kind: "执行脚本" },
-  { test: /browser_upload/i, verb: "浏览器", kind: "上传" },
   { test: /browser_dialog/i, verb: "浏览器", kind: "弹窗" },
   { test: /describe_image|vision/i, verb: "视觉", kind: "读图" },
   { test: /memory/i, verb: "记忆", kind: "记忆" },
@@ -38,7 +37,7 @@ const TOOL_STEP_RULES: Array<{ test: RegExp; verb: string; kind: string }> = [
   { test: /bash|terminal|shell|run_|execute|command|cmd/i, verb: "终端", kind: "命令" },
 ];
 
-export interface ToolClass {
+interface ToolClass {
   verb: string;
   kind: string;
 }

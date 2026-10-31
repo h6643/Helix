@@ -25,7 +25,7 @@ export const PERM_APPROVE_ANSWER = "Approve (once)";
 export const PERM_APPROVE_SESSION_ANSWER = "Approve (session)";
 export const PERM_DENY_ANSWER = "Deny";
 
-export interface PermissionAskInfo {
+interface PermissionAskInfo {
   tool: string;
   /** 无 Command 行（非 bash 类工具）时为 undefined */
   command?: string;

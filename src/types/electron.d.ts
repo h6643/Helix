@@ -138,7 +138,6 @@ export interface ElectronAPI {
     readdir: (
       dirPath: string,
     ) => Promise<Array<{ name: string; isDirectory: boolean }>>;
-    helixMemoryDir: () => Promise<string>;
     stat: (filePath: string) => Promise<{
       isFile: boolean;
       isDirectory: boolean;
@@ -451,20 +450,8 @@ export interface ElectronAPI {
     notify: (method: string, params?: any) => void;
     interrupt: (sessionId: string) => Promise<any>;
     status: () => Promise<any>;
-    // Gateway connection info (serve-migration Phase 1).
-    // acp mode  → { mode:'acp' }
-    // serve mode→ { mode:'serve', port, token, baseUrl, wsUrl } or { mode:'serve', pending:true }
-    getGatewayInfo: () => Promise<
-      | { mode: "acp" }
-      | {
-          mode: "serve";
-          pending?: boolean;
-          port?: number;
-          token?: string;
-          baseUrl?: string;
-          wsUrl?: string;
-        }
-    >;
+    // Gateway connection info.
+    getGatewayInfo: () => Promise<{ mode: "acp" }>;
     setConfig: (config: any) => Promise<any>;
     setConfigKeyValue: (payload: {
       key: string;
@@ -576,57 +563,6 @@ export interface ElectronAPI {
     }) => Promise<{ success: boolean; wrote?: boolean }>;
     fetchModels: (params: any) => Promise<any>;
     onEvent: (callback: (method: any, params: any) => void) => () => void;
-    // ── Memory sync (Helix backend memory_manager: MEMORY.md / USER.md) ──
-    listMemories: () => Promise<{
-      memory: string[];
-      user: string[];
-      manual: string[];
-    }>;
-    addMemoryEntry: (
-      target: "memory" | "user",
-      text: string,
-    ) => Promise<{ ok: boolean; entries?: string[]; error?: string }>;
-    removeMemoryEntry: (
-      target: "memory" | "user",
-      text: string,
-    ) => Promise<{ ok: boolean; entries?: string[] }>;
-    // pi-hermes-memory 概览 + 开关（设置「记忆」页）
-    memoryOverview: () => Promise<{
-      ok: boolean;
-      global: {
-        enabled: boolean;
-        file_count: number;
-        last_updated: number;
-        dir?: string;
-      };
-      current_project: string;
-      projects: {
-        name: string;
-        enabled: boolean;
-        file_count: number;
-        last_updated: number;
-        dir?: string;
-      }[];
-      config_path?: string;
-    }>;
-    setMemoryEnabled: (
-      scope: "global" | "project",
-      enabled: boolean,
-    ) => Promise<{ ok: boolean; scope: string; enabled: boolean; error?: string }>;
-    memoryConfig: () => Promise<{ ok: boolean; config: Record<string, unknown> }>;
-    setMemoryConfig: (
-      updates: Record<string, unknown>,
-    ) => Promise<{ ok: boolean; error?: string }>;
-    deleteMemory: (
-      scope: "global" | "project",
-      project?: string,
-    ) => Promise<{
-      ok: boolean;
-      removed: number;
-      dir?: string;
-      errors?: string[];
-      error?: string;
-    }>;
     // Codemode（pi settings.json 的 defaultTools + codemode 块）
     codemodeConfig: () => Promise<{
       ok: boolean;
@@ -664,17 +600,6 @@ export interface ElectronAPI {
     setProjectTrust: (
       mode: "always" | "never",
     ) => Promise<{ ok: boolean; mode?: string; error?: string }>;
-    // Subagent global settings (config.yaml `subagents:` block, read/write;
-    // mirrored into the pi-subagents extension's settings.json on save).
-    listSubagentSettings: () => Promise<{
-      ok: boolean;
-      settings?: Record<string, unknown>;
-      error?: string;
-    }>;
-    saveSubagentSettings: (settings: Record<string, unknown>) => Promise<{
-      ok: boolean;
-      error?: string;
-    }>;
     // pi-subagents agent types, merged the way the extension resolves them:
     // compiled defaults (general-purpose/Explore/Plan) overlaid by
     // <work_dir>/.pi/agents, <work_dir>/.agents/agents and ~/.pi/agent/agents

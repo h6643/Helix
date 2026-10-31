@@ -13,7 +13,7 @@
  */
 import { useHelixStore } from "@/stores/helix-store";
 
-export interface HelixAppUpdateInfo {
+interface HelixAppUpdateInfo {
   available: boolean;
   current?: string;
   version?: string;

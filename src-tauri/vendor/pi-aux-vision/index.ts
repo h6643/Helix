@@ -7,7 +7,7 @@
  * 本目录是唯一权威副本。Helix 每次启动把它写出到
  * `~/.pi/agent/extensions/pi-aux-vision/` 并在 pi 的 settings.json 单点登记，
  * 所以 `pi update` 覆盖 npm 安装版不会影响这里（安装逻辑见 src-tauri/src/pi_extensions.rs）。
- * 上游：https://github.com/hu3rror/pi-aux-vision （MIT，LICENSE 随附）
+ * 上游：https://github.com/hu3rror/pi-aux-vision （MIT）
  */
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
