@@ -166,6 +166,44 @@ struct CachedRect {
     inset_y: i32,
 }
 
+/// 拖拽裁剪模式下的窗口状态：label → 拖拽开始时钉住的外层窗口矩形（物理像素）。
+///
+/// 背景：拖右侧分隔条时面板每帧变宽/变窄，而原生子窗口每帧 resize 都会让真
+/// 网页重排+重绘（实测大页面单帧 >100ms）——「白色网页块比侧栏慢半拍」就是这个。
+/// 也不能隐藏（用户要看见网页）。拖拽期间改成：子窗口钉在拖拽开始时的面板矩形
+/// （整个拖拽过程网页一次都不重排），每帧只 `SetWindowRgn` 把可见区域裁到当前
+/// 面板矩形 —— 裁剪是窗口管理器级操作，不经过网页、与 DOM 同帧生效。面板比钉住
+/// 的矩形宽时，多出来的部分露出侧栏自己的背景（VSCode webview 同款行为）。
+/// 松手（resizing=false 的第一帧）按最终矩形正常 resize 一次并清除裁剪。
+#[derive(Clone, Copy, PartialEq)]
+struct DragState {
+    /// 钉住的外层窗口矩形（客户区左上 = 网页起画点）。
+    client_x: i32,
+    client_y: i32,
+    win_w: u32,
+    win_h: u32,
+}
+
+static DRAG_STATE: Mutex<Option<HashMap<String, DragState>>> = Mutex::new(None);
+
+fn drag_state_get(label: &str) -> Option<DragState> {
+    let g = DRAG_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().and_then(|m| m.get(label).copied())
+}
+
+fn drag_state_put(label: &str, s: DragState) {
+    let mut g = DRAG_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(HashMap::new).insert(label.to_string(), s);
+}
+
+fn drag_state_take(label: &str) -> Option<DragState> {
+    let mut g = DRAG_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    match g.as_mut() {
+        Some(m) => m.remove(label),
+        None => None,
+    }
+}
+
 /// 临时诊断：把覆盖层的几何真相写进 `%TEMP%\helix-webview-diag.log`。
 ///
 /// 为什么需要：DOM 矩形 → 屏幕物理矩形这一段跨了「WebView2 DOM / WebView2 客户区
@@ -586,8 +624,18 @@ fn strip_frame_styles(hwnd: windows::Win32::Foundation::HWND) {
 
 /// 把 webview 对齐到面板矩形；`visible=false` 时直接隐藏（面板收起、切到别的
 /// tab、被 Helix 浮层盖住、进入元素选取都走这里）。
+///
+/// **必须是同步命令**（与 `browser_webview_open` 的「必须 async」正好相反）。
+/// async 命令在 tokio 线程池上并发跑，完成顺序不保证等于发送顺序：拖分隔条时
+/// 一帧一条 set_rect 会排队并发执行，**最后落地的经常是过期矩形**（diag 日志实测：
+/// 最后请求 phys=1599/963，窗口最终停在 1631/931）。而前端有 `lastKey` 脏检查，
+/// 它以为最新矩形已经送达，兜底重推时 key 没变直接跳过 IPC —— 过期状态就永久
+/// 停在屏幕上（「网页覆盖层和侧栏面板大小不同步」）。
+/// 同步命令在主线程按消息到达顺序逐条执行；`set_size`/`set_position`/`show`/`hide`
+/// 在主线程是直接执行、不排队等回话（需要等回话的只有建窗，见 `open`），所以既
+/// 不会死锁，顺序也天然正确。SetWindowPos 很便宜，每帧在主线程做一次不构成卡顿。
 #[tauri::command]
-pub async fn browser_webview_set_rect(
+pub fn browser_webview_set_rect(
     app: AppHandle,
     page: String,
     x: f64,
@@ -596,18 +644,47 @@ pub async fn browser_webview_set_rect(
     h: f64,
     dpr: f64,
     visible: bool,
+    // 拖右侧分隔条中（见 `DRAG_STATE`）。Option：旧的调用点（隐藏推送）不传也算 false。
+    resizing: Option<bool>,
 ) -> Result<(), String> {
     let win = window_of(&app, &page)?;
+    let label = win.label().to_string();
 
     if !visible || w < 1.0 || h < 1.0 {
         // 前端这一页不要了：连同缓存一起丢（重排/唤回只服务还记录着的窗口）。
-        let label = win.label().to_string();
+        // 拖拽裁剪状态也要丢：唤回走 `set_pages_visible`/`reflow_on_main_moved`，
+        // 它们只认正常矩形，带着一块已清除的裁剪状态会错位。
+        // region 本体也要当场清掉：窗口 region 跨 hide/show 保留，不留到下次
+        // 正常路径（那时 drag state 已经没了，没人再去 SetWindowRgn(None)）。
+        #[cfg(target_os = "windows")]
+        if drag_state_take(&label).is_some() {
+            if let Ok(hwnd) = win.hwnd() {
+                unsafe {
+                    use windows::Win32::Graphics::Gdi::SetWindowRgn;
+                    let _ = SetWindowRgn(hwnd, None, true);
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = drag_state_take(&label);
         if let Some(m) = LAST_RECTS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             m.remove(&label);
         }
         let _ = win.hide();
         return Ok(());
     }
+
+    // 拖分隔条中：钉住矩形 + 逐帧裁剪，不逐帧 resize 网页（见 `DRAG_STATE`）。
+    // 非 Windows 没有对等的裁剪 API，回退成逐帧 resize（旧行为）。
+    #[cfg(target_os = "windows")]
+    if resizing.unwrap_or(false) {
+        return set_rect_clipped(&app, &win, &label, x, y, w, h, dpr);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = &resizing;
+
+    // 拖拽结束的第一帧：取回撑开状态，正常路径摆完尺寸后清掉裁剪（末尾做）。
+    let ended = drag_state_take(&label);
 
     let (px, py, pw, ph) = to_physical(&app, x, y, w, h, dpr)?;
     // 客户区 ≠ 窗口矩形：网页画在客户区里，而 set_position 定位的是窗口矩形原点。
@@ -660,11 +737,83 @@ pub async fn browser_webview_set_rect(
     // 摆好之后再打一次：核对「客户区实际落点」是否等于目标 phys（对账用）。
     #[cfg(target_os = "windows")]
     if let Ok(hwnd) = win.hwnd() {
+        if ended.is_some() {
+            // 收回裁剪：SetWindowRgn(None) 后整个客户区重新可见，窗口矩形已经
+            // 等于面板矩形，不再有多余部分需要藏。
+            unsafe {
+                use windows::Win32::Graphics::Gdi::SetWindowRgn;
+                let _ = SetWindowRgn(hwnd, None, true);
+            }
+        }
         diag(&format!(
-            "placed  label={} want_phys=({px},{py},{pw},{ph}) {}",
-            win.label(),
+            "placed  label={label} want_phys=({px},{py},{pw},{ph}) {}",
             window_geometry(hwnd)
         ));
+    }
+    Ok(())
+}
+
+/// 拖拽期间把子窗口钉在拖拽开始时的面板矩形，每帧只 SetWindowRgn 裁到当前面板
+/// 矩形；网页全程一次重排都不做。见 `DRAG_STATE` 注释。
+#[cfg(target_os = "windows")]
+fn set_rect_clipped(
+    app: &AppHandle,
+    win: &tauri::WebviewWindow,
+    label: &str,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    dpr: f64,
+) -> Result<(), String> {
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+
+    let (px, py, pw, ph) = to_physical(app, x, y, w, h, dpr)?;
+
+    // 钉住矩形：外层左上含 BLEED 外扩（同 to_physical 的左上角），尺寸就是面板矩形。
+    // 首帧或高度/纵向位置变了（竖向布局调整）才摆一次；之后窗口完全不动。
+    let anchor_x = px - BLEED_CSS_PX.max(0.0) as i32;
+    let anchor_y = py - BLEED_CSS_PX.max(0.0) as i32;
+    let st = match drag_state_get(label) {
+        Some(s) if s.client_y == anchor_y && s.win_h == ph => s,
+        _ => {
+            win.set_size(PhysicalSize::new(pw, ph)).map_err(|e| e.to_string())?;
+            let (inset_x, inset_y) = win.hwnd().map(client_inset).unwrap_or((0, 0));
+            win.set_position(PhysicalPosition::new(anchor_x - inset_x, anchor_y - inset_y))
+                .map_err(|e| e.to_string())?;
+            let s = DragState {
+                client_x: anchor_x,
+                client_y: anchor_y,
+                win_w: pw,
+                win_h: ph,
+            };
+            drag_state_put(label, s);
+            diag(&format!(
+                "drag-pin label={label} panel=({px},{py},{pw},{ph}) anchor=({anchor_x},{anchor_y})"
+            ));
+            s
+        }
+    };
+
+    // 裁剪区 = 当前面板矩形 ∩ 钉住的窗口。面板变窄 → 裁掉右侧多余的网页；
+    // 面板变宽 → 超出部分本来就没有窗口（露侧栏背景），取交集自然。
+    let left = px.max(st.client_x) - st.client_x;
+    let top = 0i32.max(py - st.client_y);
+    let right = (px + pw as i32 - st.client_x).min(st.win_w as i32);
+    let bottom = (py + ph as i32 - st.client_y).min((st.client_y + st.win_h as i32) - st.client_y);
+    let hwnd = win.hwnd().map_err(|e| e.to_string())?;
+    if right > left && bottom > top {
+        unsafe {
+            let rgn = CreateRectRgn(left, top, right, bottom);
+            // SetWindowRgn 成功时接管 rgn 所有权，不要再 DeleteObject。
+            let _ = SetWindowRgn(hwnd, Some(rgn), true);
+        }
+    }
+    // 可见性同正常路径：主窗藏进托盘时只记状态不放窗口。
+    if main_is_visible(app) {
+        let _ = win.show();
+    } else {
+        let _ = win.hide();
     }
     Ok(())
 }

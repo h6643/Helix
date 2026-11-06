@@ -500,10 +500,42 @@ interface HelixState
   // 按会话的模型覆盖：cid → { provider, model }（pi 侧身份）。旁路面板的
   // 模型下拉写这里；handleRun 每轮经 set_model 透传到该会话的 pi 实例，
   // 不写全局 config.yaml（全局默认仍由设置页/主线模型切换管理）。
-  modelBySession: Record<string, { provider: string; model: string }>;
+  modelBySession: Record<
+    string,
+    { provider: string; model: string; groupId?: string }
+  >;
   setModelForSession: (
     sessionId: string,
-    model: { provider: string; model: string },
+    model: { provider: string; model: string; groupId?: string },
+  ) => void;
+  /** 每台远程机器最后一次选定的**远端**模型（`user@host:port` → 覆盖值）。
+   *  进不了全局 `lastSelectedModel`：两边是两套完全不相干的模型命名空间，
+   *  打开远程项目时种本机模型只会让每一轮 set_model 报 Model not found。 */
+  remoteModelByMachine: Record<
+    string,
+    { provider: string; model: string; groupId?: string }
+  >;
+  // 用户最后一次显式选定的模型（含 provider 身份 + 选中时的分组 id），跨重启持久化。
+  // 新对话草稿据此默认选中上次模型——它覆盖 modelBySession[DRAFT] 的陈旧残留，
+  // 让「选了 A、开新对话仍显示 A」对**所有**模型类型（含 pi 渠道模型）都成立。
+  // groupId 是下拉里二级卡片的归属分组 id（普通供应商 = p.id，渠道 = "pi:<id>"）：
+  // 用于「多个供应商都提供同名模型（如 deepseek）」时，勾选只落在真正选中的那一组，
+  // 而不是所有同名模型都打勾。
+  lastSelectedModel: {
+    provider: string;
+    model: string;
+    groupId?: string;
+  } | null;
+  rememberLastModel: (
+    provider: string,
+    model: string,
+    groupId?: string,
+  ) => void;
+  rememberRemoteModel: (
+    machineKey: string,
+    provider: string,
+    model: string,
+    groupId?: string,
   ) => void;
   // 旁路问答（/btw）：主线会话 id → 它当前开放着的一条旁路会话（右侧边栏
   // 「旁路问答」面板据此渲染整段对话流，可在面板输入框里多轮追问）。
@@ -1826,6 +1858,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   approvalTimeoutSec: 300,
   planModeBySession: {},
   modelBySession: {},
+  remoteModelByMachine: {},
+  lastSelectedModel: null,
   bylineReplies: {},
   bylineAskSignal: 0,
   bylineAskQuestion: "",
@@ -2256,6 +2290,34 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     import("@/lib/persist").then(({ persistence }) => {
       persistence
         .saveSetting("modelBySession", get().modelBySession)
+        .catch(() => {});
+    });
+  },
+  // 记住最后一次显式选定的模型（含 provider）。新对话草稿据此默认选中它，
+  // 且跨重启持久化，使「新对话默认 = 上次选定」对所有模型类型都成立。
+  rememberLastModel: (provider, model, groupId) => {
+    const next = { provider, model, groupId };
+    set({ lastSelectedModel: next });
+    import("@/lib/persist").then(({ persistence }) => {
+      persistence.saveSetting("lastSelectedModel", next).catch(() => {});
+    });
+    try {
+      localStorage.setItem("helix-last-model", JSON.stringify(next));
+    } catch {
+      /* localStorage 不可用时忽略，IndexedDB 仍为权威备份 */
+    }
+  },
+  // 远程模型的「上次选定」按机器分开记（`user@host:port` 键）：打开远程项目
+  // 新建对话时只能种这台机器自己的模型，绝不能种本机供应商的名字。
+  rememberRemoteModel: (machineKey, provider, model, groupId) => {
+    if (!machineKey) return;
+    const next = { provider, model, groupId };
+    set((s) => ({
+      remoteModelByMachine: { ...s.remoteModelByMachine, [machineKey]: next },
+    }));
+    import("@/lib/persist").then(({ persistence }) => {
+      persistence
+        .saveSetting("remoteModelByMachine", get().remoteModelByMachine)
         .catch(() => {});
     });
   },
@@ -3728,6 +3790,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting("activeProfileId", state.activeProfileId),
         persistence.saveSetting("activeModel", state.activeModel),
         persistence.saveSetting("activeProviderId", state.activeProviderId),
+        persistence.saveSetting("lastSelectedModel", state.lastSelectedModel),
+        persistence.saveSetting(
+          "remoteModelByMachine",
+          state.remoteModelByMachine,
+        ),
         // 模型列表三键一起走同一个可信度门槛：读失败又没快照可回退的那一次启动，
         // 内存里的空列表代表「没读到」而不是「用户删光了」，写回去就把瞬时故障
         // 固化成永久丢失（配合 restoreFromStorage 里的 seedProfiles 回退）。
@@ -4116,6 +4183,23 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         (await safeLoad(
           persistence.loadSetting<string | null>("activeProfileId"),
           "activeProfileId",
+        )) ?? null;
+      // 上次选定的模型（含 provider）：新对话据此默认选中，须跨重启恢复。
+      const loadedLastSelectedModel =
+        (await safeLoad(
+          persistence.loadSetting<{ provider: string; model: string } | null>(
+            "lastSelectedModel",
+          ),
+          "lastSelectedModel",
+        )) ?? null;
+      // 每台远程机器的「上次选定模型」：打开远程项目建新对话时只种这一份，
+      // 本机供应商的名字在远端必然 Model not found。
+      const loadedRemoteModelByMachine =
+        (await safeLoad(
+          persistence.loadSetting<HelixState["remoteModelByMachine"] | null>(
+            "remoteModelByMachine",
+          ),
+          "remoteModelByMachine",
         )) ?? null;
 
       // ── 读失败时回退到上一份快照 ──
@@ -4711,6 +4795,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         // 进程重启即失效。旧版本持久化过的 "approvalMode" /
         // "approvalModeBySession" 键就此作废，不再被读。
         modelBySession: modelBySession ?? get().modelBySession,
+        remoteModelByMachine:
+          loadedRemoteModelByMachine ?? get().remoteModelByMachine,
+        lastSelectedModel: loadedLastSelectedModel ?? get().lastSelectedModel,
         startupGreeting: healedStartupGreeting,
         bootBackgroundImage: bootBackgroundImage ?? get().bootBackgroundImage,
         browserHomeUrl: "",

@@ -138,8 +138,22 @@ export function stripEmoji(text: string): string {
 
 // Matches kaomoji status lines like "(¬_¬) reasoning..." / "_( ˘˘) computing..." etc.
 // These are single-line status indicators emitted by some models inside thinking content.
+//
+// 形状必须是「括号脸 + 一个短状态词 + 省略号」：`_? (脸) [装饰] word...` 且整行到此为止。
+// 旧写法用 `[¬˘•○⊙＞≦´・_~xX ]{2,}` 当脸，而字符类里**含空格** ⇒ `^\s*` 会把缩进让给
+// 字符类，于是任意缩进行 / `• ` / `x ` / `_` 开头、以 "..." 结尾的普通正文都算命中：
+// 思考里一句「  byte 0: 0 = QColor (not invalid?)...」会被剥成状态顶到标题上（标题字号
+// 是正文 +2 且 font-medium、不截断）→ 整句换行两行，用户看到的就是「思考中右边突然
+// 一大坨字」；那一行还会被从正文里删掉。所以：脸必须真的长在括号里，状态词必须紧跟
+// 着脸、且是**单个**短词（后面不许再接正文，否则「某句…后面还有半段话…」会被整行吞掉），
+// 再由 looksLikeKaomojiFace() 复核（不含汉字、至少一个符号笔画）。
 const KAOMOJI_STATUS_RE =
-  /^\s*[_(]?\s*[¬˘•○⊙＞≦´・_~xX ]{2,}[\s\S]{0,10}[)_]?\s+\S.+\.{2,}\s*$/m;
+  /^\s*_?\s*[（(]\s*([^（()）\n]{1,16})\s*[)）][^\w\s]{0,4}\s+\S{1,16}\.{2,}\s*$/;
+
+// 状态位只放 3~8 个字符的颜文字短语。normalize 后仍然这么长 ⇒ 是正文伪装成状态行
+// （没被 STATUS_ZH 归一成「推理中...」），不认、原行留在正文里。正则之外的第二道网：
+// 以后正文再出现新的"像状态行"的形状，也不会再把标题顶成长句。
+const KAOMOJI_STATUS_MAX_LEN = 24;
 
 // Matches inline kaomoji status markers such as:
 //   "( •_•)> reflecting...The user is saying..."
@@ -211,23 +225,27 @@ export function extractKaomojiStatus(thinking: string): {
   if (!thinking) return { status: null, body: "" };
 
   // 1) Stand-alone status line at the end of a line.
+  // 命中还不够：括号里得真是张脸、且归一化之后仍是短状态词。两道都不放行的行
+  // 原样留在正文里（也继续往上找更早的一行），不剥、不删。
   const lines = thinking.split("\n");
   let statusLine: string | null = null;
   let statusIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
     const trimmed = lines[i].trim();
-    if (KAOMOJI_STATUS_RE.test(lines[i]) || KAOMOJI_STATUS_RE.test(trimmed)) {
-      statusLine = trimmed;
-      statusIdx = i;
-      break;
-    }
+    const face = trimmed.match(KAOMOJI_STATUS_RE)?.[1];
+    if (!face || !looksLikeKaomojiFace(face)) continue;
+    const normalized = normalizeKaomojiStatus(trimmed);
+    if (normalized.length > KAOMOJI_STATUS_MAX_LEN) continue;
+    statusLine = normalized;
+    statusIdx = i;
+    break;
   }
   if (statusLine !== null) {
     const bodyLines = lines
       .slice(0, statusIdx)
       .concat(lines.slice(statusIdx + 1));
     return {
-      status: normalizeKaomojiStatus(statusLine),
+      status: statusLine,
       body: bodyLines.join("\n").trim(),
     };
   }

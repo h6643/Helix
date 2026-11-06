@@ -302,6 +302,7 @@ function buildTauriAPI(): ElectronAPI {
       remote_path: string;
       auth_type?: string;
       secret?: string;
+      mirrorProviders?: unknown;
     }) => invoke("remote_connect", {
       host: params.host,
       port: params.port,
@@ -309,6 +310,7 @@ function buildTauriAPI(): ElectronAPI {
       remotePath: params.remote_path,
       authType: params.auth_type ?? null,
       secret: params.secret ?? null,
+      mirrorProviders: params.mirrorProviders ?? null,
     }),
     remoteDisconnect: () => invoke("remote_disconnect"),
     remoteTunnelStatus: () => invoke("remote_tunnel_status"),
@@ -318,6 +320,7 @@ function buildTauriAPI(): ElectronAPI {
       username: string;
       auth_type?: string;
       secret?: string;
+      mirrorProviders?: unknown;
     }) =>
       invoke("remote_preflight", {
         host: params.host,
@@ -334,6 +337,7 @@ function buildTauriAPI(): ElectronAPI {
       include_hidden?: boolean;
       auth_type?: string;
       secret?: string;
+      mirrorProviders?: unknown;
     }) =>
       invoke("remote_list_paths", {
         host: params.host,
@@ -429,8 +433,6 @@ function buildTauriAPI(): ElectronAPI {
     deleteSubagent: (name: string) => invoke("helix_delete_subagent", { name }),
     // Pi agent commands (extensions / skills / prompts / models)
     piListInstalled: () => invoke("pi_list_installed"),
-    // pi 扩展注册的斜杠命令（/connect 之类），供输入框 `/` 菜单列出。
-    piListCommands: () => invoke("pi_list_commands"),
     piGetAvailableModels: () => invoke("pi_get_available_models"),
     piReadCustomProviders: () => invoke("pi_read_custom_providers"),
     piSetThinkingLevelAll: (level: string) =>
@@ -625,6 +627,7 @@ function buildTauriAPI(): ElectronAPI {
       username: string;
       auth_type?: string;
       secret?: string;
+      mirrorProviders?: unknown;
     }) =>
       invoke("remote_tasks_list", {
         host: params.host,

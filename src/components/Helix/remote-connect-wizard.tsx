@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { prepareRemoteMirror } from "@/lib/remote-mirror";
 import {
   adoptRemoteDraftWorkDir,
   connectRemoteProject,
@@ -266,7 +267,13 @@ function WizardBody() {
     setConnecting(true);
     setConnErr(null);
     try {
-      const { localPort } = await connectRemoteProject(target, cwd);
+      const { localPort } = await connectRemoteProject(
+        target,
+        cwd,
+        // 连接即镜像：本机配置的供应商自动写进远端 models.json（见
+        // remote_mirror.rs；远端同名 provider 跳过不覆盖）。
+        prepareRemoteMirror(target),
+      );
       if (resolvedId) {
         await updateExternalService(resolvedId, { remotePath: cwd });
       }

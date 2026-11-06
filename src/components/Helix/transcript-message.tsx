@@ -361,7 +361,7 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
     subagentSteps.length > 0 ? (
       <>
         {subagentSteps.map((step) => (
-          <div key={step.id} className="my-2" style={{ fontSize }}>
+          <div key={step.id} style={{ fontSize }}>
             <InlineToolGroup
               steps={[step]}
               isRunning={isRunning}
@@ -502,7 +502,9 @@ export const ProcessFold = ({
   }, [streaming]);
   return (
     <details
-      className="my-2 group/details"
+      // 行距交给最近的 space-y 容器统一（与消息间的 space-y-3 同值）；
+      // 自身挂 my-2 会在消息边框（flex 项不塌缩）处叠加出双倍空隙。
+      className="group/details"
       open={open}
       onToggle={(e) => setOpen(e.currentTarget.open)}
     >
@@ -675,7 +677,9 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
               : ""
           }`}
         >
-          <div className="flex-1 min-w-0">
+          {/* 转录区栅格：正文行高（.helix-md 的 1.85）向下延续到折叠行/工具行，
+              折叠行的行距与正文行距同一把尺子，相邻两类行不再忽紧忽松。 */}
+          <div className="flex-1 min-w-0" style={{ lineHeight: 1.85 }}>
             {msg.blocks && msg.blocks.length > 0 ? (
               (() => {
                 const normalizedBlocks = mergeAdjacentThinking(
@@ -746,7 +750,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                     ? formatDuration(messageDuration ?? 0)
                     : "";
                 return (
-                  <>
+                  <div className="space-y-3">
                     {hasProcess && (
                       // 流式时展开、跑完自动收起成「已完成」，中途用户可自由开合
                       // （与主对话流式管线共用 ProcessFold）。
@@ -778,7 +782,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                               durationS={msg.thinkingTime}
                             />
                           )}
-                          <div className="my-2 space-y-2">
+                          <div className="space-y-3">
                             {processSegments.map((seg, si) => {
                               // 交替段渲染：思考段一张 ThinkingFold，工具段平铺
                               // 工具卡，文本段渲染 markdown——与流式视图
@@ -827,7 +831,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                                   b.type !== "thinking",
                               );
                               return (
-                                <div key={si} className="space-y-1">
+                                <div key={si} className="space-y-3">
                                   {otherBlocks.map((b, i) => {
                                     if (b.type === "text") {
                                       return (
@@ -897,7 +901,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                       </ProcessFold>
                     )}
                     {summarySegment && (
-                      <div className="my-2" style={{ fontSize }}>
+                      <div style={{ fontSize }}>
                         {summarySegment.blocks.map((b, i) => {
                           if (b.type === "text") {
                             return (
@@ -932,7 +936,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                         再调用 ask_user_question 然后本轮停住等回答。塞回卡里会渲染成
                         "工具在上、文字在下"，与真实顺序相反。 */}
                     {trailingSegments.map((seg, si) => (
-                      <div key={`trail-${si}`} className="my-2 space-y-1">
+                      <div key={`trail-${si}`} className="space-y-3">
                         {seg.kind === "thinking"
                           ? (() => {
                               const c = mergeThinkingContents(
@@ -1039,7 +1043,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                     ))}
                     {answerBlocks.length > 0 && (
                       <div
-                        className="helix-md helix-answer mt-3"
+                        className="helix-md helix-answer"
                         style={{ fontSize }}
                       >
                         {buildProcessSegments(answerBlocks).map((seg, si) => {
@@ -1107,7 +1111,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                         })}
                       </div>
                     )}
-                  </>
+                  </div>
                 );
               })()
             ) : (
@@ -1134,7 +1138,12 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                 正文，流式中也无妨）；分叉要求消息已落定（forkConversation
                 从消息列表切片复制，流式草稿尚未提交进 chatMessages，分叉
                 点会缺内容），所以只在 !isStreaming 时显示。 */}
-            <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1 gap-0.5">
+            {/* 操作行常驻占位、只切透明度：悬停撑开（max-h 动画）会在鼠标离开
+                消息组时塌缩，改变滚动容器内容高度，触发浏览器滚动锚定/钳制，
+                页面就像「自己滚动」；用户消息的操作行就是常驻占位的写法。
+                常驻占位高度恒定、不引发滚动，代价是每条消息下方多一段固定空白。
+                空闲时 pointer-events-none，避免点中隐形按钮误触复制。 */}
+            <div className="flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity pt-1 px-1 mb-1 gap-0.5">
               <CopyButton text={mdContent || content} />
               {!isStreaming && onFork && (
                 <button
@@ -1150,7 +1159,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
         </div>
       ) : (
         <div className="group w-fit max-w-[80%]">
-          <div className="px-4 py-2.5 rounded-xl border border-border bg-transparent text-foreground">
+          <div className="px-4 py-2.5 rounded-xl bg-muted/80 text-foreground">
             {msg.images && msg.images.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-2">
                 {msg.images.map((img) => (
@@ -1210,7 +1219,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
             )}
           </div>
           {/* Action buttons below user message */}
-          <div className="flex justify-end items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
+          <div className="flex justify-end items-center gap-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity pt-0.5">
             {onEdit && (
               <button
                 onClick={() => onEdit()}

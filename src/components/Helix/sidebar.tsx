@@ -36,6 +36,7 @@ import React, {
 import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
 import { FileTreePanel } from "./file-tree-panel";
+import { DRAFT_SESSION_KEY } from "./slash-commands";
 import { captureContextBreakdown } from "@/lib/context-capture";
 import {
   isElectron,
@@ -45,12 +46,14 @@ import {
 } from "@/lib/electron-bridge";
 import { timeAgo } from "@/lib/format";
 import { persistence, type PersistedSession } from "@/lib/persist";
+import { prepareRemoteMirror } from "@/lib/remote-mirror";
 import {
   adoptRemoteDraftWorkDir,
   connectRemoteProject,
   disconnectRemoteProject,
   findServiceByRemoteWorkDir,
   isRemoteWorkDir,
+  parseRemoteWorkDir,
   remoteAvailable,
   remoteProjectLabel,
   remoteProjectSubtitle,
@@ -910,6 +913,24 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     // 占位，必须这一步才真正进入可发消息状态）。
     useHelixStore.getState().setNoActiveConversation(false);
     useHelixStore.getState().setCurrentSessionId(null);
+    // 进入新对话草稿时，把「上次选定的模型」种进草稿覆盖值，使新对话默认
+    // 选中它（覆盖 modelBySession[DRAFT] 的陈旧残留，对所有模型类型一致）。
+    //
+    // 仅限**本地**对话：本机供应商的模型在远程 pi 上必然不存在，种进去就是每轮
+    // 一次 Model not found（旧行为：远程里选模型无效 + 界面还谎称已覆盖）。
+    // 远程项目走侧边栏的「新建对话」（handleNewProjectChat 的远程分支）。
+    const last = useHelixStore.getState().lastSelectedModel;
+    if (last) {
+      // 连同 groupId 一起种进草稿：新对话的勾选才能落在真正选中的供应商分组，
+      // 而不是所有同名模型（如 deepseek）都打勾。
+      useHelixStore
+        .getState()
+        .setModelForSession(DRAFT_SESSION_KEY, {
+          provider: last.provider,
+          model: last.model,
+          groupId: last.groupId,
+        });
+    }
     // Returning to a conversation from the sidebar should dismiss the
     // full-area panels so the chat is visible again.
     const state = useHelixStore.getState();
@@ -931,6 +952,17 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         clearChat();
         useHelixStore.getState().setNoActiveConversation(false);
         useHelixStore.getState().setCurrentSessionId(null);
+        // 进入新对话草稿时，把「上次选定的模型」种进草稿覆盖值（与 handleNewTask 一致）。
+        const last = useHelixStore.getState().lastSelectedModel;
+        if (last) {
+          useHelixStore
+            .getState()
+            .setModelForSession(DRAFT_SESSION_KEY, {
+              provider: last.provider,
+              model: last.model,
+              groupId: last.groupId,
+            });
+        }
         // 远程项目行：`dir` 是 `remote://…` 虚拟键，**不是本机目录**。走下面任何
         // 一条本地通道都会炸：setWorkDir → 主进程 create_dir_all 把 `remote://…`
         // 当相对路径 join（Windows 下 `:` `/` 非法 → os error 123）；
@@ -941,6 +973,21 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         if (isRemoteWorkDir(dir)) {
           useHelixStore.getState().setSelectedWorkDir(null);
           useHelixStore.setState({ activeSessionWorkDir: dir });
+          // 刚才种进去的是「上次选定的**本机**模型」—— 对一个还没建会话的远程
+          // 草稿来说，它是**必然失败**的覆盖值（远端 pi 只认自己机器上的
+          // models.json，远端没有这个 provider → 每轮 set_model 都报
+          // Model not found，且芯片还盖着远端正在用的模型）。
+          // 这里改种「同一台机器上次选定的远端模型」（没有就留空，让芯片回落到
+          // 远端实例 get_state 报的模型）。
+          const key = parseRemoteWorkDir(dir)?.targetKey ?? "";
+          const lastForMachine =
+            useHelixStore.getState().remoteModelByMachine[key] ?? null;
+          useHelixStore
+            .getState()
+            .setModelForSession(
+              DRAFT_SESSION_KEY,
+              lastForMachine ?? { provider: "", model: "" },
+            );
           return;
         }
         if (isElectron()) {
@@ -1366,6 +1413,9 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         const { localPort } = await connectRemoteProject(
           await toRemoteTarget(svc),
           svc.remotePath,
+          // 连接即镜像：本机配置的供应商自动写进远端 models.json（见
+          // remote_mirror.rs；远端同名 provider 跳过不覆盖）。
+          prepareRemoteMirror(svc),
         );
         // 同向导 finish()：连上隧道后把草稿的项目身份也设成这台远程项目，
         // 否则第一条消息仍按旧的本机 cwd 发（「选了远程项目却在本机对话」）。

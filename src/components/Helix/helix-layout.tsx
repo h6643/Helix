@@ -544,6 +544,12 @@ export function HelixLayout() {
     if (!isRightDragging) return;
     document.body.style.userSelect = "none";
     document.body.style.cursor = "col-resize";
+    // 「正在拖右侧分隔条」旗标（读者：preview-rail 的几何同步）。为什么需要：
+    // 原生子窗口每帧 resize 都会让真网页重排+重绘，大页面跟不上面板，表现就是
+    // 「白色网页比侧栏慢半拍」（diag 日志证明 SetWindowPos 每帧都准时落地，慢的
+    // 是网页自己重画）。让网页逐帧跟是死路；改成拖拽期间整块隐藏，露出的就是
+    // 面板自己的背景（天然同步），松手一次到位。VSCode 的 webview 拖拽同样隐藏。
+    document.body.setAttribute("data-helix-resizing", "right");
     let raf: number;
     const onMove = (e: PointerEvent) => {
       cancelAnimationFrame(raf);
@@ -562,6 +568,7 @@ export function HelixLayout() {
       cancelAnimationFrame(raf);
       document.body.style.userSelect = "";
       document.body.style.cursor = "";
+      document.body.removeAttribute("data-helix-resizing");
       setIsRightDragging(false);
       const finalW = rightDragNextW.current || rightDragStartW.current;
       setRightSidebarWidth(finalW);
@@ -575,6 +582,7 @@ export function HelixLayout() {
       cancelAnimationFrame(raf);
       document.body.style.userSelect = "";
       document.body.style.cursor = "";
+      document.body.removeAttribute("data-helix-resizing");
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
     };
@@ -593,6 +601,36 @@ export function HelixLayout() {
   const showSubAgentPanel = useHelixStore((s) => s.showSubAgentPanel);
   const showActivityFeed = useHelixStore((s) => s.showActivityFeed);
   const showArtifactsBrowser = useHelixStore((s) => s.showArtifactsBrowser);
+  // 覆盖页打开时把事实标到 body 上（data-helix-overlay）：浏览器原生子窗口的
+  // 遮挡检测靠 body 属性变化唤醒（见 preview-rail 的 MutationObserver）。这些
+  // 覆盖页不 portal 到 body，它们的挂载/卸载碰不到 body childList，不标一下
+  // 就是「渠道中心开着、网页还浮在它上面」。
+  useEffect(() => {
+    const overlayOpen =
+      showSessionManager ||
+      showSettings ||
+      showScheduledTasksPanel ||
+      showCustomizePanel ||
+      showChannelsCenter ||
+      showRuntimePanel ||
+      showWorktreePanel ||
+      showSubAgentPanel ||
+      showActivityFeed ||
+      showArtifactsBrowser;
+    if (overlayOpen) document.body.setAttribute("data-helix-overlay", "1");
+    else document.body.removeAttribute("data-helix-overlay");
+  }, [
+    showSessionManager,
+    showSettings,
+    showScheduledTasksPanel,
+    showCustomizePanel,
+    showChannelsCenter,
+    showRuntimePanel,
+    showWorktreePanel,
+    showSubAgentPanel,
+    showActivityFeed,
+    showArtifactsBrowser,
+  ]);
   // 打开任一主区覆盖页（计划/运行时/工作树）时，聊天区用
   // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
   // 画面并让暂停按钮消失（看起来像"点击面板把运行终止了"）。保持挂载即可在
@@ -740,18 +778,26 @@ export function HelixLayout() {
     Array<{ id: string; tasks: Array<{ name: string; modified: number }> }>
   >([]);
   const [hasDelegations, setHasDelegations] = useState(false);
-  // 后台任务（pi-background-tasks 扩展注册表）：10s 轮询供「工作面板」的
+  // 后台任务（pi-background-tasks 扩展注册表）：3s 轮询供「工作面板」的
   // 后台任务区使用。这里全量收，按会话过滤 / 「其他来源」分区交给面板内部。
-  // 数据经 Rust tasks_list 读共享 tasks.json。
+  // 数据经 Rust tasks_list 读共享 tasks.json（读小文件 + pid 探活，开销可忽略；
+  // 轮询间隔决定任务出现在前台的延迟——间隔太长，用户启动任务后打开面板
+  // 看到的是空的，会误以为“没在跑”）。
   // 标题栏右上角那个带数量角标的按钮入口已删，bgTasksOpen / bgTasksRef /
   // runningBgTasks 三个随之作废。
   const [bgTasksAll, setBgTasks] = useState<BgTask[]>([]);
   const helixSessionId = useGatewayStore((s) => s.helixSessionId);
-  // 工作面板里后台任务 section 的渲染门槛：口径与面板内部 inline 过滤一致
-  //（本对话 sid 的任务；无 sid 时全量）。没有任务就整节不渲染 —— 不留空态壳。
-  const hasVisibleBgTasks = helixSessionId
-    ? bgTasksAll.some((t) => t.session_id === helixSessionId)
-    : bgTasksAll.length > 0;
+  // 工作面板里后台任务 section 的渲染门槛：本对话的任务（口径与面板内部
+  // inline 过滤一致——本对话 sid 的任务；无 sid 时全量），或任何来源的
+  // 运行中任务（跨会话的运行中任务照样要看得到、停得掉，面板会把它归进
+  // 「其他来源」；一刀切只认 current sid 会把整节连同它一起藏掉——
+  // 会话 fork/清空换 sid 后，旧 sid 名下的任务就永远不可见了）。
+  // 没任务就整节不渲染 —— 不留空态壳。
+  const hasVisibleBgTasks =
+    (helixSessionId
+      ? bgTasksAll.some((t) => t.session_id === helixSessionId)
+      : bgTasksAll.length > 0) ||
+    bgTasksAll.some((t) => t.status === "running");
   const loadBgTasks = useCallback(async () => {
     if (!isElectron()) return;
     try {
@@ -793,7 +839,7 @@ export function HelixLayout() {
   useEffect(() => {
     if (!isElectron()) return;
     loadBgTasks();
-    const interval = setInterval(loadBgTasks, 10000);
+    const interval = setInterval(loadBgTasks, 3000);
     return () => clearInterval(interval);
   }, [loadBgTasks]);
   // 右上角「更改」胶囊：当前工作区未提交改动的行数统计。

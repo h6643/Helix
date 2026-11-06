@@ -147,8 +147,7 @@
 
   /* Context-usage category colors — match backend `session.context_breakdown`
      payload (var(--context-usage-*), see upstream agent context_breakdown.py).
-     tool-results / other / free 是 pi `/context`（pi-cc-extensions）那套
-     分类专用：工具结果、其他占用、窗口剩余。 */
+     tool-results 是 pi `/context`（pi-cc-extensions）那套分类专用。 */
   --context-usage-system: oklch(0.72 0.02 250);
   --context-usage-tools: oklch(0.72 0.16 55);
   --context-usage-tool-results: oklch(0.72 0.16 350);
@@ -158,8 +157,6 @@
   --context-usage-subagents: oklch(0.72 0.15 300);
   --context-usage-memory: oklch(0.70 0.13 190);
   --context-usage-conversation: oklch(0.72 0.14 250);
-  --context-usage-other: oklch(0.62 0.01 250);
-  --context-usage-free: oklch(0.45 0.01 250);
 }
 
 .dark {
@@ -694,24 +691,8 @@ h1, h2, h3, h4, h5, h6 {
   -webkit-text-autospace: none;
 }
 
-.helix-md p {
-  margin-block: 0.5em;
-}
-
-.helix-md h1, .helix-md h2, .helix-md h3 {
-  font-weight: 600;
-  margin-top: 1.2em;
-  margin-bottom: 0.5em;
-}
-
-.helix-md h1 { font-size: 1.3em; }
-.helix-md h2 { font-size: 1.15em; }
-.helix-md h3 { font-size: 1.05em; }
-
-.helix-md ul, .helix-md ol {
-  padding-left: 1.4em;
-  margin-block: 0.5em;
-}
+/* .helix-md 段落边距与列表/表格/引用由 1434 处那组定义；这里不再给第二套
+   不同的值互相覆盖，避免“段落间距到底是几”有两处真源。 */
 
 /* ── Flowing text indicator for actively-running tool steps ─────────────
    Replaces the spinning circle loader with a shimmer that moves across
@@ -735,46 +716,6 @@ h1, h2, h3, h4, h5, h6 {
 @keyframes flowText {
   0% { background-position: 100% 0; }
   100% { background-position: -100% 0; }
-}
-
-.helix-md li {
-  margin-block: 0.2em;
-}
-
-.helix-md a {
-  color: var(--primary);
-  text-decoration: none;
-  border-bottom: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-  transition: border-color 150ms ease;
-}
-
-.helix-md a:hover {
-  border-bottom-color: var(--primary);
-}
-
-.helix-md blockquote {
-  border-left: 2px solid color-mix(in oklch, var(--muted-foreground) 20%, transparent);
-  padding-left: 1em;
-  margin-block: 0.5em;
-  color: var(--muted-foreground);
-}
-
-.helix-md table {
-  border-collapse: collapse;
-  width: 100%;
-  margin-block: 0.75em;
-  font-size: 0.85em;
-}
-
-.helix-md th, .helix-md td {
-  border: 1px solid var(--border);
-  padding: 0.4em 0.6em;
-  text-align: left;
-}
-
-.helix-md th {
-  background: color-mix(in oklch, var(--muted-foreground) 5%, transparent);
-  font-weight: 600;
 }
 
 .helix-md > *:first-child {

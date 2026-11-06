@@ -469,6 +469,7 @@ export interface ElectronAPI {
       remote_path: string;
       auth_type?: string;
       secret?: string;
+      mirrorProviders?: unknown;
     }) => Promise<{
       ok: boolean;
       local_port?: number;
@@ -476,6 +477,8 @@ export interface ElectronAPI {
       remote_port?: number;
       username?: string;
       remote_path?: string;
+      mirror?: { written: string[]; skipped: string[]; remotePath: string } | null;
+      mirrorError?: string | null;
     }>;
     remoteDisconnect: () => Promise<{ ok: boolean }>;
     remotePreflight: (params: {
@@ -642,14 +645,6 @@ export interface ElectronAPI {
         /** Whether the plugin's resources are currently loaded. */
         enabled?: boolean;
       }>;
-    }>;
-    /**
-     * pi **扩展**注册的斜杠命令（`get_commands` 里 `source == "extension"` 的
-     * 子集）：`/connect` 这类命令由扩展在运行期注册，前端 `/` 菜单要靠它才会
-     * 出现。命令本体仍由 pi 的 prompt() 执行，前端不需要执行通道。
-     */
-    piListCommands: () => Promise<{
-      commands: Array<{ name: string; description: string }>;
     }>;
     piSetPackageEnabled: (
       pkg: string,

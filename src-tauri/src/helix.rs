@@ -507,8 +507,9 @@ pub fn helix_set_codemode_config(updates: Value) -> Value {
 // ── Pi Commands (extensions / skills / prompts) ─────────────────────
 
 // (pi_get_commands removed — slash commands are now a client-side registry in
-// src/components/Helix/slash-commands.ts. The `get_commands` RPC itself stays:
-// helix.rs uses it internally to seed hook/skill metadata.)
+// src/components/Helix/slash-commands.ts. `get_commands` is no longer a
+// frontend pass-through either: it stays reachable only from Rust, via
+// pi_gateway::get_commands(), which helix.rs uses to seed prompt metadata.)
 
 /// Read the enabled/disabled state of each package from pi's settings.json
 /// `packages` list. A plain string entry ("npm:foo") means fully enabled.
@@ -752,8 +753,8 @@ fn set_local_extension_enabled(
     Ok(())
 }
 
-/// Scan Pi's local extension/skill directories and combine with `get_commands`
-/// RPC data to produce a comprehensive list of installed plugins.
+/// Scan Pi's local extension/skill directories and combine with the prompt
+/// templates pi reports, to produce a list of installed plugins.
 ///
 /// Directory layout scanned (everything pi itself loads):
 ///   ~/.pi/agent/extensions/*.ts|*.js — Pi TypeScript extensions
@@ -809,7 +810,9 @@ pub async fn pi_list_installed() -> Result<Value, String> {
     merge_lite_wrappers(&mut items);
 
     // ── Prompt templates from get_commands RPC ──
-    if let Ok(cmds_data) = pi_gateway::send("get_commands", Value::Null).await {
+    // 走 pi_gateway::get_commands() 而不是 send("get_commands")：那条名字已经从
+    // 前端直通白名单里挑掉，只有 Rust 内部需要这份数据。
+    if let Ok(cmds_data) = pi_gateway::get_commands().await {
         if let Some(cmds) = cmds_data.get("commands").and_then(Value::as_array) {
             for cmd in cmds {
                 let name = cmd.get("name").and_then(Value::as_str).unwrap_or("");
@@ -1512,37 +1515,6 @@ fn push_skill_dirs(dir: &std::path::Path, pkg_name: &str, version: &str, items: 
 #[tauri::command]
 pub async fn pi_get_available_models() -> Result<Value, String> {
     pi_gateway::send("get_available_models", Value::Null).await
-}
-
-/// List the slash commands **extensions** registered in pi (`/connect` 之类)。
-///
-/// 只挑 `source == "extension"`：prompt 模板与 skills 各自有面板与菜单入口，
-/// 在这里重复列会让同一个名字出现两次、行为还不一样。命令本体由 pi 在
-/// `prompt()` 里执行（响应 disposition="handled"），前端只负责列出来 + 把
-/// `/name ` 填进输入框，**不需要**任何新的执行通道。
-#[tauri::command]
-pub async fn pi_list_commands() -> Result<Value, String> {
-    let data = pi_gateway::send("get_commands", Value::Null).await?;
-    let commands: Vec<Value> = data
-        .get("commands")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter(|cmd| cmd.get("source").and_then(Value::as_str) == Some("extension"))
-                .filter_map(|cmd| {
-                    let name = cmd.get("name").and_then(Value::as_str)?;
-                    if name.is_empty() {
-                        return None;
-                    }
-                    Some(json!({
-                        "name": name,
-                        "description": cmd.get("description").and_then(Value::as_str).unwrap_or(""),
-                    }))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(json!({ "commands": commands }))
 }
 
 /// Read the custom providers pi has registered in `models.json` (the file Helix

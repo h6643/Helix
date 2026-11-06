@@ -52,13 +52,6 @@ function isToolRunSegment<T extends { type: string }>(
 
 /**
  * 把**连续的纯工具段**并成一段（只做渲染前的整理，块本身一个不动）。
- *
- * 为什么需要：`segmentizeProcessBlocks` 是"一个 block 一段"，而工具块又是
- * "一个工具调用一块"（agent-flow-panel 有意为之 —— 这样工具卡能与思考/正文严格
- * 按事件顺序交叉显示）。两者相乘 ⇒ **一轮里连续 N 个工具调用会渲染出 N 行折叠
- * 摘要**（`编辑 · 1 编辑` ×N），而不是一行 `编辑 · 6 编辑, 终端 · 1 命令` ——
- * 因为 `ToolStreamFold` 的摘要是**在段范围内**聚合的，而每个段里只有一个工具。
- *
  * 只在渲染前合并相邻的纯工具段：思考段/正文段照旧隔断（"思考→编辑→思考→编辑"
  * 仍分成两行），工具块自身的顺序与"折叠区内按事件序渲染"的语义都不变。
  */
@@ -156,6 +149,10 @@ export function normalizeTextBlocks(
       typeof block.content === "string"
         ? block.content
         : String(block.content || "");
+    // 纯空白文本块没有信息量，却会把它落点的那一层（summarySegment /
+    // 尾段 wrapper）撑出一个看不见的空槽——工具合并也因它隔断（相邻纯工具
+    // 段被它拆开，「终端 · N 命令」散成 N 行）。渲染前直接丢弃。
+    if (!cur.trim()) continue;
     const curN = normalizeForCompare(cur);
     let out: string | null = null;
     let matched = false;

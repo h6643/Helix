@@ -16,7 +16,7 @@
 //!
 //! Instance routing: every session-scoped RPC the frontend sends carries
 //! `session_id` (= the pi session id returned by session/new). That id picks
-//! the instance. Session-less RPCs (get_commands / set_model / get_state / …)
+//! the instance. Session-less RPCs (set_model / get_state / get_available_models / …)
 //! go to the MAIN instance (key ""), which spawns at app startup and serves
 //! the global UI surfaces (model list, thinking level, session stats panel).
 //!
@@ -1299,7 +1299,7 @@ pub fn is_active() -> bool {
     // 2026-10-25 注释），只要池里有一只**握手已过的** spare 就视为 connected：
     // 会话只认 spare / restore 也认领 spare（restore_session_instance），真正
     // 挡住用户的就只有这一条；而主实例专供的 sessionless RPC（模型列表、
-    // get_commands）在 instance_for_session("") 里排队等主实例的 spawn_lock，
+    // set_model / get_state）在 instance_for_session("") 里排队等主实例的 spawn_lock，
     // 主实例握手完自动返回，不用 UI 先等。这把启动读条从「主实例大握手」改成
     // 「首个热备就绪」——热备在 spawn() 里与主实例并发补热，冷启动天 ~6s 就绪。
     // 主实例随后挂掉、spare 活着：死亡记账仍按 key="" 发 gateway.disconnected
@@ -1917,10 +1917,21 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
                 dir
             } else {
                 eprintln!(
-                    "[Helix] work dir missing, falling back to home: {}",
+                    "[Helix] work dir missing, falling back to default workspace: {}",
                     dir.display()
                 );
-                dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+                // 兜底就用「无项目默认工作区」~/.pi/agent/workspace/default，
+                // 与下面 switch_session / 会话认领用的中性兜底同一个目录——
+                // 落 home 会让 pi 在整个用户主目录里起（扫描面失控，agent 的
+                // 文件操作也失去锚点）。自愈而不只是兜底：不写回的话
+                // state.work_dir / workdir.json 里还是那个不存在的路径，此后
+                // 每次 cwd 为空的 spawn 都重复检查 → 失败 → 打同一条日志，
+                // get_info 也一直报告幽灵目录。写回后日志整轮只出现一次。
+                let fallback = crate::state::pi_sessions_default_dir();
+                *state.work_dir.write().unwrap() = fallback.clone();
+                state.add_allowed_root(fallback.to_str().unwrap_or(""));
+                crate::app::persist_work_dir(fallback.to_str().unwrap_or(""));
+                fallback
             }
         });
     // The global work dir is canonical (verbatim `\\?\` on Windows); the
@@ -2757,10 +2768,6 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 let result = instance_for_session(&session_id, &state_clone).await;
                 if let Err(e) = result {
                     let kind = classify_session_error(&e);
-                    eprintln!("[pi agent] session prepare failed for {session_id}: {e}");
-                    log_spawn_diag(&format!(
-                        "session/prepare FAILED sid={session_id} kind={kind}: {e}"
-                    ));
                     // Same error_kind contract as session/resume: warm-up callers
                     // can decide `broken` vs retryable from the kind alone.
                     emit_helix_event(
@@ -3053,6 +3060,30 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .ok_or("session/file_exists is missing session_id")?;
             Ok(json!({ "ok": find_session_file(sid).is_some() }))
         }
+
+        "remote/first_live_session" => {
+            // 远程项目新建对话（还没有 sid）时，前端拿不到「这条会话的实例」，
+            // 于是模型下拉空着。远端那台机器上的模型清单对所有会话是同一份，
+            // 所以随便挑一个已存在的远端实例问一遍即可。
+            //
+            // 只查活跃实例，绝不 spawn：新对话一个实例都没起时安静返回 null，
+            // 下拉显示「远端未就绪」而不是卡在那里等。
+            let cwd = params
+                .get("remote_cwd")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let hit = INSTANCES
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, i)| {
+                    i.remote.load(Ordering::SeqCst)
+                        && (cwd.is_empty() || i.cwd.lock().unwrap().as_deref() == Some(cwd.as_str()))
+                })
+                .map(|(k, _)| k.clone());
+            Ok(json!({ "session_id": hit }))
+        }
         "session/latest_for_cwd" => {
             // Recover the newest on-disk pi session file for a conversation's
             // project dir WITHOUT needing a persisted sid. The frontend's
@@ -3188,9 +3219,11 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .await?;
             context_breakdown(&stats, &instance).await
         }
-        // pi 自己的 `/context` 分类（pi-cc-extensions）：系统提示 / 记忆 / 技能 /
-        // 工具定义 / 工具结果 / 对话上下文，加「其他」和「剩余空间」——与 pi CLI 里
-        // `/context` 弹框完全同一份数（就是问 pi 要的，不自己猜）。
+        // pi `/context` 的 6 类分类：系统提示 / 记忆 / 技能 / 工具定义 / 工具结果 /
+        // 对话上下文，加「其他」和「剩余空间」——与 pi CLI 里 `/context` 弹框同一套数。
+        // 分类由网关按同一套算法自算（见 `pi_context_parts_from_messages`），不再
+        // 依赖 pi-cc-extensions：远程机器的 pi 上一般没装那个扩展，靠问它要报告
+        // 的旧实现会让远程项目的浮层永远停在「正在获取」。
         // `source: "pi-context"` 是前端的识别标记：带上它才按整窗口径渲染
         // （part 之和 + 剩余 = 窗口），否则回落 jsonl 分类的比例归一化。
         "session/context_report" => {
@@ -3207,7 +3240,7 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .get("context_used")
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
-            let Some(parts) = pi_context_report_parts(&instance).await else {
+            let Some((parts, computed_by)) = pi_context_parts(&instance).await else {
                 return Ok(json!({
                     "source": "unavailable",
                     "context_max": context_max,
@@ -3241,20 +3274,17 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 };
                 rows.push((row.0, row.1, *tokens, row.2));
             }
-            // 其他 / 剩余按网关自己的权威口径重算，不用 pi 报告里那两个数：
-            // pi 的 `used` 与 context_breakdown 的 context_used（provider 实测 /
-            // jsonl 估算取 max）可能差一截，混用会让条形和百分比对不上。
-            let attributed: i64 = rows.iter().map(|r| r.2).sum();
-            rows.push((
-                "other",
-                "其他",
-                (context_used - attributed).max(0),
-                "var(--context-usage-other)",
-            ));
-            let free = (context_max - context_used).max(0);
-            // 剩余空间单独一个字段（前端拿它收尾条形），同时作为分类进列表 ——
-            // pi 的面板也把它和别的 part 并列成一行。
-            rows.push(("free", "剩余空间", free, "var(--context-usage-free)"));
+            // provider 没报用量时（远程刚恢复、这一轮还没跑）用分类之和兜底：
+            // 顶着 0 画条形会变成「0.0% 却塞满颜色」，比一个诚实的估算更误导。
+            let estimated_total: i64 = rows.iter().map(|r| r.2).sum();
+            let display_used = if context_used > 0 {
+                context_used
+            } else {
+                estimated_total
+            };
+            // 分类是估算、总量是 provider 实测：按实测值归一化，各类之和恒等于
+            // 顶部数字（否则中间会空出一段没有标签、也对不上总数的差额）。
+            normalize_context_rows(&mut rows, display_used);
             let categories: Vec<Value> = rows
                 .into_iter()
                 .filter(|r| r.2 > 0)
@@ -3265,10 +3295,14 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             Ok(json!({
                 "source": "pi-context",
                 "context_max": context_max,
-                "context_used": context_used,
-                "context_percent": base.get("context_percent").cloned().unwrap_or(Value::Null),
-                "free_space": free,
-                "estimated_total": attributed,
+                "context_used": display_used,
+                "context_percent": if context_max > 0 {
+                    display_used as f64 / context_max as f64 * 100.0
+                } else {
+                    0.0
+                },
+                "estimated_total": estimated_total,
+                "computed_by": computed_by,
                 "categories": categories,
                 "usage_stats": base.get("usage_stats").cloned().unwrap_or(Value::Null),
             }))
@@ -3945,10 +3979,12 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
         // Session-less UI surfaces (model list, thinking level, plugin
         // manager) land on the main instance; a session_id routes them to
         // that conversation's instance (stats for THIS chat).
-        "get_commands"
-        | "get_available_models"
+        "get_available_models"
         | "get_state"
         | "set_model"
+        // 模型清单同理：远程会话必须带 session_id 才能落到**这条会话的**实例
+        // （不带就落主实例 = 本机，下拉于是列出本机 models.json 的供应商，选中
+        // 后 set_model 在远端必然 Model not found）。
         | "set_thinking_level"
         | "cycle_thinking_level"
         | "get_available_thinking_levels"
@@ -3975,15 +4011,6 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
         | "follow_up"
         | "abort_bash" => {
             let instance = routed_instance(&params, &state).await?;
-            // 每轮重放的 per-session 模型切换：先记下本实例现在跑的是哪个
-            // 模型，上下文环的分母（context_max）才会跟着切（否则一直按
-            // 全局默认模型的窗口算 → "我选了 1M，有时候自动变成 256k"）。
-            if method == "set_model" {
-                instance.note_active_model(
-                    params.get("modelId").and_then(Value::as_str),
-                    params.get("provider").and_then(Value::as_str),
-                );
-            }
             // Bare `compact`（pi_compact 命令）与 session.compress 里的是同一
             // 个长 LLM 总结调用，同样吃扩展预算；其余保持通用超时。
             let timeout = if method == "compact" {
@@ -3991,10 +4018,65 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
             } else {
                 RPC_TIMEOUT
             };
-            instance.request(method, params, timeout).await
+            if method != "set_model" {
+                return instance.request(method, params, timeout).await;
+            }
+            // 每轮重放的 per-session 模型切换。**成功之后**才记下本实例现在跑
+            // 的是哪个模型：上下文环的分母（context_max）必须跟着真正生效的
+            // 模型切（否则一直按全局默认窗口算 → "我选了 1M，有时候自动变成
+            // 256k"）；反过来，pi 拒绝（Model not found）时提前记账会让界面按
+            // 一个根本没在跑的模型画环，比不切更误导。
+            let model_id = params
+                .get("modelId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let model_provider = params
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let result = instance.request(method, params, timeout).await;
+            match &result {
+                Ok(_) => instance.note_active_model(
+                    model_id.as_deref(),
+                    model_provider.as_deref(),
+                ),
+                // 远程会话最容易踩这条：下拉里是本机供应商的模型，实例却是远端
+                // 那台机器上的 pi，它只认自己 `~/.pi/agent/models.json` 里的
+                // provider/model。原样抛 `Model not found: a/b` 会让用户以为
+                // 模型名写错了，实际是「这个模型不在远端」。附上可执行的原因。
+                // 只改这一种错误：超时/忙之类的远端报错原样透传，别给它们套上
+                // 一段跟它们无关的解释。
+                Err(e)
+                    if instance.remote.load(Ordering::SeqCst)
+                        && e.to_ascii_lowercase().contains("model not found") =>
+                {
+                    return Err(format!(
+                        "{e}（远程会话：模型由远端那台机器的 pi 提供，本机启用的供应商/模型\
+                         不会自动出现在远端。要在这里用它，请在远端 ~/.pi/agent/models.json \
+                         里注册同一个模型；否则请选远端已有的模型。）"
+                    ));
+                }
+                Err(_) => {}
+            }
+            result
         }
         _ => Err(format!("pi adapter does not implement {method}")),
     }
+}
+
+/// Rust 内部专用：拉一次 pi 的 `get_commands`（插件管理器补 prompt 模板元数据）。
+///
+/// 为什么不进上面的 pass-through 白名单：前端 `/` 菜单不再列扩展命令，渲染进程不
+/// 该再有任何途径枚举扩展在运行期注册了什么（名字、描述、路径都是扩展内部信
+/// 息）。需要这份数据的是 Rust 自己，那就只给 Rust 留一个入口。
+///
+/// 走主实例（session id 空串 = key ""），与以前前端调它时落点一致。
+pub async fn get_commands() -> Result<Value, String> {
+    let state = crate::state::app_state().ok_or("app state unavailable")?;
+    let instance = instance_for_session("", &state).await?;
+    instance
+        .request("get_commands", Value::Null, RPC_TIMEOUT)
+        .await
 }
 
 /// Frontend bridge: parent Agent toolCallId → extension agent id (and live
@@ -4059,7 +4141,7 @@ async fn instance_for_session(
     if session_id.is_empty() {
         // ready 现在会在「spare 就绪」时提前翻转，主实例的大握手
         // （冷启动天 31-35s）期间 UI 就会发 sessionless RPC（模型列表、
-        // get_commands）。得用 spawn_blocking 包住：spawn_instance 会同步等
+        // set_model）。得用 spawn_blocking 包住：spawn_instance 会同步等
         // 主实例的 spawn_lock 直到握手完成，直接在 async worker 上跑会占死
         // 一个 tokio worker，卡住其他 Tauri 命令。
         let state2 = Arc::clone(state);
@@ -5421,6 +5503,324 @@ async fn pi_context_report_parts(instance: &Arc<PiInstance>) -> Option<Vec<(Stri
         return None;
     }
     Some(parts)
+}
+
+// ── pi `/context` 分类的网关自算版 ─────────────────────────────────────────
+//
+// 为什么要有这份：`/context` 是 pi-cc-extensions 注册的命令。远程机器的 pi 上
+// 通常没装这个包，`pi_context_report_parts` 于是恒为 None，前端浮层只剩
+// 「正在获取上下文报告…」。而分类数据并不依赖扩展的任何私有状态 —— 扩展
+// 自己读的就是三样东西：
+//   ① 系统消息的 content + sections（记忆 / 技能从 sections 里切出来）
+//   ② 系统消息里 toolsAdded / toolsRemoved 重放出来的当前工具集
+//   ③ 活跃分支投影里的 user / assistant / toolResult / bashExecution 消息
+// 这三样 `get_messages` 一次就全给了（本地与远程同一条 RPC），所以在网关里按
+// 扩展同一套字符估算（chars/4）重算即可，远程项目不再缺这一栏。
+// 顺序：自算优先（快、本地远程一致），拿不到再退回问扩展要 `/context`。
+
+/// 分类来源：`(6 个 part, 实际取数路径)`。`computed_by` 只用于排查时区分
+/// 「网关自算」与「扩展 `/context`」两条路的数字。
+async fn pi_context_parts(
+    instance: &Arc<PiInstance>,
+) -> Option<(Vec<(String, i64)>, &'static str)> {
+    if let Some(parts) = pi_context_parts_from_messages(instance).await {
+        return Some((parts, "gateway"));
+    }
+    pi_context_report_parts(instance)
+        .await
+        .map(|parts| (parts, "extension"))
+}
+
+/// 拉活跃分支消息，按扩展的算法切成 6 个 part。返回 None = 拿不到消息或会话
+/// 里还没有系统消息（首轮 prompt 之前）。
+async fn pi_context_parts_from_messages(instance: &Arc<PiInstance>) -> Option<Vec<(String, i64)>> {
+    let messages = instance
+        .request("get_messages", Value::Null, RPC_TIMEOUT)
+        .await
+        .ok()?;
+    let list = messages.get("messages").and_then(Value::as_array)?;
+    context_parts_from_messages(list)
+}
+
+/// 图片块的固定估值：pi 按 4800 chars 计，折成 token 就是 1200。
+const IMAGE_TOKENS: i64 = 1200;
+
+/// 汉字（含扩展 A / 兼容区）。假名、全角标点不算 —— 它们在中英混排里占比小，
+/// 按 ASCII 口径（4 chars/token）近似就够。
+fn is_han(ch: char) -> bool {
+    matches!(ch as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
+}
+
+/// token 估算：**汉字 1 token/字**，其余 4 chars/token。
+///
+/// 不能照抄 pi 的 `estimateTokens`（一律 chars/4）：中文会话会被低估三到四成
+/// （实测同一会话 provider 135.6k vs chars/4 90.5k），分类之和于是永远对不上
+/// 顶部的实测数字。这里只决定各类的**比例** —— 总量最后按 provider 实测归一化
+/// （见 `normalize_context_rows`），常数偏一点只影响切分形状，不影响总数。
+fn text_tokens(text: &str) -> i64 {
+    let mut han = 0i64;
+    let mut other = 0i64;
+    for ch in text.chars() {
+        if is_han(ch) {
+            han += 1;
+        } else {
+            other += 1;
+        }
+    }
+    han + (other + 3) / 4
+}
+
+/// 紧凑 JSON 的 token 估算（等价 JS `JSON.stringify(x)` 再按上面口径折算）。
+fn json_tokens(value: &Value) -> i64 {
+    serde_json::to_string(value)
+        .map(|s| text_tokens(&s))
+        .unwrap_or(0)
+}
+
+/// 消息 content 的 token 数：字符串按正文；块数组里文本块按正文、图片块按
+/// pi 的固定估值；其它块不计。
+fn content_tokens(content: &Value) -> i64 {
+    match content {
+        Value::String(text) => text_tokens(text),
+        Value::Array(blocks) => blocks
+            .iter()
+            .map(|block| match block.get("type").and_then(Value::as_str) {
+                Some("text") => block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(text_tokens)
+                    .unwrap_or(0),
+                Some("image") => IMAGE_TOKENS,
+                _ => 0,
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn json_str_tokens(value: &Value, key: &str) -> i64 {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(text_tokens)
+        .unwrap_or(0)
+}
+
+/// 系统消息「正文 + sections」的 token 数。
+///
+/// 刻意不含 `toolsAdded`：工具 schema 是作为请求的 tools 参数单独发出去的，
+/// 由「工具定义」那一栏计一次，算进系统提示会重复。
+fn system_message_tokens(message: &Value) -> i64 {
+    let mut tokens = content_tokens(message.get("content").unwrap_or(&Value::Null));
+    if let Some(sections) = message.get("sections").and_then(Value::as_object) {
+        tokens += sections
+            .values()
+            .filter_map(Value::as_str)
+            .map(text_tokens)
+            .sum::<i64>();
+    }
+    tokens
+}
+
+/// 非系统消息的 token 数，逐角色对齐 pi 的 `estimateTokens` 的取数范围。
+fn message_tokens(message: &Value) -> i64 {
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match role {
+        // 思考块也算 —— 它在下一轮请求里要作为 reasoning 回放。
+        "assistant" => match message.get("content") {
+            Some(Value::Array(blocks)) => blocks
+                .iter()
+                .map(|block| match block.get("type").and_then(Value::as_str) {
+                    Some("text") => json_str_tokens(block, "text"),
+                    Some("thinking") => json_str_tokens(block, "thinking"),
+                    Some("toolCall") => {
+                        json_str_tokens(block, "name")
+                            + block.get("arguments").map(json_tokens).unwrap_or(0)
+                    }
+                    _ => 0,
+                })
+                .sum(),
+            _ => 0,
+        },
+        "bashExecution" => json_str_tokens(message, "command") + json_str_tokens(message, "output"),
+        "branchSummary" | "compactionSummary" => json_str_tokens(message, "summary"),
+        _ => content_tokens(message.get("content").unwrap_or(&Value::Null)),
+    }
+}
+
+/// prompt 组装会把 CRLF 归一成 LF，比对/计长前先对齐行尾。
+fn normalize_lf(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// 从 `project_context` section 里切出 `<project_instructions …>…</project_instructions>`
+/// 块 —— 这正是 pi 按 `contextFiles` 原样拼进 prompt 的那一段，所以按块计
+/// token 就等于扩展「Memory」那一栏（它也是拿同一段文本去 section 里比对）。
+fn project_instruction_blocks(section: &str) -> Vec<&str> {
+    const OPEN: &str = "<project_instructions";
+    const CLOSE: &str = "</project_instructions>";
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(open_at) = section[cursor..].find(OPEN).map(|i| cursor + i) {
+        let Some(close_rel) = section[open_at..].find(CLOSE) else {
+            break;
+        };
+        let end = open_at + close_rel + CLOSE.len();
+        blocks.push(&section[open_at..end]);
+        cursor = end;
+    }
+    blocks
+}
+
+/// `sections.skills` 里真正由技能列表贡献的 token 数。
+///
+/// 扩展用的是 `formatSkillsForPrompt(skills).trim()`（没有 `<skills>` 外壳），
+/// 而落盘 section 的外壳是 pi 包上去的 —— 剥掉再计，避免把外壳算进「技能」。
+fn skills_prompt_tokens(section: &str) -> i64 {
+    let mut text = section.trim();
+    if let Some(rest) = text.strip_prefix("<skills>") {
+        text = rest;
+    }
+    if let Some(rest) = text.strip_suffix("</skills>") {
+        text = rest;
+    }
+    text_tokens(&normalize_lf(text.trim()))
+}
+
+/// 系统消息里 `toolsAdded` 里的一条工具 → token 数。
+///
+/// 只取 `{name, description, parameters}` 三个字段（工具对象上别的字段如
+/// constrainedSampling 不参与请求，也不算）。
+fn tool_definition_tokens(tool: &Value) -> i64 {
+    let mut object = serde_json::Map::new();
+    for key in ["name", "description", "parameters"] {
+        if let Some(value) = tool.get(key) {
+            if !value.is_null() {
+                object.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    json_tokens(&Value::Object(object))
+}
+
+/// `toolsRemoved` 的一条引用（pi 发的是 `{name}` 或裸字符串）取名字。
+fn tool_ref_name(value: &Value) -> Option<String> {
+    match value {
+        Value::String(name) => Some(name.clone()),
+        _ => value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+/// 活跃分支消息 → 6 个 part（顺序与扩展 `collectContextBreakdown` 一致）。
+///
+/// 返回 None = 没有系统消息可用（首轮 prompt 之前 / 老版本没落 sections），
+/// 调用方据此退回问扩展要 `/context`。
+fn context_parts_from_messages(messages: &[Value]) -> Option<Vec<(String, i64)>> {
+    let mut tools: HashMap<String, Value> = HashMap::new();
+    let mut system_tokens = 0i64;
+    let mut memory_tokens = 0i64;
+    let mut skills_tokens = 0i64;
+    let mut tool_result_tokens = 0i64;
+    let mut context_tokens = 0i64;
+    let mut saw_system = false;
+
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if role == "system" {
+            saw_system = true;
+            system_tokens += system_message_tokens(message);
+            if let Some(sections) = message.get("sections").and_then(Value::as_object) {
+                // 记忆 / 技能是从系统提示里切出去的：不重复计，也不能漏计。
+                if let Some(section) = sections.get("project_context").and_then(Value::as_str) {
+                    let normalized = normalize_lf(section);
+                    for block in project_instruction_blocks(&normalized) {
+                        let tokens = text_tokens(block);
+                        memory_tokens += tokens;
+                        system_tokens -= tokens;
+                    }
+                }
+                if let Some(section) = sections.get("skills").and_then(Value::as_str) {
+                    let tokens = skills_prompt_tokens(section);
+                    skills_tokens += tokens;
+                    system_tokens -= tokens;
+                }
+            }
+            // 工具集按增量重放：首个系统消息给全量，之后只有增删。
+            if let Some(added) = message.get("toolsAdded").and_then(Value::as_array) {
+                for tool in added {
+                    if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                        tools.insert(name.to_string(), tool.clone());
+                    }
+                }
+            }
+            if let Some(removed) = message.get("toolsRemoved").and_then(Value::as_array) {
+                for reference in removed {
+                    if let Some(name) = tool_ref_name(reference) {
+                        tools.remove(&name);
+                    }
+                }
+            }
+            continue;
+        }
+        if role == "toolResult" {
+            tool_result_tokens += message_tokens(message);
+        } else {
+            context_tokens += message_tokens(message);
+        }
+    }
+
+    if !saw_system {
+        return None;
+    }
+    let tool_tokens: i64 = tools
+        .values()
+        .map(tool_definition_tokens)
+        .sum();
+    Some(vec![
+        ("System prompt".to_string(), system_tokens.max(0)),
+        ("Memory".to_string(), memory_tokens),
+        ("Skills".to_string(), skills_tokens),
+        ("Tools definition".to_string(), tool_tokens),
+        ("Tool results".to_string(), tool_result_tokens),
+        ("Context".to_string(), context_tokens),
+    ])
+}
+
+/// 把各类估算按比例归一到 provider 实测的已用量。
+///
+/// 分类只能估算（`text_tokens`），总量是 provider 报的真实值 —— 两者不可能
+/// 天然相等。差额留着就变成「各类加起来 ≠ 顶部数字」（之前那个「其他」行就是
+/// 这块差额，数字对不上看着像算错了）。缩放到实测值后：总和恒等于顶部，条形
+/// 正好填到已用量，类间比例保持估算器给出的形状。
+fn normalize_context_rows(rows: &mut [(&str, &str, i64, &str)], target: i64) {
+    if target <= 0 || rows.is_empty() {
+        return;
+    }
+    let estimated: i64 = rows.iter().map(|row| row.2).sum();
+    if estimated <= 0 {
+        return;
+    }
+    let scale = target as f64 / estimated as f64;
+    let last_index = rows.len() - 1;
+    let mut assigned = 0i64;
+    for (index, row) in rows.iter_mut().enumerate() {
+        if index == last_index {
+            // 尾差落到最后一项，保证总和精确等于 target。
+            row.2 = (target - assigned).max(0);
+        } else {
+            row.2 = (row.2 as f64 * scale).round() as i64;
+            assigned += row.2;
+        }
+    }
 }
 
 /// get_session_stats → Helix context-breakdown shape.
@@ -7476,12 +7876,6 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 }
             }
         }
-        // pi 的 in-run 自动压缩：`_runAutoCompaction` 夹在两次 assistant 调用
-        // 之间，本身就是一次完整的 LLM 摘要调用，期间主事件流零帧。这两帧必须
-        // 落到前端 —— 前端的空闲检测把「已出内容 + 事件流静默」当成终结帧丢失
-        // 并合成 done，而 done 会退订事件流，于是压缩完继续输出的那一轮没人接
-        //（「压缩上下文后要手动继续」根因）。同一窗口也让本侧的 `stream_wedged`
-        // 让路，否则大上下文在 300s 就被中止回合。
         "compaction_start" | "compaction_end" => {
             if event_type == "compaction_start" {
                 instance
@@ -8270,6 +8664,144 @@ mod tests {
         assert_eq!(parse_pi_context_line("Done: 3 files"), None);
         assert_eq!(parse_pi_context_line(": 5 tokens"), None);
         assert_eq!(parse_pi_context_line("System prompt: tokens"), None);
+    }
+
+    /// 网关自算的分类必须和 pi-cc-extensions 的切法一致：记忆 / 技能从系统提示
+    /// 里**切出去**（不重复计），工具定义只按 `{name, description, parameters}`
+    /// 三个字段序列化计数（工具对象上的其它字段不算）。
+    #[test]
+    fn context_parts_split_the_system_message_like_the_extension() {
+        let preamble = "P".repeat(400);
+        let block = format!(
+            "<project_instructions path=\"A.md\">\n{}\n</project_instructions>",
+            "M".repeat(340)
+        );
+        let project_context = format!("<project_context>\n{block}\n</project_context>");
+        let skills = format!("<skills>\n{}\n</skills>", "S".repeat(380));
+        let messages = vec![
+            json!({
+                "role": "system",
+                "content": "",
+                "sections": {
+                    "preamble": preamble,
+                    "project_context": project_context,
+                    "skills": skills,
+                },
+                "toolsAdded": [
+                    {
+                        "name": "read",
+                        "description": "read a file",
+                        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                        "constrainedSampling": true,
+                    },
+                    {"name": "bash", "description": "run", "parameters": {"type": "object"}},
+                ],
+                "toolsRemoved": [{"name": "bash"}],
+            }),
+            json!({"role": "user", "content": [{"type": "text", "text": "U".repeat(40)}]}),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "A".repeat(40)},
+                    {"type": "toolCall", "name": "read", "arguments": {"path": "x"}},
+                ],
+            }),
+            json!({"role": "toolResult", "content": [{"type": "text", "text": "T".repeat(400)}]}),
+        ];
+
+        let parts = context_parts_from_messages(&messages).expect("有系统消息就该出 6 类");
+        let labels: Vec<&str> = parts.iter().map(|p| p.0.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "System prompt",
+                "Memory",
+                "Skills",
+                "Tools definition",
+                "Tool results",
+                "Context",
+            ]
+        );
+
+        // 记忆 = 那个 project_instructions 块；技能 = 剥掉 <skills> 外壳后的正文。
+        let memory = text_tokens(&block);
+        let skills_tokens = text_tokens(&"S".repeat(380));
+        let system = text_tokens(&preamble) + text_tokens(&project_context) + text_tokens(&skills);
+        assert_eq!(parts[1].1, memory, "Memory 应等于 project_instructions 块");
+        assert_eq!(parts[2].1, skills_tokens, "Skills 不该把 <skills> 外壳算进去");
+        assert_eq!(
+            parts[0].1,
+            system - memory - skills_tokens,
+            "系统提示要扣掉已切走的两块"
+        );
+
+        // bash 被 toolsRemoved 移除，只剩 read；constrainedSampling 不参与计数。
+        let expected_tool = r#"{"name":"read","description":"read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}"#;
+        assert_eq!(parts[3].1, text_tokens(expected_tool));
+
+        // 工具结果单列；用户消息与助手正文（含 toolCall 的名字 + 参数）归「对话上下文」。
+        assert_eq!(parts[4].1, text_tokens(&"T".repeat(400)));
+        assert_eq!(
+            parts[5].1,
+            text_tokens(&"U".repeat(40))
+                + text_tokens(&"A".repeat(40))
+                + text_tokens("read")
+                + text_tokens(r#"{"path":"x"}"#)
+        );
+    }
+
+    /// 汉字按 1 token、其余 4 chars/token —— 中文会话照 chars/4 算会低估三到四成。
+    #[test]
+    fn text_tokens_weights_han_at_one_token() {
+        assert_eq!(text_tokens(""), 0);
+        assert_eq!(text_tokens("abcd"), 1);
+        assert_eq!(text_tokens("abcde"), 2);
+        assert_eq!(text_tokens("中文"), 2);
+        assert_eq!(text_tokens("中文中文"), 4);
+        // 1 个 ASCII（向上取整成 1）+ 1 个汉字。
+        assert_eq!(text_tokens("a中"), 2);
+    }
+
+    /// 没有系统消息（首轮 prompt 之前 / 老会话没落 sections）时不能编数据：
+    /// 返回 None 让调用方退回问扩展要 `/context`。
+    #[test]
+    fn context_parts_need_a_system_message() {
+        assert_eq!(context_parts_from_messages(&[]), None);
+        assert_eq!(
+            context_parts_from_messages(&[json!({"role": "user", "content": "hi"})]),
+            None
+        );
+    }
+
+    /// 归一化：各类之和恒等于 provider 实测总量，尾差落在最后一项。
+    #[test]
+    fn normalize_context_rows_hits_the_measured_total() {
+        let mut rows = vec![
+            ("systemPrompt", "系统提示", 50i64, "c1"),
+            ("memory", "记忆文件", 50, "c2"),
+            ("skills", "技能", 100, "c3"),
+        ];
+        normalize_context_rows(&mut rows, 400);
+        assert_eq!(rows.iter().map(|r| r.2).sum::<i64>(), 400);
+        assert_eq!(rows[0].2, 100);
+        assert_eq!(rows[1].2, 100);
+        assert_eq!(rows[2].2, 200);
+
+        // 实测值比估算小时等比例缩下去。
+        let mut small = vec![
+            ("systemPrompt", "系统提示", 50i64, "c1"),
+            ("memory", "记忆文件", 50, "c2"),
+            ("skills", "技能", 100, "c3"),
+        ];
+        normalize_context_rows(&mut small, 100);
+        assert_eq!(small.iter().map(|r| r.2).sum::<i64>(), 100);
+        assert_eq!(small[0].2, 25);
+        assert_eq!(small[2].2, 50);
+
+        // 没有实测值（target 0）时保持原估算，不把数字抹成 0。
+        let mut kept = vec![("systemPrompt", "系统提示", 50i64, "c1")];
+        normalize_context_rows(&mut kept, 0);
+        assert_eq!(kept[0].2, 50);
     }
 
     #[test]

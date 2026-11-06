@@ -158,7 +158,12 @@ export async function fetchRemoteStatus(): Promise<RemoteTunnelStatus | null> {
 export async function connectRemoteProject(
   svc: RemoteTarget,
   remotePath?: string,
-): Promise<{ localPort?: number }> {
+  mirrorProviders?: unknown,
+): Promise<{
+  localPort?: number;
+  mirror?: { written: string[]; skipped: string[]; remotePath: string } | null;
+  mirrorError?: string | null;
+}> {
   const api = window.electron?.helix;
   if (!api?.remoteConnect) throw new Error("远程连接 IPC 不可用");
   const r = await api.remoteConnect({
@@ -168,8 +173,13 @@ export async function connectRemoteProject(
     remote_path: remotePath?.trim() || "~",
     auth_type: svc.authType,
     secret: svc.secret,
+    mirrorProviders,
   });
-  return { localPort: r?.local_port };
+  return {
+    localPort: r?.local_port,
+    mirror: r?.mirror ?? null,
+    mirrorError: r?.mirrorError ?? null,
+  };
 }
 
 /** 断开：清 config 两个键 + 杀本机隧道 + 重启 gateway（同样会打断对话）。 */

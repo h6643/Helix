@@ -396,6 +396,24 @@ export function BrowserView({
   const appliedRef = useRef("");
   const [error, setError] = useState("");
   const contentRef = useRef<HTMLDivElement | null>(null);
+  // 拖宽时的补边画布（见几何同步里的 layoutShimmer）；平时 display:none。
+  const shimmerRef = useRef<HTMLCanvasElement | null>(null);
+  // 覆盖页（渠道中心等）打开时的页面替身：原生子窗口必须给 DOM 浮层让路，但不
+  // 能凭空消失 —— 用一张真像素快照铺在面板位置。浮层的半透遮罩会把它压暗，
+  // 效果就是普通应用「背景内容变暗冻结」的样子；窗口在浮层关闭后回来盖住它。
+  //
+  // **交接不能慢于让路，否则就是「点渠道中心、网页闪一下」**：隐藏窗口发生在
+  // 浮层挂载后的下一个 rAF，所以替身必须在那之前就已经「在 DOM 里且解码完成」。
+  // 因此这里不用 React 状态控制 <img>（挂载要渲染、data URL 要异步解码，两段都
+  // 追不上 IPC），而是常挂一张画布：预拍时就把 data URL 解码成 HTMLImageElement，
+  // 浮层打开那一刻在 MutationObserver 回调里同步 drawImage + display 块 —— 与浮层
+  // 同帧上屏，原生窗口随后（还要过 IPC）才隐藏，中间永远有一层像素在画。
+  const ghostCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 已解码的备用快照（浮层打开时直接画它，零等待）。
+  const ghostImgRef = useRef<HTMLImageElement | null>(null);
+  // 「已经为矩形 R 拍过预快照」——尺寸变了（拖宽后钉住的窗口比面板窄，替身
+  // 必须铺到最终宽度）才重拍，避免每次加载完成都白跑一趟 IPC。
+  const ghostRectRef = useRef<string | null>(null);
 
   const onUrlChangeRef = useRef(onUrlChange);
   onUrlChangeRef.current = onUrlChange;
@@ -514,6 +532,45 @@ export function BrowserView({
     let lastOccluded = false;
     let lastRect: DOMRect | null = null;
     let frame = 0;
+    // ── 拖宽 shimmer：拖拽开始时钉住面板左缘（= 网页可见区左缘），之后面板变宽
+    // 露出的左条落在钉住的子窗口之外，只能由 DOM 画。用拖拽开始时拍的那张真页面
+    // 快照把左缘几像素横向拉伸填进去（Chrome 窗口缩放同款），边缘就一直跟手；
+    // 快照还在路上/拍失败时露侧栏底色（不是白板）。松手后子窗口盖回整块面板，
+    // 画布被盖住也无所谓，下一轮直接隐藏。
+    let dragging = false;
+    let pinLeftCss = 0;
+    let snapImg: HTMLImageElement | null = null;
+    // 拖完补拍的延时器（同一时刻只挂一个：连续拖拽时后者作废前者）。
+    let recaptureTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const layoutShimmer = (r: DOMRect) => {
+      const cv = shimmerRef.current;
+      if (!cv) return;
+      const stripW = snapImg ? Math.max(0, pinLeftCss - r.left) : 0;
+      // 多画 3px 压到窗口接缝下：原生窗口永远在 DOM 之上，重叠部分被盖住，
+      // 接缝处就不会漏出亚像素的侧栏底色细线。
+      const w = stripW > 0.5 ? stripW + 3 : 0;
+      if (w <= 0) {
+        if (cv.style.display !== "none") cv.style.display = "none";
+        return;
+      }
+      const dpr = window.devicePixelRatio || 1;
+      const pw = Math.round(w * dpr);
+      const ph = Math.round(r.height * dpr);
+      if (cv.width !== pw || cv.height !== ph) {
+        cv.width = pw;
+        cv.height = ph;
+      }
+      cv.style.display = "";
+      cv.style.width = `${w}px`;
+      cv.style.height = `${r.height}px`;
+      const ctx = cv.getContext("2d");
+      if (!ctx || !snapImg) return;
+      // 取快照最左 6px 竖条横向拉伸：新露出的区域在网页布局的**左边**，连续的
+      // 内容就长在那条边上。
+      ctx.drawImage(snapImg, 0, 0, 6, snapImg.naturalHeight, 0, 0, pw, ph);
+    };
+
     // 遮挡候选（body 直属浮层）与「遮挡结论是否还新鲜」。两者都只在浮层增删或
     // 面板几何变化时重算，而不是每个 tick 重扫一遍 body。
     let occluders: HTMLElement[] | null = null;
@@ -530,7 +587,40 @@ export function BrowserView({
       const sized = r.width >= 1 && r.height >= 1;
 
       let occluded = false;
-      if (sized && !pickMode) {
+      // 拖分隔条期间：网页不能逐帧 resize（每帧都让真网页重排+重绘，大页面
+      // 跟不上，就是「白色网页比侧栏慢半拍」），也不能隐藏（用户要看见网页）。
+      // resizing 透传给后端：钉住矩形（重排仅此一次），逐帧只改裁剪区域
+      // （SetWindowRgn，窗口管理器级、与 DOM 同帧）；变宽露出的左条由下面的
+      // shimmer 画布补边。
+      const resizing = document.body.hasAttribute("data-helix-resizing");
+      if (resizing && !dragging) {
+        dragging = true;
+        pinLeftCss = r.left;
+        snapImg = null;
+        // CapturePreview 拍的是合成后的真像素，但它是异步的（发出即返回、结果走
+        // 事件）：拍好前 shimmer 保持隐藏，露的是同帧的侧栏底色，绝不会闪白板。
+        void capturePagePng(pageId)
+          .then((dataUrl) => {
+            const img = new Image();
+            img.onload = () => {
+              snapImg = img;
+              if (dragging && contentRef.current)
+                layoutShimmer(contentRef.current.getBoundingClientRect());
+            };
+            img.src = dataUrl;
+          })
+          .catch(() => {});
+      } else if (!resizing && dragging) {
+        dragging = false;
+        snapImg = null;
+        if (shimmerRef.current) shimmerRef.current.style.display = "none";
+        // 拖完补拍替身：旧快照宽度不对（钉住时的），铺到新面板上会拉伸。页面
+        // 刚收到最终 resize，等它重排完再拍 —— 300ms 经验值，拍早了也只是图旧。
+        clearTimeout(recaptureTimer);
+        recaptureTimer = setTimeout(() => prepareGhost(true), 300);
+      }
+      if (dragging) layoutShimmer(r);
+      if (sized && !pickMode && !resizing) {
         const moved =
           !lastRect ||
           Math.abs(lastRect.left - r.left) > 0.5 ||
@@ -549,10 +639,18 @@ export function BrowserView({
       lastRect = r;
       lastOccluded = occluded;
 
-      const visible = sized && !pickMode && !occluded;
+      const visible =
+        sized &&
+        !pickMode &&
+        !occluded &&
+        // 覆盖页（渠道中心/设置/定制…）打开 = 全屏盖住主区，网页必须让路。
+        // 它们不 portal 到 body，五点采样采不到（子窗口反而盖在它们上面），
+        // 所以靠 helix-layout 标的 data-helix-overlay 判定；下面的 MutationObserver
+        // 监听这个属性，开/关都会唤醒一次 push。
+        !document.body.hasAttribute("data-helix-overlay");
       const key = `${Math.round(r.left)}|${Math.round(r.top)}|${Math.round(
         r.width,
-      )}|${Math.round(r.height)}|${visible ? 1 : 0}|${dpr}`;
+      )}|${Math.round(r.height)}|${visible ? 1 : 0}|${resizing ? 1 : 0}|${dpr}`;
       if (key === lastKey) return;
       lastKey = key;
       void call("browser_webview_set_rect", {
@@ -562,6 +660,7 @@ export function BrowserView({
         h: r.height,
         dpr,
         visible,
+        resizing,
       }).catch((e: unknown) => {
         // 窗口此刻还不存在（open 的 IPC 还在路上）或已被关掉：不要把这次意图当成
         // 已经落地，否则脏检查键会永远停在「已同步」，子窗口留在屏幕外不显示。
@@ -585,11 +684,19 @@ export function BrowserView({
       occlusionDirty = true;
       schedule();
     };
+    // data-helix-resizing：拖分隔条的起/停都靠它唤醒一次 push（开始 → 隐藏子窗口，
+    // 结束 → 按最终矩形重新对齐显示）。
     const mo = new MutationObserver(invalidate);
     mo.observe(document.body, {
       childList: true,
       attributes: true,
-      attributeFilter: ["class", "style", "hidden"],
+      attributeFilter: [
+        "class",
+        "style",
+        "hidden",
+        "data-helix-resizing",
+        "data-helix-overlay",
+      ],
       subtree: false,
     });
 
@@ -608,6 +715,7 @@ export function BrowserView({
 
     return () => {
       if (frame) cancelAnimationFrame(frame);
+      clearTimeout(recaptureTimer);
       mo.disconnect();
       ro.disconnect();
       window.removeEventListener("resize", onWindowChange);
@@ -622,6 +730,133 @@ export function BrowserView({
       if (native) void call("browser_webview_close").catch(() => {});
     };
   }, [native, call]);
+
+  // 预拍替身快照：页面**加载完成**且本页正显示时拍一张存进 ref。加载途中拍
+  // 到的会是半白页，所以跟 busy 走；导航一开始就丢弃旧图（URL 都换了，替身
+  // 再像也不能拿上一页冒充）。矩形变化（面板被拖过）也算「需要重拍」。
+  const pageBusy = useHelixStore((s) => s.browserLoadingPageId === pageId);
+  useEffect(() => {
+    // 新导航（含刷新）：旧的冻结帧作废，替身画布也擦干净（URL 都换了，替身
+    // 再像也不能拿上一页冒充；浮层开着时碰到导航是罕见路径，露底色可接受）。
+    ghostImgRef.current = null;
+    ghostRectRef.current = null;
+    const cv = ghostCanvasRef.current;
+    if (cv) {
+      cv.style.display = "none";
+      const ctx = cv.getContext("2d");
+      ctx?.clearRect(0, 0, cv.width, cv.height);
+    }
+  }, [loaded]);
+
+  // 预拍 + 预解码：页面**加载完成**且本页正显示时拍一张，并把它解码成
+  // HTMLImageElement 存好。加载途中拍到的会是半白页，所以跟 busy 走；矩形变化
+  // （面板被拖过）也算「需要重拍」：旧图宽度不对，铺出来会拉伸。
+  const prepareGhost = useCallback(
+    (force: boolean) => {
+      if (!native || !active || pickMode || pageBusy) return;
+      if (!loadedRef.current) return;
+      const node = contentRef.current;
+      if (!node) return;
+      const r = node.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return;
+      const rectKey = `${Math.round(r.left)}|${Math.round(r.width)}|${Math.round(
+        r.height,
+      )}`;
+      if (!force && ghostRectRef.current === rectKey && ghostImgRef.current)
+        return;
+      ghostRectRef.current = rectKey;
+      void capturePagePng(pageId)
+        .then((u) => {
+          const img = new Image();
+          // 解码完成才算备好：浮层打开时 drawImage 不会再触发同步解码卡顿。
+          img.onload = () => {
+            if (ghostRectRef.current !== rectKey) return;
+            ghostImgRef.current = img;
+            // 浮层已经开着（预拍晚于浮层打开）→ 补画一次。
+            paintGhost();
+          };
+          img.src = u;
+        })
+        .catch(() => {
+          if (ghostRectRef.current === rectKey) ghostRectRef.current = null;
+        });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [native, active, pickMode, pageBusy, pageId],
+  );
+
+  // 把已解码的备用快照画进替身画布并显示。幂等：反复调用只会重画同一片像素，
+  // 窗口盖在上面时看不见，无副作用。
+  const paintGhost = () => {
+    const cv = ghostCanvasRef.current;
+    const img = ghostImgRef.current;
+    const node = contentRef.current;
+    if (!cv || !img || !node) return;
+    const r = node.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return;
+    const dpr = window.devicePixelRatio || 1;
+    const pw = Math.round(r.width * dpr);
+    const ph = Math.round(r.height * dpr);
+    if (cv.width !== pw || cv.height !== ph) {
+      cv.width = pw;
+      cv.height = ph;
+    }
+    cv.style.width = `${r.width}px`;
+    cv.style.height = `${r.height}px`;
+    cv.style.display = "";
+    cv.getContext("2d")?.drawImage(img, 0, 0, pw, ph);
+  };
+
+  useEffect(() => {
+    prepareGhost(false);
+  }, [prepareGhost, loaded, pageBusy]);
+
+  // 覆盖页开关 → 替身上桌。**这里只画不拍**：图在浮层打开前就备好了（见上面
+  // 的预拍），MutationObserver 回调和浮层挂载在同一帧里同步画好，原生窗口要等
+  // 下一个 rAF + IPC 才隐藏 —— 像素层先就位、后交接，所以不闪。
+  useEffect(() => {
+    if (!native) return;
+    let alive = true;
+    const sync = () => {
+      if (!document.body.hasAttribute("data-helix-overlay")) {
+        // 浮层关闭：窗口几毫秒后回来盖住画布，不需要（也不应该）在这里藏它
+        // ——提前藏就是「窗口还没回来、先露底色」的反向闪。
+        return;
+      }
+      if (!active || pickMode) return;
+      if (ghostImgRef.current) {
+        paintGhost();
+        return;
+      }
+      // 没备图（刚开页就点浮层、或上一次拍失败）：现拍现补，补到前露的是
+      // 同帧的侧栏底色 —— 这条罕见路径只多不差。
+      ghostRectRef.current = null;
+      void capturePagePng(pageId)
+        .then((u) => {
+          if (!alive) return;
+          const img = new Image();
+          img.onload = () => {
+            if (!alive) return;
+            ghostImgRef.current = img;
+            if (document.body.hasAttribute("data-helix-overlay")) paintGhost();
+          };
+          img.src = u;
+        })
+        .catch(() => {});
+    };
+    sync();
+    const mo = new MutationObserver(sync);
+    mo.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["data-helix-overlay"],
+      subtree: false,
+    });
+    return () => {
+      alive = false;
+      mo.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [native, active, pickMode, pageId]);
 
   // 子窗口的导航事件 → 地址栏跟随。外部页面拿不到 Tauri IPC（capabilities 只信任
   // 应用 origin），不能自己上报，所以后端的 on_page_load 是唯一 URL 来源。
@@ -705,6 +940,22 @@ export function BrowserView({
           （全局背景图激活时它是 88% 蒙罩）。以前涂 bg-card 会在那块玻璃上贴出一
           块实色，子窗口一让位就看见「网页区比上面几条工具条更白」。 */}
       <div ref={contentRef} className="flex-1 min-h-0 relative">
+        {/* 覆盖页打开中：真窗口已让路，这里铺它的冻结替身（见 ghostCanvasRef
+            注释）。常挂 + display:none 起步：预拍解码好的图在浮层挂载同一帧画
+            上去，不需要等 React 渲染 —— 这就是「不闪」的前提。 */}
+        <canvas
+          ref={ghostCanvasRef}
+          className="absolute inset-0 pointer-events-none select-none"
+          style={{ display: "none" }}
+        />
+        {/* 拖宽补边条：钉住的子窗口盖在 pinLeft 右边，这里只负责它左边新露出的
+            那条；原生窗口永远浮在 DOM 之上，所以它只在窗口外可见，不需要和
+            窗口对齐——多出的 3px 自然被窗口盖住。 */}
+        <canvas
+          ref={shimmerRef}
+          className="absolute left-0 top-0 pointer-events-none"
+          style={{ display: "none" }}
+        />
         {pickMode ? (
           <iframe
             srcDoc={pickSrcDoc ?? undefined}

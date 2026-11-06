@@ -340,6 +340,7 @@ pub fn remote_connect(
     remote_path: String,
     auth_type: Option<String>,
     secret: Option<String>,
+    mirror_providers: Option<Value>,
 ) -> Result<Value, String> {
     let port = if port == 0 { 212 } else { port };
     let remote_path = if remote_path.trim().is_empty() {
@@ -368,6 +369,30 @@ pub fn remote_connect(
     push_and_start_remote_bridge(&host, port, &username, &auth)?;
     // Step 3：本机隧道。
     open_tunnel(&host, port, &username, local_port, &auth)?;
+    // Step 3.5：把本机 provider 镜像进远端 models.json。
+    //
+    // 必须早于 write_remote_config：那一步会重启 gateway，之后新建的远端实例
+    // 才会快照到新的 models.json；晚写等于这一轮连接看不到镜像结果。
+    //
+    // 失败只降级成 mirrorError，绝不让连接失败：隧道和 bridge 已经起好了，
+    // 镜像挂了只是「远端还没有本机的供应商」。
+    let providers = mirror_providers
+        .as_ref()
+        .and_then(parse_mirror_providers)
+        .unwrap_or_default();
+    let (mirror, mirror_error) = if providers.is_empty() {
+        (Value::Null, None)
+    } else {
+        match crate::remote_mirror::mirror_providers_to_remote(
+            &host, port, &username, &auth, &providers,
+        ) {
+            Ok(r) => (
+                json!({ "written": r.written, "skipped": r.skipped, "remotePath": r.remote_path }),
+                None,
+            ),
+            Err(e) => (Value::Null, Some(e)),
+        }
+    };
     // 记住「上次连的是哪台」（不含凭证）：Helix 重启后隧道子进程不会自愈，
     // 前端靠这份记录 + 自己存的凭证自动重连（见 use-remote-tunnel-reconcile），
     // 远程对话的 resume 也要求隧道活着（见 pi_gateway 的远程 restore 分支）。
@@ -385,8 +410,10 @@ pub fn remote_connect(
         "remote_port": port,
         "username": username,
         "remote_path": remote_path,
-    }))}
-
+        "mirror": mirror,
+        "mirrorError": mirror_error,
+    }))
+}
 /// 断开：清两个 config 键 + 杀本机隧道 + 重启 gateway。
 #[tauri::command]
 pub fn remote_disconnect(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
@@ -616,4 +643,26 @@ pub fn remote_tunnel_status() -> Value {
         }),
         None => json!({ "connected": false }),
     }
+}
+
+/// 前端送来的镜像清单 → MirrorProvider。
+///
+/// 只做形状收窄，不做业务判断：空数组、缺字段、类型不对一律当「这项没给」，
+/// 绝不上抛 —— 镜像失败不该把一次成功的远程连接变成失败。
+fn parse_mirror_providers(raw: &Value) -> Option<Vec<crate::remote_mirror::MirrorProvider>> {
+    let arr = raw.as_array()?;
+    let out: Vec<crate::remote_mirror::MirrorProvider> = arr
+        .iter()
+        .filter_map(|p| {
+            let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("");
+            Some(crate::remote_mirror::MirrorProvider {
+                name: s("name").to_string(),
+                base_url: s("baseUrl").to_string(),
+                api: s("api").to_string(),
+                api_key: s("apiKey").to_string(),
+                models: p.get("models").cloned().unwrap_or_else(|| json!([])),
+            })
+        })
+        .collect();
+    (!out.is_empty()).then_some(out)
 }

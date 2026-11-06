@@ -17,14 +17,14 @@ interface ContextBreakdown {
   color: string;
 }
 
-/** pi `/context` 口径的面板 —— 后端没有该扩展时浮层显示「正在获取」占位。 */
+/** pi `/context` 口径的面板 —— 后端算不出分类时浮层显示「正在获取」占位。 */
 
 /**
- * pi 自己的 `/context`（pi-cc-extensions）报告 —— 网关 `session/context_report`
- * 就是去问 pi 要的这份，与 pi CLI 里 `/context` 弹框完全同一份数。
- * 后端返回 7 类：系统提示 / 记忆文件 / 技能 / 工具定义 / 工具结果 / 对话上下文 / 剩余空间。
- * 前端展示 6 类本体（过滤掉 id = "free" 的剩余空间）：余量不是占用，
- * 用窗口右侧自然余下那部分表达就够，单列一行（占窗口 85% 那类）容易误读。
+ * pi `/context` 口径的分类报告 —— 网关 `session/context_report` 按 pi 扩展
+ * （pi-cc-extensions）的同一套算法自算，与 pi CLI 里 `/context` 弹框同一份数。
+ * 后端返回 6 类本体：系统提示 / 记忆文件 / 技能 / 工具定义 / 工具结果 / 对话上下文。
+ * 各值已归一到 provider 实测的已用量（之和恒等于顶部数字），所以没有「其他」
+ * 或「剩余空间」这类非占用项需要占一行。
  * 0 项保留："本轮完全没用到某类"与"后端没报该类"需要区分，不能合并成看不见。
  */
 interface ContextReportData {
@@ -103,7 +103,7 @@ function ContextUsageBar({
 
 /**
  * 详表浮层 —— 只有 pi `/context` 一个口径。`report` 未到达（刚打开且无缓存、
- * 或后端扩展不可用）时显示占位，不再回落旧分桶快照（"回复/思考/工具结果"
+ * 或后端还算不出分类）时显示占位，不再回落旧分桶快照（"回复/思考/工具结果"
  * 那套口径与 pi 报告互相换脸的问题已连根删除）。
  */
 function ContextUsagePanel({
@@ -119,10 +119,10 @@ function ContextUsagePanel({
 }) {
   const cacheHit = promptCacheHit(cache);
   // 报告已是校验后的 pi 数据（fetch 侧只缓存 source="pi-context" 且分类非空的）。
-  // 「剩余空间」（id = "free"）不展示：它不是占用项，而是右端自然余下的窗口。
-  // pi 的 6 类本体（系统/记忆/技能/工具定义/工具结果/对话）即使是 0 也保留——
-  // "本轮完全没用到某类"与"后端没报该类"需要区分，而不是合并成看不见。
-  const piParts = (report?.categories ?? []).filter((c) => c.id !== "free");
+  // 后端只给 6 类本体，且已归一到 provider 实测的已用量 —— 各类之和 = 顶部
+  // 数字 = 条形填色，列表与条形因此共用同一份数据，不需要任何过滤。
+  // 0 项保留："本轮完全没用到某类"与"后端没报该类"需要区分，而不是合并成看不见。
+  const piParts = report?.categories ?? [];
   const reportMax = report?.context_max || 0;
   const ready = !!report && piParts.length > 0 && reportMax > 0;
 
@@ -234,9 +234,9 @@ export function ContextUsageIndicator({ sessionId }: { sessionId?: string | null
   };
 
   // ── pi `/context` 报告 ────────────────────────────────────────────────
-  // 分类口径与 pi CLI 的 `/context` 完全对齐：网关去问 pi 要那份分布
+  // 分类口径与 pi CLI 的 `/context` 完全对齐：网关按同一套算法自算那份分布
   // （系统提示 / 记忆 / 技能 / 工具定义 / 工具结果 / 对话上下文 + 其他 + 剩余）。
-  // 后端没有该扩展 / 拿不到时清空，浮层显示「正在获取」占位（不再回落旧分桶）。
+  // 算不出（首轮之前 / 取不到消息）时清空，浮层显示「正在获取」占位（不回落旧分桶）。
   // 只认本对话映射到的 sid，绝不兜底全局 helixSessionId（跨会话污染）。
   const fetchContextReport = useCallback(async () => {
     try {

@@ -242,10 +242,14 @@ export function VisionModelSettings() {
                   : "border-destructive/40 bg-destructive/5 text-destructive"
               }`}
             >
-              <span className="font-medium">
-                {testResult.ok ? "连接正常 · " : "测试失败 · "}
+              <span className="font-medium block">
+                {testResult.ok ? "连接正常" : "测试失败"}
               </span>
-              {testResult.text}
+              {testResult.text && (
+                <span className="block mt-1 opacity-90 leading-relaxed">
+                  {testResult.text}
+                </span>
+              )}
             </div>
           )}
 

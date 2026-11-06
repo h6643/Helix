@@ -38,6 +38,7 @@ pub mod pi_gateway_test_hooks {
 mod profile;
 mod proxy;
 mod remote_connect;
+mod remote_mirror;
 mod scheduled_tasks;
 mod security;
 mod skills;
@@ -456,7 +457,6 @@ pub fn run() {
             helix::pi_list_installed,
             helix::pi_set_package_enabled,
             helix::pi_get_available_models,
-            helix::pi_list_commands,
             helix::pi_read_custom_providers,
             helix::pi_set_thinking_level_all,
             helix::pi_set_auto_compaction_all,

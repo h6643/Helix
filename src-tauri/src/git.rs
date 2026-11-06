@@ -1,5 +1,9 @@
 //! `git:*` commands — execFile with arg arrays (no shell) to prevent command
 //! injection. Port of `electron/ipc/git.js`.
+//!
+//! 全部命令都必须 `(async)`：它们是阻塞子进程调用（git add/commit/push……），
+//! 落在主线程会把整个窗口卡到大仓库命令跑完/30s 超时为止 —— 点一次「提交」
+//! 窗口冻结几十秒就是它。规矩同 ssh.rs / window.rs。
 
 use crate::state::AppState;
 use serde::Serialize;
@@ -75,7 +79,7 @@ fn git_exec<S: AsRef<str>>(
     Ok((stdout, stderr))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn status(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
     match git_exec(
         &state,
@@ -87,7 +91,7 @@ pub fn status(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Va
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn diff(
     state: State<'_, Arc<AppState>>,
     file_path: Option<String>,
@@ -108,7 +112,7 @@ pub fn diff(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn diff_head(
     state: State<'_, Arc<AppState>>,
     file_path: Option<String>,
@@ -137,7 +141,7 @@ pub fn diff_head(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn revert(
     state: State<'_, Arc<AppState>>,
     file_path: Option<String>,
@@ -163,7 +167,7 @@ pub fn revert(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stage(
     state: State<'_, Arc<AppState>>,
     file_path: Option<String>,
@@ -176,7 +180,7 @@ pub fn stage(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unstage(
     state: State<'_, Arc<AppState>>,
     file_path: Option<String>,
@@ -193,7 +197,7 @@ pub fn unstage(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn commit(
     state: State<'_, Arc<AppState>>,
     message: Option<String>,
@@ -211,7 +215,7 @@ pub fn commit(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn diff_numstat(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
     match git_exec(&state, &["diff", "--numstat"], target_cwd.as_deref()) {
         Ok((stdout, _)) => json!({ "ok": true, "output": stdout.trim() }),
@@ -419,7 +423,7 @@ fn classify_git_failure(
 /// 2. 覆盖未跟踪文件 —— `write` 新建的文件 `git diff` 永远看不到，
 ///    这是「右边不显示 +n」的主因；
 /// 3. 直接返回结构化列表与总计，前端不用再解析一遍 numstat 文本。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn diff_numstat_full(
     state: State<'_, Arc<AppState>>,
     target_cwd: Option<String>,
@@ -498,7 +502,7 @@ pub fn diff_numstat_full(
 }
 
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn branch_list(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
     match git_exec(
         &state,
@@ -517,7 +521,7 @@ pub fn branch_list(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) 
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn branch_switch(
     state: State<'_, Arc<AppState>>,
     branch: String,
@@ -529,7 +533,7 @@ pub fn branch_switch(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn branch_create(
     state: State<'_, Arc<AppState>>,
     branch: String,
@@ -545,7 +549,7 @@ pub fn branch_create(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn current_branch(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
     match git_exec(
         &state,
@@ -560,7 +564,7 @@ pub fn current_branch(state: State<'_, Arc<AppState>>, target_cwd: Option<String
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn log(
     state: State<'_, Arc<AppState>>,
     count: Option<u32>,
@@ -579,7 +583,7 @@ pub fn log(
 
 // ── worktree ───────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn worktree_list(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
     match git_exec(
         &state,
@@ -640,7 +644,7 @@ pub fn worktree_list(state: State<'_, Arc<AppState>>, target_cwd: Option<String>
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn worktree_add(state: State<'_, Arc<AppState>>, opts: Value) -> Value {
     let wt_path = opts
         .get("path")
@@ -683,7 +687,7 @@ pub fn worktree_add(state: State<'_, Arc<AppState>>, opts: Value) -> Value {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn worktree_remove(
     state: State<'_, Arc<AppState>>,
     wt_path: String,
@@ -699,7 +703,7 @@ pub fn worktree_remove(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn worktree_lock(
     state: State<'_, Arc<AppState>>,
     wt_path: String,
@@ -715,7 +719,7 @@ pub fn worktree_lock(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn worktree_unlock(
     state: State<'_, Arc<AppState>>,
     wt_path: String,
@@ -731,7 +735,7 @@ pub fn worktree_unlock(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn worktree_prune(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
     match git_exec(&state, &["worktree", "prune"], target_cwd.as_deref()) {
         Ok(_) => json!({ "ok": true }),
@@ -741,7 +745,7 @@ pub fn worktree_prune(state: State<'_, Arc<AppState>>, target_cwd: Option<String
 
 // ── remote ops ──────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn push(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
     let opts = opts.unwrap_or_default();
     let target_cwd = opts
@@ -765,7 +769,7 @@ pub fn push(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pull(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
     let opts = opts.unwrap_or_default();
     let target_cwd = opts
@@ -786,7 +790,7 @@ pub fn pull(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fetch(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {
     let opts = opts.unwrap_or_default();
     let target_cwd = opts

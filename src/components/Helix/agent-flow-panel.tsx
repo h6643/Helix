@@ -3,7 +3,6 @@
 import {
   Circle,
   FileText,
-  Terminal,
   ShieldCheck,
   ShieldQuestion,
   Zap,
@@ -75,7 +74,6 @@ import {
   mergeAdjacentThinking,
   segmentizeProcessBlocks,
   mergeToolRuns,
-  buildProcessSegments,
   normalizeTextBlocks,
   thinkingSegmentDurationS,
   mergeThinkingContents,
@@ -114,6 +112,13 @@ import { PERM_APPROVE_SESSION_ANSWER } from "@/lib/permission-allow";
 import type { PersistedChatMessage, PersistedSession } from "@/lib/persist";
 import { loadPlanSteps } from "@/lib/plan-parse";
 import { isDegenerateReasoning } from "@/lib/reasoning-health";
+import {
+  REMOTE_GROUP_PREFIX,
+  cachedRemoteSnapshot,
+  loadRemoteModelSnapshot,
+  remoteGroupsForDropdown,
+  type RemoteModelSnapshot,
+} from "@/lib/remote-models";
 import {
   findServiceByRemoteWorkDir,
   isRemoteWorkDir,
@@ -2748,6 +2753,67 @@ function AgentFlowPanelImpl() {
   // 选中后按会话经 set_model 透传给 pi（见 handleModelSelect 的渠道分支）。
   const piChannelProviders = useHelixStore((s) => s.piChannelProviders);
 
+  // ── 远程会话的模型清单 ────────────────────────────────────────────────
+  // 远程会话的 agent 跑在另一台机器的 pi 上，它只认自己那台机器的
+  // `~/.pi/agent/{models.json,settings.json}`。下拉若还列本机供应商的模型，选中
+  // 后 set_model 在远端必然 Model not found（以前只在 console 里报，界面照样
+  // 显示"已覆盖"），表现就是「远程项目里选模型没用，用的还是远程里 pi 的配置」。
+  // 所以远程对话的下拉数据源换成**该实例自己的** get_available_models（带 sid
+  // 走 routed_instance）。
+  const remoteMachineKey = conversationIsRemote
+    ? (parseRemoteWorkDir(projectWorkDir)?.targetKey ?? null)
+    : null;
+  const conversationSessionId = useHelixStore((s) => s.currentSessionId);
+  const remoteTunnelUp = useHelixStore((s) => !!s.remoteMode);
+  const [remoteSnapshot, setRemoteSnapshot] =
+    useState<RemoteModelSnapshot | null>(null);
+  const [remoteSnapshotError, setRemoteSnapshotError] = useState<string | null>(
+    null,
+  );
+  // 远程草稿（还没有 sid）拿不到实例：先用同一台机器上次读到的快照兜住。
+  const effectiveRemoteSnapshot =
+    remoteSnapshot ?? cachedRemoteSnapshot(remoteMachineKey);
+  useEffect(() => {
+    if (!remoteMachineKey) {
+      setRemoteSnapshot(null);
+      setRemoteSnapshotError(null);
+      return;
+    }
+    setRemoteSnapshot(cachedRemoteSnapshot(remoteMachineKey));
+    // 这里**不等 remoteTunnelUp**：它是全局隧道状态（use-remote-tunnel-reconcile
+    // 异步回灌），首帧必然是 null —— 拿它当闸门就等于「刚进远程对话时下拉永远
+    // 空」，而且会话自己的隧道可能在别的窗口里已经起好了。清单是一次只读 RPC，
+    // 隧道真不通时 get_available_models 自己会报错，落到 remoteSnapshotError，
+    // 不需要在这里预判。
+    let cancelled = false;
+    // 走硬门槛：冷启动时 sessionMapRef 可能还没水合，直接读会拿到 undefined →
+    // 永远不拉远端清单（下拉空成一个也选不了）。
+    void (async () => {
+      const map = await awaitSessionMap(sessionMapRef);
+      const sid =
+        (currentSessionId ? (map.get(currentSessionId)?.sid ?? null) : null) ??
+        map.get(DRAFT_SESSION_KEY)?.sid ??
+        null;
+      // no-sid 也要往下走：loadRemoteModelSnapshot 会借活实例去问
+      const r = await loadRemoteModelSnapshot(sid, remoteMachineKey);
+      if (cancelled) return;
+      if (r.ok) {
+        setRemoteSnapshot(r.snapshot);
+        setRemoteSnapshotError(null);
+      } else {
+        setRemoteSnapshotError(r.error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    remoteMachineKey,
+    remoteTunnelUp,
+    currentSessionId,
+    conversationSessionId,
+  ]);
+
   // Resolve the provider that owns the current backend endpoint.
   // Primary key: activeProviderId when it still matches the current baseUrl.
   // This prevents the input-bar model list from switching to a different
@@ -2859,6 +2925,44 @@ function AgentFlowPanelImpl() {
        *  倍率是 pi 扩展拼在 name 里的，id 只做路由。 */
       labels?: Record<string, string>;
     }[] = [];
+    // 远程会话：只列**远端那个 pi 实例**自己的模型。列本机供应商的名字是
+    // 纯粹的陷阱——set_model 按 session_id 路由到远端，远端只认自己机器上的
+    // models.json，选中必然 Model not found（以前静默失败）。
+    if (remoteMachineKey) {
+      // remoteGroupsForDropdown：活快照之外补上「镜像过、但活实例还没快照到」
+      // 的分组 —— 镜像只写远端 models.json，正在跑的实例看不到新 provider，
+      // 不过渡层的话「同步本机模型到远端」写完文件下拉纹丝不动，按钮白点。
+      for (const g of remoteGroupsForDropdown(
+        remoteMachineKey,
+        effectiveRemoteSnapshot,
+      )) {
+        if (g.models.length > 0) {
+          groups.push({
+            id: g.id,
+            name: g.name,
+            baseUrl: "",
+            models: g.models,
+            labels: g.labels,
+          });
+        }
+      }
+      // 本会话已选、但远端清单里暂时没有（远端刚重建实例、快照还没拉到）：
+      // 把当前值补回它自己的分组，否则芯片有值、下拉里无处高亮。
+      const cur = sessionModel;
+      if (cur && !groups.some((g) => g.models.includes(cur))) {
+        const gid = sessionModelOverride?.groupId ?? REMOTE_GROUP_PREFIX;
+        const existing = groups.find((g) => g.id === gid);
+        if (existing) existing.models.push(cur);
+        else
+          groups.push({
+            id: gid,
+            name: sessionModelOverride?.provider || "远端",
+            baseUrl: "",
+            models: [cur],
+          });
+      }
+      return groups;
+    }
     for (const p of providers) {
       const models = new Set<string>();
       (p.models || []).forEach((m) => {
@@ -2898,7 +3002,16 @@ function AgentFlowPanelImpl() {
       }
     }
     return groups;
-  }, [providers, apiConfig, activeProvider, piChannelProviders]);
+  }, [
+    providers,
+    apiConfig,
+    activeProvider,
+    piChannelProviders,
+    remoteMachineKey,
+    effectiveRemoteSnapshot,
+    sessionModel,
+    sessionModelOverride,
+  ]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -3015,6 +3128,10 @@ function AgentFlowPanelImpl() {
     .map((g) => g.models.join("|"))
     .join("~");
   useEffect(() => {
+    // 远程会话的下拉不来自本机 providers：这里的"当前模型不在这份清单里"是**正常
+    // 常态**（远端模型本机本来就没有），绝不能因此去改全局默认模型——那会在用户
+    // 看着一台服务器的时候静默把本机默认模型改掉。
+    if (remoteMachineKey) return;
     const allModels = groupedModelList.flatMap((g) => g.models);
     if (allModels.length === 0) return;
     const store = useHelixStore.getState();
@@ -3030,6 +3147,7 @@ function AgentFlowPanelImpl() {
     apiConfig.model,
     groupedModelList,
     groupedModelFingerprint,
+    remoteMachineKey,
   ]);
   // Handle model selection within the ACTIVE provider. The provider itself is
   // switched only on the settings page; the input bar lists just the active
@@ -3037,16 +3155,51 @@ function AgentFlowPanelImpl() {
   const handleModelSelect = useCallback(
     async (model: string, ownerProviderId?: string) => {
       const st0 = useHelixStore.getState();
+      // 远程分组（group id "remote:<providerId>"）：模型由**远端 pi 实例**提供，
+      // 本机既没有它的 baseUrl 也没有凭据。只写本会话覆盖值（provider 用远端
+      // 注册的原始 id），不碰全局 apiConfig、不写 models.json —— 写了本机也
+      // 传到不了远端。
+      if (ownerProviderId?.startsWith(REMOTE_GROUP_PREFIX)) {
+        const remoteProvider = ownerProviderId.slice(
+          REMOTE_GROUP_PREFIX.length,
+        );
+        const cid = st0.currentSessionId ?? DRAFT_SESSION_KEY;
+        st0.setModelForSession(cid, {
+          provider: remoteProvider,
+          model,
+          groupId: ownerProviderId,
+        });
+        // 按机器记住，不写全局 lastSelectedModel：本机新对话不能默认成远端模型
+        // （本机 pi 里没有它）。下次打开这台服务器的新对话才有默认值。
+        if (remoteMachineKey) {
+          st0.rememberRemoteModel(
+            remoteMachineKey,
+            remoteProvider,
+            model,
+            ownerProviderId,
+          );
+        }
+        st0.showToast({ type: "success", title: `本会话已覆盖为 ${model}` });
+        setShowModelDropdown(false);
+        return;
+      }
       // 渠道分组（group id "pi:<providerId>"）：模型由 pi-connect 扩展在 pi 实例
       // 里注册，凭据 / baseUrl / 协议全在扩展内。这里只把选择写进本会话的覆盖值，
       // provider 用 pi 注册的原始 id —— handleRun 每轮 set_model 按
       // {provider, modelId} 在 pi 快照里精确匹配。不碰全局 apiConfig，也不能走
       // 下面的 registerProviderModels（渠道 provider 没有真实 baseUrl）。
       if (ownerProviderId?.startsWith("pi:")) {
+        const chProvider = ownerProviderId.slice("pi:".length);
         st0.setModelForSession(st0.currentSessionId ?? DRAFT_SESSION_KEY, {
-          provider: ownerProviderId.slice("pi:".length),
+          provider: chProvider,
           model,
+          // groupId 用下拉二级卡片的归属分组 id（"pi:<id>"），与渲染时 g.id 对齐，
+          // 使同名模型只在该渠道组打勾。
+          groupId: ownerProviderId,
         });
+        // 渠道模型也要记住：否则「选了 WorkBuddy/Trae 模型、开新对话」会回落到
+        // 旧的全局默认（渠道模型不经过 apiConfig）。新对话据此默认选中。
+        st0.rememberLastModel(chProvider, model, ownerProviderId);
         st0.showToast({ type: "success", title: `本会话已覆盖为 ${model}` });
         setShowModelDropdown(false);
         return;
@@ -3070,19 +3223,28 @@ function AgentFlowPanelImpl() {
         (ownerProviderId &&
           st0.providers.find((p) => p.id === ownerProviderId)) ||
         st0.resolveModelProvider(model);
+      // 本会话覆盖值 / 全局默认 / 记住上次选定 共用同一个 provider 身份，
+      // 避免悬停提示与 set_model 路由用的 provider 不一致（硅基流动 vs shangtang）。
+      const effectiveProvider =
+        provider?.name && provider.name !== "__custom__"
+          ? provider.name
+          : st0.apiConfig.provider && st0.apiConfig.provider !== "__custom__"
+            ? st0.apiConfig.provider
+            : "custom";
       st0.setModelForSession(st0.currentSessionId ?? DRAFT_SESSION_KEY, {
-        provider:
-          provider?.name && provider.name !== "__custom__"
-            ? provider.name
-            : st0.apiConfig.provider && st0.apiConfig.provider !== "__custom__"
-              ? st0.apiConfig.provider
-              : "custom",
+        provider: effectiveProvider,
         model,
+        // groupId 用下拉二级卡片的归属分组 id（= 用户点选时所在供应商的 p.id），
+        // 与渲染时 g.id 对齐：多个供应商都提供同名模型（如 deepseek）时，勾选只落在
+        // 真正选中的那一组，而不是所有同名模型都打勾。
+        groupId: ownerProviderId,
       });
       // 同时更新全局默认模型（持久化跨重启）。setActiveModel 会重定锚 activeProvider
       // 并落盘 activeModel / apiConfig.model；本会话的 modelBySession 覆盖值仍优先，
       // 所以这条会话不会因改全局默认而跳变。
       st0.setActiveModel(model);
+      // 记住本次选定，使新对话默认选中它（覆盖 DRAFT 残留，对所有模型类型一致）。
+      st0.rememberLastModel(effectiveProvider, model, ownerProviderId);
       st0.showToast({
         type: "success",
         title: `本会话已覆盖为 ${model}`,
@@ -3125,7 +3287,8 @@ function AgentFlowPanelImpl() {
 
       setShowModelDropdown(false);
     },
-    [],
+    // remoteMachineKey 参与：远程分支要按机器记住「上次选定的远端模型」。
+    [remoteMachineKey],
   );
 
   // Model selector for the active provider only. Rendered in BOTH input-bar
@@ -3149,7 +3312,27 @@ function AgentFlowPanelImpl() {
     // 勾选比较用 currentModelId（id 是 set_model 的路由键），显示用 displayName——
     // 渠道模型的 label 是扩展装饰过的 name（含倍率后缀），裸 id 不丢：tooltip 与
     // 下拉里的勾选仍以 id 对齐。
-    const currentModelId = sessionModel || apiConfig.model || activeModel || "";
+    //
+    // 远程会话的最后一级不是本机全局默认，而是**远端实例 get_state 报的模型**：
+    // 本机 apiConfig 跟远端那个 pi 跑什么没有任何关系，拿它充数就是
+    // 「界面显示 A、远端实际跑 B」的根源。
+    const currentModelId =
+      sessionModel ||
+      (remoteMachineKey ? effectiveRemoteSnapshot?.activeModel : undefined) ||
+      apiConfig.model ||
+      activeModel ||
+      "";
+    // 选中模型归属的分组 id（普通供应商 = p.id，渠道 = "pi:<id>"，远程 =
+    // "remote:<id>"）。勾选只落在该组，解决「多个供应商都提供同名模型（如
+    // deepseek）时，所有同名模型都打勾」的问题。无本会话覆盖时回落到全局默认
+    // 所在的活跃供应商分组（远程会话则回落到远端当前模型的分组）。
+    const selectedGroupId =
+      sessionModelOverride?.groupId ??
+      (remoteMachineKey
+        ? effectiveRemoteSnapshot?.activeProvider
+          ? `${REMOTE_GROUP_PREFIX}${effectiveRemoteSnapshot.activeProvider}`
+          : null
+        : (activeProvider?.id ?? null));
     const sessionModelLabel = sessionModelOverride?.provider
       ? piChannelProviders
           .find((c) => c.id === sessionModelOverride.provider)
@@ -3182,7 +3365,10 @@ function AgentFlowPanelImpl() {
               // activeProvider——否则对话覆盖指向硅基流动、全局还停在
               // shangtang 时，悬停会显示成 shangtang · 硅基流动的模型。
               const rawTip =
-                sessionModelOverride?.provider || activeProvider?.name;
+                sessionModelOverride?.provider ||
+                (remoteMachineKey
+                  ? effectiveRemoteSnapshot?.activeProvider
+                  : activeProvider?.name);
               // 渠道 provider 的覆盖值存的是 pi 注册 id（workbuddy1 等）：
               // 悬停显示界面名（WorkBuddy），查不到就原样显示。
               const tipProvider = rawTip
@@ -3221,7 +3407,15 @@ function AgentFlowPanelImpl() {
               <div className="py-1">
                 {providerModelGroups.length === 0 && (
                   <div className="px-3 py-4 text-center text-[length:var(--helix-transcript-size)] text-foreground/40">
-                    暂无可用模型
+                    {remoteMachineKey
+                      ? !remoteTunnelUp
+                        ? "远端未连接"
+                        : remoteSnapshotError
+                          ? "读取远端模型失败"
+                          : effectiveRemoteSnapshot
+                            ? "远端 pi 没有配置模型"
+                            : "正在读取远端模型…"
+                      : "暂无可用模型"}
                   </div>
                 )}
                 {providerModelGroups.map((g) => {
@@ -3335,16 +3529,19 @@ function AgentFlowPanelImpl() {
                                     </span>
                                   )}
                                   {/* 勾选位常驻（不选也占宽）：否则选中行的倍率列
-                                    会被图标挤偏，右对齐就不成立了。 */}
+                                    会被图标挤偏，右对齐就不成立了。勾选须同时命中
+                                    模型 id 与归属分组 id——同名模型挂在多个供应商时，
+                                    只给真正选中的那一组打勾。 */}
                                   <span className="flex w-3.5 shrink-0 items-center justify-center">
-                                    {m === currentModelId && (
-                                      <span
-                                        className="text-foreground/50"
-                                        data-tip="当前模型"
-                                      >
-                                        <Check className="size-3.5" />
-                                      </span>
-                                    )}
+                                    {m === currentModelId &&
+                                      g.id === selectedGroupId && (
+                                        <span
+                                          className="text-foreground/50"
+                                          data-tip="当前模型"
+                                        >
+                                          <Check className="size-3.5" />
+                                        </span>
+                                      )}
                                   </span>
                                 </button>
                               );
@@ -3357,16 +3554,16 @@ function AgentFlowPanelImpl() {
                 })}
               </div>
               <div className="border-t border-border/30 pt-0.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowModelDropdown(false);
-                    storeActions.toggleSettings("api");
-                  }}
-                  className="w-full px-2 py-1.5 text-left ui-text-sm2 text-foreground/50 transition-colors hover:bg-muted hover:text-foreground/70"
-                >
-                  管理模型
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowModelDropdown(false);
+                      storeActions.toggleSettings("api");
+                    }}
+                    className="w-full px-2 py-1.5 text-left ui-text-sm2 text-foreground/50 transition-colors hover:bg-muted hover:text-foreground/70"
+                  >
+                    管理模型
+                  </button>
                 </div>
               </div>,
               document.body,
@@ -3477,49 +3674,13 @@ function AgentFlowPanelImpl() {
   // 绝不发给模型；在 "/" 补全列表里与 skills 并列出现。
   const BUILTIN_COMMANDS = BUILTIN_SLASH_COMMANDS;
 
-  // pi 扩展注册的斜杠命令（pi-connect 的 /connect、plan-mode 的 /plan …）。
-  // 这些命令由扩展在 pi 运行期注册，名字只存在于 `get_commands` RPC 里；
-  // 菜单不列出来的话，用户只能靠记忆手打——pi-connect 的「渠道中心」入口
-  // 就只有 /connect 一条，没入口等于插件不存在。
-  // 只取 source=="extension"：prompt 模板与 skills 各自有面板，重复列会出现
-  // 同名两个选项（行为还不一样）。
-  const [piSlashCommands, setPiSlashCommands] = useState<
-    Array<{ name: string; description: string }>
-  >([]);
-  useEffect(() => {
-    if (piSlashCommands.length > 0) return;
-    const api = window.electron?.helix as
-      | {
-          piListCommands?: () => Promise<{
-            commands?: Array<{ name?: unknown; description?: unknown }>;
-          }>;
-        }
-      | undefined;
-    if (!api?.piListCommands) return;
-    api
-      .piListCommands()
-      .then((res) => {
-        const list = Array.isArray(res?.commands) ? res.commands : [];
-        setPiSlashCommands(
-          list
-            .filter(
-              (c): c is { name: string; description?: unknown } =>
-                typeof c?.name === "string" && c.name !== "",
-            )
-            .map((c) => ({
-              name: c.name,
-              description:
-                typeof c.description === "string" ? c.description : "",
-            })),
-        );
-      })
-      .catch(() => {
-        // 网关未就绪：菜单少一组扩展命令，不影响其余条目。
-      });
-  }, [piSlashCommands.length]);
+  // pi 扩展注册的斜杠命令（pi-connect 的 /connect、plan-mode 的 /plan …）不再
+  // 进 `/` 菜单：这类命令几乎都带参数，菜单里选中也只是把 `/name ` 填回输入框，
+  // 收益不如「少一组名字对不上行为还不一样」的条目。手打 `/connect status` 照旧
+  // 由 pi 的 prompt() 执行，执行通道一条没动。
 
-  // 合并客户端内置命令、pi 扩展命令与本地技能（去重后交给 filteredSkills 做
-  // 前缀/子串匹配）。顺序 = 渲染顺序 = 键盘选中索引顺序，不能乱。
+  // 合并客户端内置命令与本地技能（去重后交给 filteredSkills 做前缀/子串匹配）。
+  // 顺序 = 渲染顺序 = 键盘选中索引顺序，不能乱。
   const allSlashItems = useMemo(() => {
     const builtinCmds = BUILTIN_COMMANDS.flatMap((c) => {
       const names = [c.name];
@@ -3537,30 +3698,11 @@ function AgentFlowPanelImpl() {
     const builtinNames = new Set(
       BUILTIN_COMMANDS.map((c) => c.name.toLowerCase()),
     );
-    // 扩展命令：选中/回车只把 `/name ` 填进输入框（参数由用户补，例如
-    // `/connect status`），发送时原样交给 pi —— prompt() 会先执行扩展命令本身。
-    const extCmds = piSlashCommands
-      .filter((c) => !builtinNames.has(c.name.toLowerCase()))
-      .map((c) => ({
-        name: c.name,
-        description: c.description,
-        id: "extcmd:" + c.name,
-        icon: undefined as string | undefined,
-        isBuiltinCommand: false as const,
-        isExtensionCommand: true as const,
-        action: undefined,
-      }));
-    const extNames = new Set(extCmds.map((c) => c.name.toLowerCase()));
     return [
       ...builtinCmds,
-      ...extCmds,
-      ...allSkills.filter(
-        (s) =>
-          !builtinNames.has(s.name.toLowerCase()) &&
-          !extNames.has(s.name.toLowerCase()),
-      ),
+      ...allSkills.filter((s) => !builtinNames.has(s.name.toLowerCase())),
     ];
-  }, [allSkills, BUILTIN_COMMANDS, piSlashCommands]);
+  }, [allSkills, BUILTIN_COMMANDS]);
 
   const filteredSkills = useMemo(() => {
     if (input.startsWith("/")) {
@@ -3576,7 +3718,7 @@ function AgentFlowPanelImpl() {
     }
     return allSlashItems;
   }, [allSlashItems, input]);
-  // 命令（builtin）/ 扩展命令 / 技能（skill）三段分组，渲染顺序与 flat 索引一致。
+  // 命令（builtin）/ 技能（skill）两段分组，渲染顺序与 flat 索引一致。
   const filteredCommands = useMemo(
     () =>
       filteredSkills.filter(
@@ -3588,26 +3730,10 @@ function AgentFlowPanelImpl() {
       ),
     [filteredSkills],
   );
-  const filteredExtCommands = useMemo(
-    () =>
-      filteredSkills.filter(
-        (s) =>
-          (s as { isExtensionCommand?: boolean }).isExtensionCommand === true,
-      ),
-    [filteredSkills],
-  );
   const filteredSkillsOnly = useMemo(
     () =>
       filteredSkills.filter(
-        (s) => {
-          const item = s as {
-            isBuiltinCommand?: boolean;
-            isExtensionCommand?: boolean;
-          };
-          return (
-            item.isBuiltinCommand !== true && item.isExtensionCommand !== true
-          );
-        },
+        (s) => (s as { isBuiltinCommand?: boolean }).isBuiltinCommand !== true,
       ),
     [filteredSkills],
   );
@@ -5606,10 +5732,30 @@ function AgentFlowPanelImpl() {
               modelId: modelOverride.model,
             });
           } catch (e) {
+            // 以前只落 console：远程会话选了本机供应商的模型时，远端 pi 报
+            // Model not found，界面却照样显示"已覆盖"，用户只看到模型没生效。
+            // 现在必须出声。
+            const msg = String(e);
             console.warn(
               "[Helix] set_model(" + modelOverride.model + ") failed:",
               e,
             );
+            // 「这个模型这个实例根本没有」是永久失败，不是瞬时的：每轮重放都会
+            // 再报一次。清掉本会话的覆盖值（芯片回落到实例真实在跑的模型），
+            // 只提示一次。其他错误（重活中/超时）保留覆盖值等下一轮再试。
+            const permanent = /model not found/i.test(msg);
+            if (permanent) {
+              useHelixStore
+                .getState()
+                .setModelForSession(activeSessionId, { provider: "", model: "" });
+            }
+            useHelixStore.getState().showToast({
+              type: "error",
+              title: permanent ? "该实例没有这个模型" : "模型切换失败",
+              description: permanent
+                ? `${modelOverride.model} 不在当前实例的模型清单里，已回落到实例实际使用的模型。`
+                : msg,
+            });
           }
         }
         // Only update the global ref / store if THIS run is the focused conversation.
@@ -6923,7 +7069,7 @@ function AgentFlowPanelImpl() {
                 if (typeof desc === "string" && desc.trim()) {
                   return {
                     type: "text" as const,
-                    text: `[图片内容（视觉模型转述，供无法直接看图的模型参考）]\n${desc.trim()}`,
+                    text: `${desc.trim()}`,
                   };
                 }
                 visionErrors.push("视觉模型返回了空描述");
@@ -10222,68 +10368,17 @@ function AgentFlowPanelImpl() {
               </>
             )}
 
-            {/* Extension commands section（pi 扩展注册的命令，如 /connect） */}
-            {filteredExtCommands.length > 0 && (
-              <>
-                {filteredCommands.length > 0 && (
-                  <div className="border-t border-border/30 mx-3" />
-                )}
-                <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">
-                  扩展命令
-                </p>
-                {filteredExtCommands.map((skill, index) => {
-                  const flatIndex = filteredCommands.length + index;
-                  return (
-                    <button
-                      key={skill.id}
-                      type="button"
-                      ref={
-                        flatIndex === selectedSkillIndex
-                          ? (el) => {
-                              if (el) el.scrollIntoView({ block: "nearest" });
-                            }
-                          : undefined
-                      }
-                      onClick={() => {
-                        // 只填进输入框、不直接发送：这类命令几乎都带参数
-                        // （/connect status、/connect checkin），回车再由 pi 执行。
-                        handleSkillSelect(skill);
-                      }}
-                      className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 ${
-                        flatIndex === selectedSkillIndex
-                          ? "bg-primary/10 text-primary"
-                          : "hover:bg-muted/30"
-                      }`}
-                    >
-                      <Terminal className="size-4 text-foreground/40 shrink-0" />
-                      <div className="min-w-0 flex-1">
-                        <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground block truncate">
-                          {skill.name}
-                        </span>
-                        {skill.description && (
-                          <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground block truncate">
-                            {skill.description}
-                          </span>
-                        )}
-                      </div>
-                    </button>
-                  );
-                })}
-              </>
-            )}
-
             {/* Skills section */}
             {filteredSkillsOnly.length > 0 && (
               <>
-                {filteredCommands.length + filteredExtCommands.length > 0 && (
+                {filteredCommands.length > 0 && (
                   <div className="border-t border-border/30 mx-3" />
                 )}
                 <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">
                   技能
                 </p>
                 {filteredSkillsOnly.map((skill, index) => {
-                  const flatIndex =
-                    filteredCommands.length + filteredExtCommands.length + index;
+                  const flatIndex = filteredCommands.length + index;
                   return (
                     <button
                       key={skill.id}
@@ -10783,7 +10878,10 @@ function AgentFlowPanelImpl() {
               {/* Streaming assistant message — placed AFTER all completed messages */}
               {(streamingActive || displayResponseBlocks.length > 0) && (
                 <div className="flex w-full justify-start transition-all duration-300 opacity-100">
-                  <div className="group w-full px-1 py-1 text-foreground transition-all duration-300">
+                  <div
+                    className="group w-full px-1 py-1 text-foreground transition-all duration-300"
+                    style={{ lineHeight: 1.85 }}
+                  >
                     {/* Loading placeholder — plain terminal-style reasoning line.
                         Only shown while streaming AND no content/blocks/thinking yet AND
                         no completed assistant message exists yet in this session.
@@ -10831,7 +10929,6 @@ function AgentFlowPanelImpl() {
                           !!thinkingBody &&
                           !normalizedBlocks.some((b) => b.type === "thinking");
                         const processBlocks = consolidatedBlocks;
-                        const answerBlocks = consolidatedBlocks.slice(0, 0);
                         const allSegments = mergeToolRuns(
                           segmentizeProcessBlocks(processBlocks),
                         );
@@ -10871,8 +10968,6 @@ function AgentFlowPanelImpl() {
                           lastTextIdx >= 0 && !isFinalText
                             ? allSegments.slice(lastTextIdx + 1)
                             : [];
-                        const answerSegments =
-                          buildProcessSegments(answerBlocks);
                         // 「思考中」脉冲只在**最后到达的那个块确实是思考**时才亮。
                         //
                         // 旧实现从尾部往前扫、**跳过 text / file_change 块**，于是
@@ -10886,8 +10981,11 @@ function AgentFlowPanelImpl() {
                           processBlocks[processBlocks.length - 1];
                         const thinkingActiveNow =
                           lastProcessBlock?.type === "thinking";
+                        // 与完成态（transcript-message）同一结构：折叠卡、总结
+                        // 段、尾段、思考行全部收进同一个 space-y-3 节奏容器，
+                        // 行距只有一把尺子；流式与完成态像素级一致。
                         return (
-                          <>
+                          <div className="space-y-3">
                             <ProcessFold
                               streaming={streamingActive}
                               summary={
@@ -10913,6 +11011,7 @@ function AgentFlowPanelImpl() {
                                 active={streamingActive}
                                 dependency={displayResponseBlocks}
                               >
+                                <div className="space-y-3">
                                 {processSegments.map((seg, si) => {
                                   // 交替段渲染：思考段一张 ThinkingFold，工具段
                                   // 平铺工具卡，文本段渲染 markdown。
@@ -10958,7 +11057,7 @@ function AgentFlowPanelImpl() {
                                     );
                                   }
                                   return (
-                                    <div key={si} className="space-y-1">
+                                    <div key={si} className="space-y-3">
                                       {(() => {
                                         // 整段工具收成一个折叠行（与完成态同款），避免
                                         // 流式过程区里多条工具逐条平铺刷屏。展开才看各工具卡。
@@ -11050,11 +11149,11 @@ function AgentFlowPanelImpl() {
                                     </div>
                                   );
                                 })}
+                                </div>
                               </ProcessWindow>
                             </ProcessFold>
                             {summarySegment && (
                               <div
-                                className="my-2"
                                 style={{ fontSize: transcriptFontSize }}
                               >
                                 {summarySegment.blocks.map((b, i) => {
@@ -11094,80 +11193,6 @@ function AgentFlowPanelImpl() {
                                 })}
                               </div>
                             )}
-                            <div className="helix-answer mt-3">
-                              {answerSegments.map((seg, si) => {
-                                return (
-                                  <div key={si} className="space-y-1">
-                                    {seg.blocks.map((b, i) => {
-                                      if (b.type === "text") {
-                                        return (
-                                          <div
-                                            key={i}
-                                            style={{
-                                              fontSize: transcriptFontSize,
-                                            }}
-                                          >
-                                            {conversationSearchOpen &&
-                                            conversationSearchQuery.trim() ? (
-                                              <div className="whitespace-pre-wrap break-words">
-                                                <HighlightText
-                                                  text={normalizeAcpContentRaw(
-                                                    b.content,
-                                                  )}
-                                                  query={
-                                                    conversationSearchQuery
-                                                  }
-                                                  active={false}
-                                                />
-                                              </div>
-                                            ) : (
-                                              <HelixMarkdown
-                                                text={normalizeAcpContentRaw(
-                                                  b.content,
-                                                )}
-                                              />
-                                            )}
-                                          </div>
-                                        );
-                                      }
-                                      if (b.type === "thinking") {
-                                        const content =
-                                          "content" in b
-                                            ? String(b.content)
-                                            : "";
-                                        if (!content.trim()) return null;
-                                        return (
-                                          <ThinkingFold
-                                            key={i}
-                                            content={content}
-                                            fontSize={transcriptFontSize}
-                                            durationS={b.duration_s}
-                                          />
-                                        );
-                                      }
-                                      if (b.type === "tool_group") {
-                                        return (
-                                          <InlineToolGroup
-                                            key={i}
-                                            steps={b.steps}
-                                            isRunning={isRunning}
-                                            fontSize={transcriptFontSize}
-                                          />
-                                        );
-                                      }
-                                      if (b.type === "file_change") {
-                                        return (
-                                          <FileChangeSummary
-                                            key={i}
-                                            changes={b.changes}
-                                          />
-                                        );
-                                      }
-                                      return null;
-                                    })}
-                                  </div>
-                                );
-                              })}
                               {/* 尾段：按时间序画在「总结」之后，不塞回过程卡。
                                   只有「最后一段文本并不位于末尾」时非空——例如模型先
                                   说话、再调用 ask_user_question 然后本轮停住等回答。
@@ -11175,7 +11200,7 @@ function AgentFlowPanelImpl() {
                               {trailingSegments.map((seg, si) => (
                                 <div
                                   key={`trail-${si}`}
-                                  className="my-2 space-y-1"
+                                  className="space-y-3"
                                 >
                                   {seg.kind === "thinking"
                                     ? (() => {
@@ -11312,7 +11337,6 @@ function AgentFlowPanelImpl() {
                                 />
                               )}
                             </div>
-                          </>
                         );
                       })()}
 
@@ -11341,7 +11365,7 @@ function AgentFlowPanelImpl() {
                         )?.id;
                       if (!lastUser) return null;
                       return (
-                        <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1 gap-0.5">
+                        <div className="flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity pt-1 px-1 mb-1 gap-0.5">
                           <button
                             onClick={() => {
                               const cleanText = draftText
@@ -11396,16 +11420,6 @@ function AgentFlowPanelImpl() {
                     <div className="h-0.5 flex-1 rounded-full overflow-hidden bg-amber-500/15">
                       <div className="h-full w-1/3 rounded-full bg-amber-500/70 animate-[reconnect-slide_1.2s_ease-in-out_infinite]" />
                     </div>
-                    {/* 中止重试：pi 的 abort_retry 只取消倒计时不再重试，不会打断
-                        已经出完的内容。比点停止（那会丢掉半句回答）温和得多。 */}
-                    <button
-                      type="button"
-                      onClick={() => void sendRpc("abort_retry")}
-                      className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/30 text-amber-600 dark:text-amber-400 transition-colors"
-                      data-tip="放弃重试，直接结束本次请求"
-                    >
-                      中止
-                    </button>
                   </div>
                 ) : (
                   <div className="conversation-scan-line" />

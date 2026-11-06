@@ -25,6 +25,13 @@ import {
 import { TranscriptMessage } from "./transcript-message";
 import { formatDuration } from "./transcript-utils";
 import { parseChannelModelLabel } from "@/lib/channel-model";
+import {
+  REMOTE_GROUP_PREFIX,
+  cachedRemoteSnapshot,
+  loadRemoteModelSnapshot,
+  type RemoteModelSnapshot,
+} from "@/lib/remote-models";
+import { isRemoteWorkDir, parseRemoteWorkDir } from "@/lib/remote-projects";
 import { loadSessionMap } from "@/lib/session-map";
 import { normalizeAcpContent } from "@/lib/text-utils";
 import { useHelixStore } from "@/stores/helix-store";
@@ -337,10 +344,50 @@ export function BylinePanel() {
     !!btwCid && !!planModeBySession[btwCid],
   );
   const modelOverride = btwCid ? modelBySession[btwCid] : undefined;
-  const effectiveModel = modelOverride?.model || apiConfig?.model || activeModel;
+  // 本机回落链的最后两级在下方 remoteMachineKey 算出来之后再定（远程会话
+  // 要改成「远端实例 get_state 报的模型」，本机全局默认跟远端毫无关系）。
+  const localEffectiveModel =
+    modelOverride?.model || apiConfig?.model || activeModel;
 
   // 供应商分组（与主对话同一结构）：一级列表按 provider 分组，hover 展开二级飞入菜单
   const piChannelProviders = useHelixStore((s) => s.piChannelProviders);
+  // 旁路会话跑在它自己的实例上（远程项目下也是远端）；下拉数据源同理要跟
+  // 这个实例走，否则选了本机模型一样是 Model not found。
+  const remoteWorkDir = useHelixStore((s) => s.activeSessionWorkDir);
+  const remoteMachineKey = isRemoteWorkDir(remoteWorkDir)
+    ? (parseRemoteWorkDir(remoteWorkDir)?.targetKey ?? null)
+    : null;
+  const [remoteSnapshot, setRemoteSnapshot] = useState<RemoteModelSnapshot | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!remoteMachineKey || !byCid) {
+      setRemoteSnapshot(
+        remoteMachineKey ? cachedRemoteSnapshot(remoteMachineKey) : null,
+      );
+      return;
+    }
+    let cancelled = false;
+    void loadSessionMap()
+      .then((m) => m.get(byCid)?.sid ?? null)
+      .then(async (sid) => {
+        if (!sid) return null;
+        const r = await loadRemoteModelSnapshot(sid, remoteMachineKey);
+        return r.ok ? r.snapshot : null;
+      })
+      .then((snap) => {
+        if (!cancelled && snap) setRemoteSnapshot({ ...snap });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [remoteMachineKey, byCid]);
+  const effectiveRemoteSnapshot =
+    remoteSnapshot ?? cachedRemoteSnapshot(remoteMachineKey);
+  const effectiveModel =
+    modelOverride?.model ||
+    (remoteMachineKey ? effectiveRemoteSnapshot?.activeModel : undefined) ||
+    localEffectiveModel;
   const providerModelGroups = useMemo(() => {
     const activeProviderId = apiConfig?.provider;
     const groups: {
@@ -350,6 +397,21 @@ export function BylinePanel() {
       models: string[];
       labels?: Record<string, string>;
     }[] = [];
+    // 远程：只列远端 pi 实例自己的模型（原因见 lib/remote-models.ts）。
+    if (remoteMachineKey) {
+      for (const g of effectiveRemoteSnapshot?.groups ?? []) {
+        if (g.models.length > 0) {
+          groups.push({
+            id: g.id,
+            name: g.name,
+            baseUrl: "",
+            models: g.models,
+            labels: g.labels,
+          });
+        }
+      }
+      return groups;
+    }
     for (const p of providers) {
       const models = new Set<string>();
       (p.models || []).forEach((m) => {
@@ -384,7 +446,13 @@ export function BylinePanel() {
       }
     }
     return groups;
-  }, [providers, apiConfig, piChannelProviders]);
+  }, [
+    providers,
+    apiConfig,
+    piChannelProviders,
+    remoteMachineKey,
+    effectiveRemoteSnapshot,
+  ]);
 
   // 档位表与主输入框共用同一份（helix-types 的 APPROVAL_MODE_ITEMS）——本地
   // 复制一份必然出现「主界面两档、旁路四档」的对不上。
@@ -592,7 +660,7 @@ export function BylinePanel() {
             >
               <div className="group w-fit max-w-[80%]">
                 <div
-                  className="px-4 py-2.5 rounded-xl border border-border bg-transparent text-foreground whitespace-pre-wrap break-words text-justify leading-normal"
+                  className="px-4 py-2.5 rounded-xl bg-muted/80 text-foreground whitespace-pre-wrap break-words text-justify leading-normal"
                   style={{ fontSize: transcriptFontSize }}
                 >
                   {displayUserContent(normalizeAcpContent(m.content))}
@@ -866,11 +934,15 @@ export function BylinePanel() {
                                     key={m}
                                     type="button"
                                     onClick={() => {
-                                      const owner = g.id.startsWith("pi:")
-                                        ? g.id.slice(3)
-                                        : useHelixStore
-                                            .getState()
-                                            .resolveModelProvider(m)?.name ||
+                                      const owner = g.id.startsWith(
+                                        REMOTE_GROUP_PREFIX,
+                                      )
+                                        ? g.id.slice(REMOTE_GROUP_PREFIX.length)
+                                        : g.id.startsWith("pi:")
+                                          ? g.id.slice(3)
+                                          : useHelixStore
+                                              .getState()
+                                              .resolveModelProvider(m)?.name ||
                                             (apiConfig?.provider &&
                                             apiConfig.provider !== "__custom__"
                                               ? apiConfig.provider
@@ -878,6 +950,7 @@ export function BylinePanel() {
                                       setModelForSession(btwCid, {
                                         provider: owner,
                                         model: m,
+                                        groupId: g.id,
                                       });
                                       showToast({
                                         type: "success",
