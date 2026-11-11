@@ -492,9 +492,8 @@ export interface ApiProfile {
    *  seedAddedModels 会把它剥成 undefined，重开编辑弹窗时开关显示为关
    *  （"我明明开了思考模式，重启后又没了"根因）。键 = 模型 id。 */
   modelReasonings?: Record<string, boolean>;
-  /** 每个模型声明的输入类型（models.json 的 `input` 数组）。
-   *  pi 只读其中的 "image" 来决定粘贴图片是原生透传还是走视觉转述管道；
-   *  之前 Helix 从不写这个字段，多模态主模型全被当成纯文本，图片永远绕道。
+  /** 每个模型声明的输入类型（models.json 的 `input` 数组，只含 text / image）。
+   *  pi 只读其中的 "image" 决定粘贴图片是原生透传还是走视觉转述管道。
    *  键 = 模型 id。 */
   modelInputs?: Record<string, string[]>;
 }

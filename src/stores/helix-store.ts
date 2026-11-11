@@ -149,6 +149,7 @@ import {
 } from "@/lib/electron-bridge";
 import { generateId, truncateString } from "@/lib/format";
 import { debug, warn, error as logError } from "@/lib/logger";
+import { normalizeModelInput } from "@/lib/model-input";
 import type { PersistedChatMessage } from "@/lib/persist";
 import { defaultFiles } from "@/lib/seed-data";
 import { resolveBackendSid, persistSessionMapEntries } from "@/lib/session-map";
@@ -1465,6 +1466,7 @@ type PiProviderSnapshot = {
     name?: string;
     contextWindow?: number;
     reasoning?: boolean;
+    input?: string[];
   }>;
 };
 
@@ -1497,11 +1499,13 @@ function profilesFromPiSnapshot(
     if (ids.length === 0) continue;
     const modelContextWindows: Record<string, number> = {};
     const modelReasonings: Record<string, boolean> = {};
+    const modelInputs: Record<string, string[]> = {};
     for (const m of p.models) {
       if (!m.id) continue;
       if (m.contextWindow && m.contextWindow > 0)
         modelContextWindows[m.id] = m.contextWindow;
       if (m.reasoning) modelReasonings[m.id] = true;
+      if (m.input) modelInputs[m.id] = normalizeModelInput(m.input);
     }
     profiles.push({
       id: generateId(),
@@ -1518,6 +1522,7 @@ function profilesFromPiSnapshot(
       models: ids,
       modelContextWindows,
       modelReasonings,
+      modelInputs,
     });
   }
   const providers: ProviderConfig[] = profiles.map((p) => ({
@@ -4283,8 +4288,21 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             const base = p.config?.baseUrl;
             if (base) seenBase.add(base);
             // Scrub cross-endpoint pollution the same way the legacy set() path
-            // did, so persisted profiles stay clean.
-            expandedProfiles.push({ ...p, models: cleanProfileModels(p) });
+            // did, so persisted profiles stay clean; 输入类型同样归一化。
+            expandedProfiles.push({
+              ...p,
+              models: cleanProfileModels(p),
+              ...(p.modelInputs
+                ? {
+                    modelInputs: Object.fromEntries(
+                      Object.entries(p.modelInputs).map(([id, input]) => [
+                        id,
+                        normalizeModelInput(input),
+                      ]),
+                    ),
+                  }
+                : {}),
+            });
           }
         };
         seedFrom(seedProfiles);

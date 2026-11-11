@@ -403,12 +403,10 @@ function ContextUsageRing({ used, total }: { used: number; total: number }) {
   const radius = 7;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (percentage / 100) * circumference;
-  const colorClass =
-    percentage > 90
-      ? "text-red-500"
-      : percentage > 70
-        ? "text-amber-500"
-        : "text-primary";
+  // 环色随用量在同一色族内连续加深：0% 用 --primary，100% 用
+  // --context-ring-full（浅色档深黄、深色档深蓝，见 globals.css）。旧实现是
+  // 70%/90% 两档跳成 amber/red，深色档下一满就整屏发黄。
+  const ringColor = `color-mix(in oklch, var(--context-ring-full) ${percentage.toFixed(1)}%, var(--primary))`;
 
   return (
     <div className="relative size-7 flex items-center justify-center shrink-0">
@@ -432,7 +430,8 @@ function ContextUsageRing({ used, total }: { used: number; total: number }) {
           strokeLinecap="round"
           strokeDasharray={circumference}
           strokeDashoffset={strokeDashoffset}
-          className={`${colorClass} transition-all duration-300`}
+          style={{ color: ringColor }}
+          className="transition-all duration-300"
         />
       </svg>
     </div>

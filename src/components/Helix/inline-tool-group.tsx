@@ -425,7 +425,8 @@ function ToolCard({
   );
   const titleLabel =
     action ||
-    (fallbackLabel.startsWith(verb) && step.toolName
+    fallbackLabel ||
+    (step.toolName && !step.toolName.includes(":") && /^[a-z_]+$/.test(step.toolName)
       ? step.toolName
       : fallbackLabel);
   // 「有没有被裁」只能实测：按字符数猜会在窄面板下漏判、宽面板下误报，

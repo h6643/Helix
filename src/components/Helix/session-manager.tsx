@@ -4,8 +4,6 @@ import {
   FolderOpen,
   Trash2,
   Download,
-  DownloadCloud,
-  Upload,
   X,
   Bot,
   Loader2,
@@ -13,7 +11,7 @@ import {
   AlertTriangle,
   MessageSquare,
 } from "lucide-react";
-import React, {
+import {
   useState,
   useEffect,
   useCallback,
@@ -22,9 +20,13 @@ import React, {
 } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { sendRpc } from "@/lib/electron-bridge";
 import { timeAgo } from "@/lib/format";
-import { persistence, type PersistedSession } from "@/lib/persist";
+import {
+  isDraftPartialMessage,
+  persistence,
+  type PersistedSession,
+} from "@/lib/persist";
+import { exportSessionTranscript } from "@/lib/session-export";
 import { removeConversationIndex } from "@/lib/session-map";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
@@ -36,8 +38,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
   const [deleteTarget, setDeleteTarget] = useState<PersistedSession | null>(
     null,
   );
-  const [exportMenuSession, setExportMenuSession] =
-    useState<PersistedSession | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const loadSessions = useCallback(async () => {
@@ -71,179 +71,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const handleExportSession = async (
-    session: PersistedSession,
-    format: "json" | "markdown" = "json",
-  ) => {
-    try {
-      let data: string;
-      let ext: string;
-      let mime: string;
-      if (format === "markdown") {
-        data = await persistence.exportSessionAsMarkdown(session);
-        ext = "md";
-        mime = "text/markdown";
-      } else {
-        data = await persistence.exportSessionAsJson(session);
-        ext = "json";
-        mime = "application/json";
-      }
-      const blob = new Blob([data], { type: mime });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `helix-session-${session.label || session.id}.${ext}`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error("Export failed:", e);
-      useHelixStore.getState().showToast({ type: "error", title: "导出失败" });
-    }
-  };
-
-  // pi 原生 HTML 导出：含工具调用、思考块、命令输出——比 Helix 的
-  // JSON/Markdown 序列化完整得多。注意它导出的是 **pi 当前会话**
-  // （不是列表里选中的那一条），所以放这里而不是单条会话的菜单里。
-  const [exportingPiHtml, setExportingPiHtml] = useState(false);
-  const handleExportPiHtml = async () => {
-    if (exportingPiHtml) return;
-    setExportingPiHtml(true);
-    try {
-      const r = (await sendRpc("export_html", {}).catch(() => null)) as
-        | { data?: { path?: unknown } }
-        | null;
-      const path = typeof r?.data?.path === "string" ? r.data.path : null;
-      if (!path) {
-        useHelixStore.getState().showToast({
-          type: "error",
-          title: "pi HTML 导出失败",
-          description: "后端未返回导出文件路径",
-        });
-        return;
-      }
-      const data = await window.electron?.helixSkills.readFile(path);
-      if (!data) {
-        useHelixStore.getState().showToast({
-          type: "error",
-          title: "pi HTML 导出失败",
-          description: `读不到导出文件：${path}`,
-        });
-        return;
-      }
-      const blob = new Blob([data], { type: "text/html" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `pi-session-${new Date()
-        .toISOString()
-        .slice(0, 19)
-        .replace(/[T:]/g, "-")}.html`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error("Export pi html failed:", e);
-      useHelixStore.getState().showToast({
-        type: "error",
-        title: "pi HTML 导出失败",
-      });
-    } finally {
-      setExportingPiHtml(false);
-    }
-  };
-
-  const handleExportAll = async () => {
-    try {
-      const data = JSON.stringify(sessions, null, 2);
-      const blob = new Blob([data], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `helix-sessions-all-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error("Export all failed:", e);
-      useHelixStore
-        .getState()
-        .showToast({ type: "error", title: "批量导出失败" });
-    }
-  };
-
-  const handleImportSession = async (
-    e: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    let imported = 0;
-    let failed = 0;
-    for (const file of Array.from(files)) {
-      try {
-        const text = await file.text();
-        if (file.name.endsWith(".md") || file.name.endsWith(".markdown")) {
-          const session = await persistence.importSessionFromMarkdown(text);
-          if (session) {
-            imported++;
-          } else {
-            failed++;
-          }
-        } else {
-          // JSON: 支持单会话包裹格式、裸单会话，以及「导出全部」裸数组 / {sessions:[...]}
-          const data: unknown = JSON.parse(text);
-          const arr = Array.isArray(data)
-            ? data
-            : data &&
-                Array.isArray((data as { sessions?: unknown }).sessions)
-              ? (data as { sessions: unknown[] }).sessions
-              : null;
-          if (arr && arr.length > 0) {
-            for (const item of arr) {
-              const wrapped =
-                typeof item === "string"
-                  ? item
-                  : JSON.stringify({ type: "helix-session", session: item });
-              const s = await persistence.importSessionFromJson(wrapped);
-              if (s) {
-                imported++;
-              } else {
-                failed++;
-              }
-            }
-          } else {
-            const jsonStr =
-              (data as { type?: unknown })?.type === "helix-session"
-                ? text
-                : JSON.stringify(data);
-            const session = await persistence.importSessionFromJson(jsonStr);
-            if (session) {
-              imported++;
-            } else {
-              failed++;
-            }
-          }
-        }
-      } catch {
-        failed++;
-      }
-    }
-    await loadSessions();
-    // 通知左侧边栏（sidebar）刷新：sidebar 监听 sessionSaveVersion，import 走 persist 直接写库、不经过 store action，需手动 bump
-    useHelixStore.setState((st) => ({
-      sessionSaveVersion: (st.sessionSaveVersion || 0) + 1,
-    }));
-    if (files.length === 1) {
-      useHelixStore.getState().showToast({
-        type: imported > 0 ? "success" : "error",
-        title: imported > 0 ? "会话已导入" : "导入失败",
-      });
-    } else {
-      useHelixStore.getState().showToast({
-        type: imported > 0 ? "success" : "error",
-        title: `导入完成：${imported} 成功，${failed} 失败`,
-      });
-    }
-    e.target.value = "";
-  };
-
   const handleOpenSession = useCallback(
     async (session: PersistedSession) => {
       try {
@@ -260,11 +87,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
           .filter((msg) => {
             if (seen.has(msg.id)) return false;
             seen.add(msg.id);
-            if (
-              typeof msg.id === "string" &&
-              msg.id.startsWith("draft-partial-")
-            )
-              return false;
+            if (isDraftPartialMessage(msg.id)) return false;
             return true;
           })
           .map((msg) => ({
@@ -287,8 +110,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
         for (const m of msgs) byId.set(m.id, m);
         for (const m of live) {
           if (!m.sessionId || m.sessionId !== session.id) continue;
-          if (typeof m.id === "string" && m.id.startsWith("draft-partial-"))
-            continue;
+          if (isDraftPartialMessage(m.id)) continue; // 占位不参与新鲜度覆盖
           byId.set(m.id, m as (typeof msgs)[number]);
         }
         const merged = [
@@ -331,6 +153,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
     const q = searchQuery.toLowerCase();
     if (s.label?.toLowerCase().includes(q)) return true;
     const allText = s.chatMessages
+      .filter((m) => !isDraftPartialMessage(m.id))
       .map((m) => m.content)
       .join(" ")
       .toLowerCase();
@@ -353,6 +176,8 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
       // 会话名命中就整会话展示（没有更细的定位价值）
       if (s.label?.toLowerCase().includes(q)) continue;
       for (const m of s.chatMessages) {
+        // 磁盘兜底的 draft-partial 不进搜索结果：加载端会丢弃它，命中了也定位不到。
+        if (isDraftPartialMessage(m.id)) continue;
         const text = m.content || "";
         const lower = text.toLowerCase();
         const at = lower.indexOf(q);
@@ -412,44 +237,8 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
             <h2 className="text-[length:var(--helix-transcript-size)] font-semibold">
               会话管理
             </h2>
-            <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded-full">
-              {sessions.length} 个会话
-            </span>
           </div>
           <div className="flex items-center gap-1">
-            {sessions.length > 0 && (
-              <button
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7"
-                onClick={handleExportAll}
-              >
-                <DownloadCloud className="size-3" />
-                全部导出
-              </button>
-            )}
-            <button
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7"
-              onClick={() => void handleExportPiHtml()}
-              disabled={exportingPiHtml}
-              data-tip="导出 pi 当前会话为原生 HTML（含工具调用/思考块），需 pi 后端在线"
-            >
-              {exportingPiHtml ? (
-                <Loader2 className="size-3 animate-spin" />
-              ) : (
-                <Download className="size-3" />
-              )}
-              pi HTML
-            </button>
-            <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7">
-              <Upload className="size-3" />
-              导入
-              <input
-                type="file"
-                accept=".json,.md,.markdown"
-                multiple
-                className="hidden"
-                onChange={handleImportSession}
-              />
-            </label>
             <Button
               variant="ghost"
               size="icon"
@@ -478,57 +267,58 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
-        {/* 消息命中：跨会话搜正文。放在会话列表之上，一眼看到「哪句话在哪」。 */}
-        {messageHits.length > 0 && (
-          <div className="border-b border-border/50 max-h-[38vh] overflow-y-auto">
-            <div className="px-5 pt-2 pb-1 flex items-center gap-2">
-              <MessageSquare className="size-3 text-muted-foreground" />
-              <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
-                消息命中 {messageHits.length}
-                {messageHits.length >= 100 ? "（仅显示前 100 条）" : ""}
-              </span>
-            </div>
-            <div className="p-2 space-y-0.5">
-              {messageHits.map((hit) => (
-                <button
-                  key={`${hit.session.id}:${hit.messageId}`}
-                  onClick={() =>
-                    handleJumpToMessage(
-                      hit.session,
-                      hit.messageId,
-                      searchQuery.trim(),
-                    )
-                  }
-                  className="w-full text-left px-3 py-2 hover:bg-accent/30 rounded-lg transition-colors cursor-pointer group"
-                >
-                  <div className="flex items-center gap-1.5 mb-0.5">
-                    <span
-                      className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1 py-px rounded shrink-0 ${
-                        hit.role === "user"
-                          ? "bg-blue-500/10 text-blue-600 dark:text-blue-400"
-                          : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                      }`}
-                    >
-                      {hit.role === "user" ? "我" : "AI"}
-                    </span>
-                    <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground truncate">
-                      {hit.session.label}
-                    </span>
-                    <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 shrink-0 ml-auto">
-                      {timeAgo(hit.timestamp)}
-                    </span>
-                  </div>
-                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/75 line-clamp-2 group-hover:text-foreground transition-colors">
-                    {hit.snippet}
-                  </p>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* Session list */}
-        <ScrollArea className="flex-1">
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <ScrollArea className="h-full">
+            {/* 消息命中：跨会话搜正文。放在会话列表之上，一眼看到「哪句话在哪」。 */}
+          {messageHits.length > 0 && (
+            <div className="border-b border-border/50 mb-2">
+              <div className="px-5 pt-2 pb-1 flex items-center gap-2">
+                <MessageSquare className="size-3 text-muted-foreground" />
+                <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
+                  消息命中 {messageHits.length}
+                  {messageHits.length >= 100 ? "（仅显示前 100 条）" : ""}
+                </span>
+              </div>
+              <div className="p-2 space-y-0.5">
+                {messageHits.map((hit) => (
+                  <button
+                    key={`${hit.session.id}:${hit.messageId}`}
+                    onClick={() =>
+                      handleJumpToMessage(
+                        hit.session,
+                        hit.messageId,
+                        searchQuery.trim(),
+                      )
+                    }
+                    className="w-full text-left px-3 py-2 hover:bg-accent/30 rounded-lg transition-colors cursor-pointer group"
+                  >
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span
+                        className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1 py-px rounded shrink-0 ${
+                          hit.role === "user"
+                            ? "bg-blue-500/10 text-blue-600 dark:text-blue-400"
+                            : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                        }`}
+                      >
+                        {hit.role === "user" ? "我" : "AI"}
+                      </span>
+                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground truncate">
+                        {hit.session.label}
+                      </span>
+                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 shrink-0 ml-auto">
+                        {timeAgo(hit.timestamp)}
+                      </span>
+                    </div>
+                    <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/75 line-clamp-2 group-hover:text-foreground transition-colors">
+                      {hit.snippet}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {loading ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="size-5 animate-spin text-muted-foreground" />
@@ -570,11 +360,9 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                     className="size-6 text-muted-foreground/70 hover:text-foreground transition-colors"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setExportMenuSession(
-                        exportMenuSession?.id === session.id ? null : session,
-                      );
+                      void exportSessionTranscript(session);
                     }}
-                    data-tip="导出"
+                    data-tip="导出记录"
                   >
                     <Download className="size-3" />
                   </Button>
@@ -594,47 +382,9 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
               ))}
             </div>
           )}
-        </ScrollArea>
-      </div>
-
-      {/* Export format popover */}
-      {exportMenuSession && (
-        <div
-          className="fixed inset-0 z-[10000]"
-          onClick={() => setExportMenuSession(null)}
-        >
-          <div
-            className="absolute bg-card border border-border/80 rounded-xl shadow-xl py-1 w-36"
-            style={{
-              top: "50%",
-              left: "50%",
-              transform: "translate(-50%, -50%)",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
-              onClick={() => {
-                handleExportSession(exportMenuSession, "json");
-                setExportMenuSession(null);
-              }}
-            >
-              <Download className="size-3.5" />
-              导出为 JSON
-            </button>
-            <button
-              className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
-              onClick={() => {
-                handleExportSession(exportMenuSession, "markdown");
-                setExportMenuSession(null);
-              }}
-            >
-              <Download className="size-3.5" />
-              导出为 Markdown
-            </button>
-          </div>
+          </ScrollArea>
         </div>
-      )}
+      </div>
 
       {/* Delete confirmation dialog */}
       {deleteTarget && (

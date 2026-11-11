@@ -120,7 +120,9 @@ const THEMES: Record<string, HelixThemeDef> = {
     label: "浅色",
     mode: "light",
     ctp: whiteLight,
-    primaryOverride: "30, 30, 30",
+    // 陶土主色（白字 4.5:1 达 AA）。之前用近黑 30,30,30 做主色，纯白底上
+    // 每个主按钮和焦点环都是黑的，与「陶土晨光」这套暖色皮肤不搭。
+    primaryOverride: "188, 90, 41",
   },
   "ctp-generic-dark": {
     id: "ctp-generic-dark",

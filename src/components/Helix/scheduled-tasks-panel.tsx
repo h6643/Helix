@@ -22,23 +22,6 @@ function cn(...classes: Array<string | false | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-function formatTime(ts: number | null): string {
-  if (!ts) return "—";
-  const d = new Date(ts);
-  const now = new Date();
-  const diff = d.getTime() - now.getTime();
-  if (diff < 0) return "已过期";
-  if (diff < 60000) return "即将执行";
-  if (diff < 3600000) return `${Math.round(diff / 60000)} 分钟后`;
-  if (diff < 86400000) return `${Math.round(diff / 3600000)} 小时后`;
-  return d.toLocaleDateString("zh-CN", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 type ParsedSchedule = {
   kind: "cron" | "once";
   expr?: string;
@@ -228,7 +211,6 @@ function EditTaskForm({
 
 function TaskItem({
   task,
-  selectedWorkDir,
   onToggle,
   onDelete,
   onUpdate,
@@ -237,7 +219,6 @@ function TaskItem({
   onToggleSelect,
 }: {
   task: ScheduledTask;
-  selectedWorkDir: string | null;
   onToggle: () => void;
   onDelete: () => void;
   onUpdate: (updates: Partial<ScheduledTask>) => void;
@@ -247,13 +228,6 @@ function TaskItem({
 }) {
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const workDirName = useMemo(
-    () =>
-      selectedWorkDir
-        ? selectedWorkDir.split(/[/\\]/).pop() || selectedWorkDir
-        : "",
-    [selectedWorkDir],
-  );
 
   if (editing) {
     return (
@@ -294,9 +268,6 @@ function TaskItem({
           <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground/90">
             {task.label.replace(/\s*Helix$/, '')}
           </span>
-          <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
-            {workDirName ? workDirName : task.scheduleText}
-          </span>
         </div>
         <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 mt-0.5 line-clamp-2">
           {task.prompt}
@@ -305,34 +276,6 @@ function TaskItem({
           <span className="flex items-center gap-1">
             <Clock className="size-3" />
             {task.scheduleText}
-          </span>
-          {(task.sessionMode ?? "fresh") === "reuse" ? (
-            <span
-              className="flex items-center gap-1 text-primary/80"
-              title="每次运行回到同一条对话（Codex Scheduled Message）。适合轮询类任务：这次检查依赖上次检查的结论。"
-            >
-              <RefreshCw className="size-3" />
-              沿用对话
-            </span>
-          ) : (
-            <span
-              className="text-muted-foreground/50"
-              title="每次运行开一条新对话，跑完即焚（Codex Scheduled Task）。适合每天早上汇总邮件这类不需要记住上次结果的任务。"
-            >
-              新对话
-            </span>
-          )}
-          {(task.runCount ?? 0) > 0 && (
-            <span title="累计运行次数">已跑 {task.runCount} 次</span>
-          )}
-          <span>下次: {formatTime(task.nextRunAt)}</span>
-          {task.lastRunAt && <span>上次: {formatTime(task.lastRunAt)}</span>}
-          <span
-            className={
-              task.enabled ? "text-emerald-500/80" : "text-muted-foreground/50"
-            }
-          >
-            {task.enabled ? "运行中" : "已暂停"}
           </span>
         </div>
       </div>
@@ -395,7 +338,6 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
     updateScheduledTask,
     removeScheduledTask,
     toggleScheduledTask,
-    selectedWorkDir,
   } = useHelixStore();
   const [search, setSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -643,7 +585,6 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
                     <TaskItem
                       key={task.id}
                       task={task}
-                      selectedWorkDir={selectedWorkDir}
                       onToggle={() => handleToggle(task)}
                       onDelete={() => handleDelete(task)}
                       onUpdate={(updates) => {

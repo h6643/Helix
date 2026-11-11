@@ -157,6 +157,11 @@
   --context-usage-subagents: oklch(0.72 0.15 300);
   --context-usage-memory: oklch(0.70 0.13 190);
   --context-usage-conversation: oklch(0.72 0.14 250);
+
+  /* 上下文环「满格」终点色：环色按用量从 --primary 连续混到这个色，
+     不再在 70%/90% 跳成黄/红。浅色加深黄、深色加深蓝，两档都留在自己的
+     色族里，所以填充过程只是同族变浓。见 context-usage.tsx。 */
+  --context-ring-full: oklch(0.52 0.155 85);
 }
 
 .dark {
@@ -197,6 +202,9 @@
   --sidebar-accent-foreground: oklch(0.93 0.006 250);
   --sidebar-border: oklch(0.26 0.007 250);
   --sidebar-ring: oklch(0.72 0.14 255);
+  /* 深色档满格用深蓝：暗底上 0.48 的蓝仍明显高于 background(0.17)，
+     比浅一档的 primary 更"沉"，读作逼近上限。 */
+  --context-ring-full: oklch(0.48 0.2 265);
   --helix-surface-light: color-mix(in oklch, var(--primary) 4%, var(--card));
   --helix-surface-shadow: color-mix(in oklch, black 48%, transparent);
   --helix-surface-highlight: color-mix(in oklch, white 8%, transparent);

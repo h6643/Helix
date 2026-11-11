@@ -358,6 +358,19 @@ function classifyModelError(raw: string): { label: string; detail: string } {
   );
 }
 
+/** 中断不是模型错误。用户按「停止」、plan 退出、或网关交接清场都会让 pi 的在飞
+ *  请求带着 AbortError 文案上报（node/WebView2 的 "This operation was aborted"），
+ *  把它报成「⚠️ 模型返回错误」会让人以为上游坏了去查凭据/限流，实际只是本回合没跑完。
+ *  只认「整句就是一次中断」的短文案：上游 5xx 的错误体里偶尔也带 abort 字样，
+ *  长文案照旧原样进正文，不能顺手吞掉。 */
+function isAbortErrorText(raw: string): boolean {
+  const flat = (raw || "").replace(/\s+/g, " ").trim().toLowerCase();
+  return flat.length <= 120 && flat.includes("abort");
+}
+
+/** 中断回合的收尾标记，与 handleRun 的 AbortError 分支同一份文案。 */
+const INTERRUPTED_NOTE = "*[执行已中断]*";
+
 /** Update a conversation's mapping to a (possibly new) backend sid, keeping
  *  every sid it previously used in `sids`. Disk delegation manifests stay
  *  filed under the sid that was live when the child ran — without the
@@ -8292,9 +8305,15 @@ function AgentFlowPanelImpl() {
                   // 追加在末尾。不再按状态码分类后只显示泛化文案——用户要看到
                   // 上游原话（例如 "502 ... Billing daily count exceeded"）。
                   if (runErrorText && !content.includes(runErrorText)) {
-                    content = content.trim()
-                      ? `${content}\n\n⚠️ 模型返回错误：\n\n${runErrorText}`
-                      : `⚠️ 模型返回错误：\n\n${runErrorText}`;
+                    if (isAbortErrorText(runErrorText)) {
+                      if (!content.includes(INTERRUPTED_NOTE)) {
+                        content = `${content}${content ? "\n\n" : ""}${INTERRUPTED_NOTE}`;
+                      }
+                    } else {
+                      content = content.trim()
+                        ? `${content}\n\n⚠️ 模型返回错误：\n\n${runErrorText}`
+                        : `⚠️ 模型返回错误：\n\n${runErrorText}`;
+                    }
                   }
                   // Detect scheduled-task declarations in AI output. Don't auto-create —
                   // collect them and show a confirm dialog so the user approves first.
@@ -8457,9 +8476,11 @@ function AgentFlowPanelImpl() {
                   // 408 / 413 / 422 / 429 / 5xx，以及上下文超限 / 额度不足 / 超时 /
                   // 连接 / DNS / 网络）。用户能直接看出该改 baseUrl、改凭据、
                   // 退避限流，还是等上游恢复。
-                  const noOutputContent = runErrorRef.current
-                    ? `⚠️ 本轮运行已结束，模型未返回任何可见内容。\n\n${classifyModelError(runErrorRef.current).detail}`
-                    : "⚠️ 本轮运行已结束，但模型未返回任何可见内容。";
+                  const noOutputContent = !runErrorRef.current
+                    ? "⚠️ 本轮运行已结束，但模型未返回任何可见内容。"
+                    : isAbortErrorText(runErrorRef.current)
+                      ? INTERRUPTED_NOTE
+                      : `⚠️ 本轮运行已结束，模型未返回任何可见内容。\n\n${classifyModelError(runErrorRef.current).detail}`;
                   const st = useHelixStore.getState();
                   const mid = st.addChatMessage({
                     role: "assistant",
@@ -8525,16 +8546,18 @@ function AgentFlowPanelImpl() {
                     reasoningLen: thoughtBufferRef.current?.length ?? 0,
                     fatal: parsed.fatal === true,
                   });
-                  uiSteps((prev) => [
-                    ...prev,
-                    {
-                      id: generateId(),
-                      type: "error",
-                      content: errText,
-                      timestamp: Date.now(),
-                    },
-                  ]);
-                  storeActions.addExecutionStep({ type: "error" });
+                  if (!isAbortErrorText(errText)) {
+                    uiSteps((prev) => [
+                      ...prev,
+                      {
+                        id: generateId(),
+                        type: "error",
+                        content: errText,
+                        timestamp: Date.now(),
+                      },
+                    ]);
+                    storeActions.addExecutionStep({ type: "error" });
+                  }
                   scheduleSynthDone(parsed.fatal === true ? 2000 : 20000);
                   resetIdleTimer();
                 } else {
@@ -8558,7 +8581,11 @@ function AgentFlowPanelImpl() {
                   // 不能因为"有内容"就把错误藏起来。
                   const contentWithError =
                     errText && !content.includes(errText)
-                      ? `${content}${content ? "\n\n" : ""}⚠️ 模型返回错误：\n\n${errText}`
+                      ? `${content}${content ? "\n\n" : ""}${
+                          isAbortErrorText(errText)
+                            ? INTERRUPTED_NOTE
+                            : `⚠️ 模型返回错误：\n\n${errText}`
+                        }`
                       : content;
                   if (
                     contentWithError ||
@@ -8832,7 +8859,7 @@ function AgentFlowPanelImpl() {
             const partialReasoning = thoughtBufferRef.current || undefined;
             const msgId = useHelixStore.getState().addChatMessage({
               role: "assistant",
-              content: partialContent + "\n\n*[执行已中断]*",
+              content: `${partialContent}\n\n${INTERRUPTED_NOTE}`,
               reasoning: partialReasoning,
               sessionId: activeSessionId,
             });
@@ -10132,17 +10159,12 @@ function AgentFlowPanelImpl() {
             </button>
           </div>
         )}
-        {/* 远程对话探活不可达：启动时探过连不上，已跳过恢复后端会话。
-            发送前会再探一次，连上了提示自动消失、照常恢复。 */}
         {isRemoteUnreachable && !isSessionBroken && (
           <div className="flex items-start gap-2 px-4 py-2.5 border-b border-border/40 bg-muted/30 text-muted-foreground ui-text-sm2">
             <WifiOff className="size-3.5 mt-0.5 shrink-0" />
             <div className="min-w-0">
               <div className="font-medium text-foreground">
-                远程服务器当前不可达，已跳过恢复该对话
-              </div>
-              <div className="opacity-80">
-                连接服务器后再次发送即可自动恢复；本地历史仍可查看。
+                远程服务器当前不可达，请先连接。
               </div>
             </div>
           </div>

@@ -251,6 +251,7 @@ export const electronDialog = {
 
   async saveFile(options?: {
     filters?: Array<{ name: string; extensions: string[] }>;
+    fileName?: string;
   }): Promise<string | null> {
     const api = getElectronAPI();
     if (api) {

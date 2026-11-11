@@ -38,6 +38,15 @@ interface PersistedTask {
   depth: number;
 }
 
+/**
+ * 「回复生成中」占位消息（写入端见 helix-store persistSession 的
+ * draft-partial-<sessionId>）：只是切会话/退出时的磁盘兜底，不是历史回复。
+ * 所有读取入口——渲染、搜索、跳转定位——都必须跳过它。
+ */
+export function isDraftPartialMessage(id: string): boolean {
+  return id.startsWith("draft-partial-");
+}
+
 export interface PersistedChatMessage {
   id: string;
   sessionId?: string;
@@ -768,193 +777,5 @@ export const persistence = {
   async saveScheduledTasks(tasks: PersistedScheduledTask[]): Promise<void> {
     await this.saveSetting("scheduledTasks", tasks);
   },
-
-  // --- Session Export/Import ---
-  async exportSessionAsJson(session: PersistedSession): Promise<string> {
-    const exportData = {
-      version: "1.0",
-      exportedAt: Date.now(),
-      type: "helix-session",
-      session: {
-        label: session.label,
-        savedAt: session.savedAt,
-        workDir: session.workDir,
-        goal: session.goal,
-        chatMessages: session.chatMessages.map((m) => ({
-          role: m.role,
-          content: m.content,
-          timestamp: m.timestamp,
-        })),
-        files: session.files,
-        openTabs: session.openTabs,
-        tasks: session.tasks,
-        notes: session.notes,
-      },
-    };
-    return JSON.stringify(exportData, null, 2);
-  },
-
-  async exportSessionAsMarkdown(session: PersistedSession): Promise<string> {
-    const lines: string[] = [];
-    lines.push(`# ${session.label}`);
-    lines.push(
-      `> 导出时间: ${new Date(session.savedAt).toLocaleString("zh-CN")}`,
-    );
-    if (session.goal) lines.push(`> 目标: ${session.goal}`);
-    if (session.workDir) lines.push(`> 工作目录: ${session.workDir}`);
-    lines.push("");
-
-    const fileList = session.files || [];
-    if (fileList.length > 0) {
-      lines.push("## 文件结构");
-      for (const f of fileList) {
-        lines.push(`- ${f.name}${f.type === "folder" ? "/" : ""}`);
-      }
-      lines.push("");
-    }
-
-    const messages = session.chatMessages || [];
-    if (messages.length > 0) {
-      lines.push("## 对话记录");
-      lines.push("");
-      for (const msg of messages) {
-        const role = msg.role === "user" ? "🧑 用户" : "🤖 AI";
-        lines.push(
-          `### ${role} (${new Date(msg.timestamp).toLocaleString("zh-CN")})`,
-        );
-        lines.push("");
-        lines.push(msg.content);
-        lines.push("");
-        lines.push("---");
-        lines.push("");
-      }
-    }
-
-    return lines.join("\n");
-  },
-
-  async importSessionFromJson(json: string): Promise<PersistedSession | null> {
-    try {
-      const data = JSON.parse(json);
-      if (data.type !== "helix-session" && !data.session) return null;
-      const s = data.session || data;
-      const now = Date.now();
-      const session: PersistedSession = {
-        id: `imported-${now}`,
-        label: s.label || `导入会话 ${new Date(now).toLocaleString("zh-CN")}`,
-        savedAt: s.savedAt || now,
-        workDir: s.workDir || null,
-        goal: s.goal || null,
-        chatMessages: (s.chatMessages || []).map((m: Partial<PersistedChatMessage>) => ({
-          id: `msg-${now}-${Math.random().toString(36).slice(2, 8)}`,
-          role: m.role,
-          content: m.content || "",
-          timestamp: m.timestamp || now,
-          isStreaming: false,
-        })),
-        files: s.files || [],
-        openTabs: s.openTabs || [],
-        tasks: s.tasks || [],
-        notes: s.notes || "",
-      };
-      await this.saveSession(session);
-      return session;
-    } catch {
-      return null;
-    }
-  },
-
-  async importSessionFromMarkdown(
-    md: string,
-  ): Promise<PersistedSession | null> {
-    try {
-      const lines = md.split("\n");
-      let label = "";
-      let goal: string | null = null;
-      let workDir: string | null = null;
-      let exportedAt: number = Date.now();
-      const messages: Array<{
-        role: string;
-        content: string;
-        timestamp: number;
-      }> = [];
-
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-
-        const titleMatch = line.match(/^# (.+)$/);
-        if (titleMatch) {
-          label = titleMatch[1];
-          continue;
-        }
-
-        const metaMatch = line.match(/^> (\S+):\s*(.+)$/);
-        if (metaMatch) {
-          const key = metaMatch[1];
-          const val = metaMatch[2].trim();
-          if (key === "目标") goal = val;
-          else if (key === "工作目录") workDir = val;
-          else if (key === "导出时间") {
-            const d = new Date(val);
-            if (!isNaN(d.getTime())) exportedAt = d.getTime();
-          }
-          continue;
-        }
-
-        const msgMatch = line.match(/^### (\S+\s+\S+)\s*\((.+)\)$/);
-        if (msgMatch) {
-          const roleLabel = msgMatch[1];
-          const timeStr = msgMatch[2];
-          const ts = new Date(timeStr).getTime() || exportedAt;
-          const role = roleLabel.includes("用户") ? "user" : "assistant";
-          const contentLines: string[] = [];
-          i++;
-          while (
-            i + 1 < lines.length &&
-            lines[i + 1] !== "---" &&
-            !lines[i + 1].match(/^### /) &&
-            !lines[i + 1].match(/^## /) &&
-            !lines[i + 1].match(/^# /)
-          ) {
-            i++;
-            contentLines.push(lines[i]);
-          }
-          if (i + 1 < lines.length && lines[i + 1].trim() === "---") i++;
-          messages.push({
-            role,
-            content: contentLines.join("\n").trim(),
-            timestamp: ts,
-          });
-          continue;
-        }
-      }
-
-      if (!label && messages.length === 0) return null;
-
-      const now = Date.now();
-      const session: PersistedSession = {
-        id: "imported-md-" + now,
-        label:
-          label || "导入 Markdown " + new Date(now).toLocaleString("zh-CN"),
-        savedAt: exportedAt,
-        workDir,
-        goal,
-        chatMessages: messages.map((m, idx) => ({
-          id: "msg-" + now + "-" + idx,
-          role: m.role,
-          content: m.content,
-          timestamp: m.timestamp,
-          isStreaming: false,
-        })),
-        files: [],
-        openTabs: [],
-        tasks: [],
-        notes: "",
-      };
-      await this.saveSession(session);
-      return session;
-    } catch {
-      return null;
-    }
-  },
 };
+

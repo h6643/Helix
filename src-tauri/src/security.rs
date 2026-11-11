@@ -197,6 +197,9 @@ pub async fn save_file(app: AppHandle, options: Option<Value>) -> Option<String>
                 }
             }
         }
+        if let Some(name) = opts.get("fileName").and_then(|v| v.as_str()) {
+            builder = builder.set_file_name(name);
+        }
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
     builder.save_file(move |p| {

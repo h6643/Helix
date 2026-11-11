@@ -21,7 +21,6 @@ import {
   Pencil,
   Copy,
   Download,
-  ChevronRight,
   PanelRight,
   GitBranch,
   AlertTriangle,
@@ -48,7 +47,6 @@ import { timeAgo } from "@/lib/format";
 import { persistence, type PersistedSession } from "@/lib/persist";
 import { prepareRemoteMirror } from "@/lib/remote-mirror";
 import {
-  adoptRemoteDraftWorkDir,
   connectRemoteProject,
   disconnectRemoteProject,
   findServiceByRemoteWorkDir,
@@ -60,6 +58,7 @@ import {
   remoteWorkDirForService,
   toRemoteTarget,
 } from "@/lib/remote-projects";
+import { exportSessionTranscript } from "@/lib/session-export";
 import { resolveBackendSid, removeConversationIndex } from "@/lib/session-map";
 import { mapBackendMessages } from "@/lib/session-resync";
 import { useGatewayStore } from "@/stores/gateway-store";
@@ -112,8 +111,8 @@ interface SessionActionsMenuProps {
   onCopyId?: () => void;
   /** 打开旁路问答（/btw）：右侧「旁路问答」面板，不切走当前对话。 */
   onByline?: () => void;
-  /** 导出：走 persistence 的 JSON / Markdown 导出（与「会话管理」同一套实现）。 */
-  onExport?: (format: "json" | "markdown") => void;
+  /** 导出：走 pi 自己的导出（`/export` 的 RPC 等价物），见 lib/session-export。 */
+  onExport?: () => void;
   // 展开态受控：菜单有两个入口（hover 的「更多操作」按钮 + 对话行右键），
   // 状态必须住在父组件，否则右键无法驱动打开。
   open: boolean;
@@ -144,7 +143,6 @@ function SessionActionsMenu({
 }: SessionActionsMenuProps) {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const [exportOpen, setExportOpen] = useState(false);
   const [coords, setCoords] = useState<{
     top: number;
     left: number;
@@ -253,51 +251,17 @@ function SessionActionsMenu({
                 </button>
               )}
               {onExport && (
-                <div
-                  className="relative"
-                  onMouseEnter={() => setExportOpen(true)}
-                  onMouseLeave={() => setExportOpen(false)}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenChange(false);
+                    onExport();
+                  }}
+                  className={MENU_ITEM}
                 >
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setExportOpen((v) => !v);
-                    }}
-                    className={MENU_ITEM}
-                  >
-                    <Download className={MENU_ICON} />
-                    <span className="flex-1 text-left">导出记录</span>
-                    <ChevronRight
-                      className={`size-3.5 shrink-0 text-muted-foreground/60 transition-transform ${exportOpen ? "rotate-90" : ""}`}
-                    />
-                  </button>
-                  {exportOpen && (
-                    <div className="absolute left-full top-0 ml-1 w-40 bg-card border border-border/80 rounded-lg shadow-xl py-1">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onOpenChange(false);
-                          onExport("markdown");
-                        }}
-                        className={MENU_ITEM}
-                      >
-                        <Download className={MENU_ICON} />
-                        Markdown
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onOpenChange(false);
-                          onExport("json");
-                        }}
-                        className={MENU_ITEM}
-                      >
-                        <Download className={MENU_ICON} />
-                        JSON
-                      </button>
-                    </div>
-                  )}
-                </div>
+                  <Download className={MENU_ICON} />
+                  导出记录
+                </button>
               )}
               {!isArchived && onPin && (
                 <button
@@ -372,8 +336,6 @@ function SessionActionsMenu({
                   </button>
                 </>
               )}
-              {/* 侧边栏不提供「删除对话」：误触成本高且不可撤销。
-                  需要清理时走「设置 → 会话管理」或先归档。 */}
             </div>
           </div>,
           document.body,
@@ -667,33 +629,11 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     [showToast],
   );
 
-  /** 导出对话记录：走 persistence 的 JSON / Markdown 序列化，与「会话管理」同一套。 */
-  const exportSession = useCallback(
-    async (id: string, format: "json" | "markdown") => {
-      const session = sessions.find((s) => s.id === id);
-      if (!session) return;
-      try {
-        const data =
-          format === "json"
-            ? await persistence.exportSessionAsJson(session)
-            : await persistence.exportSessionAsMarkdown(session);
-        const blob = new Blob([data], {
-          type: format === "json" ? "application/json" : "text/markdown",
-        });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `helix-session-${session.label || session.id}.${format === "json" ? "json" : "md"}`;
-        a.click();
-        URL.revokeObjectURL(url);
-        showToast({ type: "success", title: "导出成功" });
-      } catch (e) {
-        console.error("Failed to export session:", e);
-        showToast({ type: "error", title: "导出失败" });
-      }
-    },
-    [sessions, showToast],
-  );
+  /** 导出对话记录：交给 pi 自己的导出（含工具调用/思考块，见 lib/session-export）。 */
+  const exportSession = useCallback(async (id: string) => {
+    const session = sessions.find((s) => s.id === id);
+    if (session) await exportSessionTranscript(session);
+  }, [sessions]);
 
   // 历史对话条分页：每页最多显示 20 条（项目内会话与独立对话各自分页）。
   const PAGE_SIZE = 20;
@@ -1216,8 +1156,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     [],
   );
 
-  /* 侧边栏不再提供「删除对话」入口（误触成本高、不可撤销）。
-     删除能力仍在「设置 → 会话管理」里，见 session-manager.tsx。 */
 
   const handleToggleArchive = useCallback(
     async (id: string, e?: React.MouseEvent) => {
@@ -1385,11 +1323,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         setRemoteBusyId(svc.id);
         try {
           await disconnectRemoteProject();
-          showToast({
-            type: "success",
-            title: "已断开远程项目",
-            description: `${remoteProjectLabel(svc)} — agent 回到本机运行。`,
-          });
         } catch (e) {
           showToast({
             type: "error",
@@ -1417,15 +1350,12 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           // remote_mirror.rs；远端同名 provider 跳过不覆盖）。
           prepareRemoteMirror(svc),
         );
-        // 同向导 finish()：连上隧道后把草稿的项目身份也设成这台远程项目，
-        // 否则第一条消息仍按旧的本机 cwd 发（「选了远程项目却在本机对话」）。
-        const adopted = adoptRemoteDraftWorkDir(svc, svc.remotePath);
         showToast({
           type: "success",
           title: "已连接远程项目",
           description: `${remoteProjectLabel(svc)}${
             localPort ? `（隧道 127.0.0.1:${localPort}）` : ""
-          } — agent 现在远端跑。${adopted ? "下一条消息将在远端执行。" : "（正进行的对话不受影响）"}`,
+          } — agent 现在远端跑。`,
         });
       } catch (e) {
         showToast({ type: "error", title: "连接失败", description: String(e) });
@@ -1806,9 +1736,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                       }
                       onByline={() => void handleOpenByline(session.id)}
                       onCopyId={() => copySessionId(session.id)}
-                      onExport={(fmt) =>
-                        void exportSession(session.id, fmt)
-                      }
+                      onExport={() => void exportSession(session.id)}
                       onArchive={() => handleToggleArchive(session.id)}
                       onPin={() => handleTogglePin(session.id)}
                       onRename={() => setRenamingId(session.id)}
@@ -2246,8 +2174,8 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                                             onCopyId={() =>
                                               copySessionId(session.id)
                                             }
-                                            onExport={(fmt) =>
-                                              void exportSession(session.id, fmt)
+                                            onExport={() =>
+                                              void exportSession(session.id)
                                             }
                                             onArchive={() =>
                                               handleToggleArchive(session.id)
@@ -2405,9 +2333,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                               if (!v) setSessionMenuPoint(null);
                             }}
                             onCopyId={() => copySessionId(session.id)}
-                            onExport={(fmt) =>
-                              void exportSession(session.id, fmt)
-                            }
+                            onExport={() => void exportSession(session.id)}
                             onArchive={() => handleToggleArchive(session.id)}
                             onPin={() => handleTogglePin(session.id)}
                             onPinInProject={() =>

@@ -38,6 +38,10 @@ import { TokenUsagePanel } from "./usage-stats";
 import { VisionModelSettings } from "./vision-model-settings";
 import { Button } from "@/components/ui/button";
 import { isElectron } from "@/lib/electron-bridge";
+import {
+  normalizeModelInput,
+  normalizeModelInputIfPresent,
+} from "@/lib/model-input";
 import { persistence } from "@/lib/persist";
 import { getAllProviders, getBaseUrl } from "@/lib/providers";
 import { useGatewayStore } from "@/stores/gateway-store";
@@ -286,12 +290,12 @@ export function ApiSettings({
     setLocalConfig({ ...apiConfig });
   }, [apiConfig]);
 
-  // Profile 只存模型 id 字符串，contextWindow / reasoning 不在 profile 里。
+  // Profile 只存模型 id 字符串，per-model 元数据在各自的映射里。
   // 重新灌入 addedModels 时必须保留内存里已有的 per-model 元数据，否则
   // 保存触发 apiProfiles 变化 → 下方 effect 一跑就把它们洗成 { id }。
   // 冷启动（prev 为空）时回退到 profile 落盘的 modelContextWindows /
-  // modelReasonings：若不单独存一份映射，重开编辑时 per-model 元数据全丢，
-  // 再保存就送 undefined，后端 256_000 回退把用户填过的值重置掉
+  // modelReasonings / modelInputs：若不单独存一份映射，重开编辑时
+  // per-model 元数据全丢，再保存就送 undefined，后端把用户填过的值重置掉
   // （"我之前填的上下文窗口被改掉了" / "思考模式重启后没了"根因）。
   const seedAddedModels = useCallback(
     (
@@ -308,7 +312,7 @@ export function ApiSettings({
               id,
               contextWindow: old.contextWindow,
               reasoning: old.reasoning,
-              input: old.input,
+              input: old.input ? normalizeModelInput(old.input) : undefined,
             };
           }
           const cw = persistedWindows?.[id];
@@ -318,7 +322,9 @@ export function ApiSettings({
             id,
             ...(cw !== undefined ? { contextWindow: cw } : {}),
             ...(rs !== undefined ? { reasoning: rs } : {}),
-            ...(inp !== undefined ? { input: inp } : {}),
+            ...(inp !== undefined
+              ? { input: normalizeModelInput(inp) }
+              : {}),
           };
         }),
       );
@@ -422,10 +428,8 @@ export function ApiSettings({
   const [pickedContext, setPickedContext] = useState("");
   const [manualModel, setManualModel] = useState("");
   const [pickedReasoning, setPickedReasoning] = useState(false);
-  // 输入类型：文字始终开；图片/视频是可选项。
-  // 后端白名单里收了 video/audio（pi 现在只认 image），留位不丢数据。
+  // 输入类型：文字始终开；图片可选。
   const [pickedInputImage, setPickedInputImage] = useState(false);
-  const [pickedInputVideo, setPickedInputVideo] = useState(false);
   type ModelTab = "main" | "vision" | `channel:${string}`;
   const [modelTab, setModelTab] = useState<ModelTab>("main");
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
@@ -513,24 +517,17 @@ export function ApiSettings({
     setAddedModels((prev) => {
       let changed = false;
       const next = prev.map((m) => {
-        if (
-          m.contextWindow !== undefined &&
-          m.reasoning !== undefined &&
-          m.input !== undefined
-        )
-          return m;
         const pm =
           piModels.find(
             (x) => x.id === m.id && (!prov || x.provider === prov),
           ) ?? piModels.find((x) => x.id === m.id);
-        if (!pm) return m;
-        const contextWindow = m.contextWindow ?? pm.contextWindow;
-        const reasoning = m.reasoning ?? pm.reasoning;
-        const input = m.input ?? pm.input;
+        const contextWindow = m.contextWindow ?? pm?.contextWindow;
+        const reasoning = m.reasoning ?? pm?.reasoning;
+        const input = normalizeModelInputIfPresent(m.input ?? pm?.input);
         if (
           contextWindow === m.contextWindow &&
           reasoning === m.reasoning &&
-          input === m.input
+          JSON.stringify(input) === JSON.stringify(m.input)
         ) {
           return m;
         }
@@ -681,14 +678,15 @@ export function ApiSettings({
             api: fmt,
             models: addedModels
               .filter((m) => m.id.trim())
-              .map((m) => ({
-                id: m.id.trim(),
-                contextWindow: m.contextWindow,
-                ...(m.reasoning ? { reasoning: true } : {}),
-                ...(m.input && m.input.length > 0
-                  ? { input: m.input }
-                  : {}),
-              })),
+              .map((m) => {
+                const input = normalizeModelInputIfPresent(m.input);
+                return {
+                  id: m.id.trim(),
+                  contextWindow: m.contextWindow,
+                  ...(m.reasoning ? { reasoning: true } : {}),
+                  ...(input ? { input } : {}),
+                };
+              }),
           })
           ?.catch((e) =>
             console.warn("[Helix] registerProviderModels failed:", e),
@@ -824,10 +822,9 @@ export function ApiSettings({
       showToast({ type: "error", title: "模型上下文限制必须是正整数" });
       return;
     }
-    // 输入类型：文字始终在，图片/视频按勾选附加。
-    const inputList = ["text"];
-    if (pickedInputImage) inputList.push("image");
-    if (pickedInputVideo) inputList.push("video");
+    const inputList = normalizeModelInput(
+      pickedInputImage ? ["text", "image"] : ["text"],
+    );
     const newModels = [
       ...addedModels.filter((m) => m.id !== id),
       {
@@ -843,7 +840,6 @@ export function ApiSettings({
     setPickedContext("");
     setPickedReasoning(false);
     setPickedInputImage(false);
-    setPickedInputVideo(false);
     setModelSearch("");
     setShowAddModelDialog(false);
     // 保存按钮已移除：添加模型后立即自动持久化（传入刚更新好的列表，
@@ -855,7 +851,6 @@ export function ApiSettings({
     pickedContext,
     pickedReasoning,
     pickedInputImage,
-    pickedInputVideo,
     addedModels,
     showToast,
   ]);
@@ -896,7 +891,7 @@ export function ApiSettings({
       // （"我开了思考模式，重启后没了"根因）。
       const modelReasonings: Record<string, boolean> = {};
       // 同 contextWindow / reasoning：input 也必须随 profile 落盘，否则冷启动
-      // seedAddedModels 剥成 undefined，多模态模型又变回「图片走转述管道」。
+      // seedAddedModels 剥成 undefined，已配置的图片能力会丢。
       const modelInputs: Record<string, string[]> = {};
       for (const m of models) {
         const id = m.id.trim();
@@ -907,7 +902,7 @@ export function ApiSettings({
           modelReasonings[id] = m.reasoning;
         }
         if (id && Array.isArray(m.input)) {
-          modelInputs[id] = m.input;
+          modelInputs[id] = normalizeModelInput(m.input);
         }
       }
       const finalConfig: ApiConfig = {
@@ -1054,14 +1049,15 @@ export function ApiSettings({
               api: cfg.api,
               models: models
                 .filter((m) => m.id.trim())
-                .map((m) => ({
-                  id: m.id.trim(),
-                  contextWindow: m.contextWindow,
-                  ...(m.reasoning ? { reasoning: true } : {}),
-                  ...(m.input && m.input.length > 0
-                    ? { input: m.input }
-                    : {}),
-                })),
+                .map((m) => {
+                  const input = normalizeModelInputIfPresent(m.input);
+                  return {
+                    id: m.id.trim(),
+                    contextWindow: m.contextWindow,
+                    ...(m.reasoning ? { reasoning: true } : {}),
+                    ...(input ? { input } : {}),
+                  };
+                }),
             });
           }
           await helix.setConfig(cfg);
@@ -1484,6 +1480,7 @@ export function ApiSettings({
                               setManualModel("");
                               setPickedContext("");
                               setPickedReasoning(false);
+                              setPickedInputImage(false);
                               setModelSearch("");
                               setShowAddModelDialog(true);
                             }}
@@ -1592,13 +1589,10 @@ export function ApiSettings({
                                     setPickedReasoning(
                                       !!(m.reasoning ?? pm?.reasoning),
                                     );
-                                    const inputList =
-                                      m.input ?? pm?.input ?? [];
                                     setPickedInputImage(
-                                      inputList.includes("image"),
-                                    );
-                                    setPickedInputVideo(
-                                      inputList.includes("video"),
+                                      (m.input ?? pm?.input)?.includes(
+                                        "image",
+                                      ) ?? false,
                                     );
                                     setModelSearch("");
                                     setShowAddModelDialog(true);
@@ -1843,25 +1837,7 @@ export function ApiSettings({
                                 >
                                   图片
                                 </button>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setPickedInputVideo((v) => !v)
-                                  }
-                                  className={`px-2.5 py-1.5 rounded-lg text-[length:var(--helix-transcript-size)*0.9] font-mono border transition-colors ${
-                                    pickedInputVideo
-                                      ? "border-primary/50 bg-primary/10 text-primary"
-                                      : "border-border/40 text-muted-foreground/60 hover:bg-accent/40"
-                                  }`}
-                                  data-tip="会写入 models.json，但 pi 目前只识别 image，视频不会生效"
-                                >
-                                  视频
-                                </button>
                               </div>
-                              <p className="mt-1.5 text-[length:var(--helix-transcript-size)*0.85] text-muted-foreground/60">
-                                pi 只认「图片」：勾了才把图片原生透传给模型，
-                                不勾则先转成文字描述。
-                              </p>
                             </div>
 
                             <div className="flex justify-end gap-2 pt-1">

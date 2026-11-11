@@ -156,10 +156,9 @@ pub fn model_context_window_for(model: &str, provider: Option<&str>) -> i64 {
     context_window_in(&read_pi_models(), model, provider)
 }
 
-/// pi 认得的模型输入类型。写入 models.json 的 `input` 数组只收这几个值：
-/// pi 运行时只检查 `.includes("image")`（决定是否原生透传图片），其余值它
-/// 当未知忽略，留着是为了向后兼容（pi 后续加了 video/audio 就能直接用）。
-const KNOWN_INPUT_TYPES: &[&str] = &["text", "image", "video", "audio"];
+/// models.json 的 `input` 只收文字和图片：pi 运行时只检查
+/// `.includes("image")`（决定是否原生透传图片）。
+const KNOWN_INPUT_TYPES: &[&str] = &["text", "image"];
 
 /// 从前端传来的模型条目里取 `input`：返回 None = 调用方没给（保留已有值），
 /// Some(vec) = 显式设定（空数组 = 删掉这个字段）。非数组/非法值一律过滤掉。
@@ -1283,10 +1282,10 @@ mod pi_roundtrip_tests {
             Vec::<String>::new()
         );
 
-        // video / audio 在白名单里：pi 现在只读 image，留位不丢数据。
+        // 视频 / 音频不在白名单里：只写文字和图片。
         assert_eq!(
-            parse_model_input(&serde_json::json!({ "input": ["video"] })).unwrap(),
-            vec!["video".to_string()]
+            parse_model_input(&serde_json::json!({ "input": ["video", "audio"] })).unwrap(),
+            Vec::<String>::new()
         );
     }
 }

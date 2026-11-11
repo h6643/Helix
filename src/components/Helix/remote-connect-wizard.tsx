@@ -30,7 +30,6 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { prepareRemoteMirror } from "@/lib/remote-mirror";
 import {
-  adoptRemoteDraftWorkDir,
   connectRemoteProject,
   listRemotePaths,
   preflightRemoteProject,
@@ -55,7 +54,6 @@ function WizardBody() {
   const setStep = useHelixStore((s) => s.setRemoteWizardStep);
   const close = useHelixStore((s) => s.closeRemoteWizard);
   const bump = useHelixStore((s) => s.bumpRemoteStatusVersion);
-  const showToast = useHelixStore((s) => s.showToast);
   const addExternalService = useHelixStore((s) => s.addExternalService);
   const updateExternalService = useHelixStore((s) => s.updateExternalService);
   const services = useHelixStore((s) => s.externalServices);
@@ -267,7 +265,7 @@ function WizardBody() {
     setConnecting(true);
     setConnErr(null);
     try {
-      const { localPort } = await connectRemoteProject(
+      await connectRemoteProject(
         target,
         cwd,
         // 连接即镜像：本机配置的供应商自动写进远端 models.json（见
@@ -277,17 +275,6 @@ function WizardBody() {
       if (resolvedId) {
         await updateExternalService(resolvedId, { remotePath: cwd });
       }
-      // 隧道通了还不够：把**草稿**的项目身份也设成这台远程项目。否则用户回到
-      // 输入框发的第一条消息仍带着上一个本机 cwd（session/new 的 cwd）在本机
-      // spawn —— 即「选了远程项目却在本机对话」。
-      const adopted = adoptRemoteDraftWorkDir(target, cwd);
-      showToast({
-        type: "success",
-        title: "已连接远程项目",
-        description: `${target.username}@${target.host}:${cwd}${
-          localPort ? `（隧道 127.0.0.1:${localPort}）` : ""
-        } — agent 现在远端跑。${adopted ? "下一条消息将在远端执行。" : "（正进行的对话不受影响，新对话可在远端跑）"}`,
-      });
       bump();
       close();
     } catch (e) {
@@ -295,7 +282,7 @@ function WizardBody() {
     } finally {
       setConnecting(false);
     }
-  }, [bump, close, cwd, resolvedId, showToast, target, updateExternalService]);
+  }, [bump, close, cwd, resolvedId, target, updateExternalService]);
 
   return (
     <>

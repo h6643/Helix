@@ -10,6 +10,7 @@
  * 这里只负责「构造清单、种进下拉缓存」：每次连接都自动带上全部本机供应商，
  * 不弹确认框。
  */
+import { normalizeModelInput } from "@/lib/model-input";
 import {
   REMOTE_GROUP_PREFIX,
   seedRemoteSnapshot,
@@ -22,7 +23,12 @@ export type RemoteMirrorProvider = {
   baseUrl: string;
   api: string;
   apiKey: string;
-  models: { id: string; name: string; contextWindow?: number }[];
+  models: {
+    id: string;
+    name: string;
+    contextWindow?: number;
+    input: string[];
+  }[];
 };
 
 /** 镜像清单与下拉共用一份数据：连接后先把下拉填上，不必等远端 pi 实例起来。 */
@@ -72,6 +78,7 @@ function buildMirrorProviders(): RemoteMirrorProvider[] {
       (x) => (x.config?.baseUrl ?? "").trim() === baseUrl,
     );
     const windows = profile?.modelContextWindows ?? {};
+    const inputs = profile?.modelInputs ?? {};
     out.push({
       name,
       baseUrl,
@@ -81,6 +88,7 @@ function buildMirrorProviders(): RemoteMirrorProvider[] {
         id,
         name: id,
         contextWindow: windows[id],
+        input: normalizeModelInput(inputs[id]),
       })),
     });
   }
