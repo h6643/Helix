@@ -34,7 +34,7 @@ export function segmentizeProcessBlocks<T extends { type: string }>(
   });
 }
 
-type ProcessSegment<T extends { type: string }> = {
+export type ProcessSegment<T extends { type: string }> = {
   kind: "text" | "thinking" | "tasks";
   blocks: T[];
 };
@@ -273,4 +273,44 @@ export function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+// ── 按正文段落分节（流式 / 完成态两条渲染路径共用）──────────────────────
+//
+// 长 agentic 回合里模型每调一次工具前都思考一次，过程卡里「思考」行很多，
+// 最终答案被顶得很远。分节规则（与流式视图像素级一致）：
+//   · text 段落 = 节标题（模型自己叙述的阶段说明），其后跟随的思考/工具行
+//     归属到这段落；
+//   · 全部过程行（含首段正文之前的前言）都左竖线缩进——整个过程区
+//     视觉上归在正文之下；
+//   · 每段思考独立一行（不合并），完整保留「思考→执行→思考」时序。
+
+export interface ProcessSection<T extends { type: string }> {
+  /** 节标题 = 正文段落（text 块）；null = 前言（首段正文之前的过程）。 */
+  header: T | null;
+  items: ProcessSegment<T>[];
+}
+
+export function groupProcessSections<T extends { type: string }>(
+  segs: ProcessSegment<T>[],
+): ProcessSection<T>[] {
+  const sections: ProcessSection<T>[] = [];
+  let current: ProcessSection<T> | null = null;
+  for (const seg of segs) {
+    if (seg.kind === "text") {
+      // text 段恒只含一个 text 块（见 segmentizeProcessBlocks）。
+      // 它成为节标题：后面的过程行归属这段落。
+      const header = seg.blocks.find((b) => b.type === "text") ?? null;
+      current = { header, items: [] };
+      sections.push(current);
+      continue;
+    }
+    if (!current) {
+      current = { header: null, items: [] };
+      sections.push(current);
+    }
+    // 思考 / 纯工具 / file_change：各自一段，原样保留时间序。
+    current.items.push(seg);
+  }
+  return sections;
 }

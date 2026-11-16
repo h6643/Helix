@@ -24,6 +24,7 @@ import {
   PanelRight,
   GitBranch,
   AlertTriangle,
+  SquarePlus,
 } from "lucide-react";
 import React, {
   useState,
@@ -1547,7 +1548,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   ]);
 
   const topActions = [
-    { id: "new", label: "新对话", icon: Plus, action: handleNewTask },
+    { id: "new", label: "新对话", icon: SquarePlus, action: handleNewTask },
     {
       id: "search",
       label: "搜索",

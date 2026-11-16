@@ -9,6 +9,7 @@ import {
   FolderPlus,
   Save,
   Keyboard,
+  Monitor,
   Moon,
   Sun,
   Copy,
@@ -203,15 +204,29 @@ export function CommandPalette() {
       {
         id: "action-toggle-theme",
         label: "切换编辑器主题",
-        description: `当前: ${editorTheme === "vs-dark" ? "深色" : "浅色"}`,
+        description: `当前: ${
+          editorTheme === "system"
+            ? "跟随主题"
+            : editorTheme === "vs-dark"
+              ? "深色"
+              : "浅色"
+        }`,
         icon:
-          editorTheme === "vs-dark" ? (
+          editorTheme === "system" ? (
+            <Monitor className="size-4 text-emerald-400" />
+          ) : editorTheme === "vs-dark" ? (
             <Moon className="size-4 text-blue-400" />
           ) : (
             <Sun className="size-4 text-yellow-400" />
           ),
         action: () => {
-          const next = editorTheme === "vs-dark" ? "light" : "vs-dark";
+          // 三态循环：跟随主题 → 深色 → 浅色 → 跟随主题
+          const next =
+            editorTheme === "system"
+              ? ("vs-dark" as const)
+              : editorTheme === "vs-dark"
+                ? ("light" as const)
+                : ("system" as const);
           setEditorTheme(next);
         },
         category: "action",

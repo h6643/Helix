@@ -10,7 +10,24 @@
  *
  * 主对话专属的交互（搜索高亮）通过 props 传 boolean；旁路面板传全 false 即可。
  */
-import { Check, Copy, GitFork, FileText, Pencil } from "lucide-react";
+import {
+  Bot,
+  Brain,
+  Check,
+  Copy,
+  Eye,
+  FileText,
+  GitFork,
+  Globe,
+  ListTodo,
+  Pencil,
+  Search,
+  SquarePen,
+  SquareTerminal,
+  Wrench,
+  Workflow,
+  Zap,
+} from "lucide-react";
 import React from "react";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { FileChangeSummary } from "./file-change-summary";
@@ -21,12 +38,14 @@ import {
   buildProcessSegments,
   formatBytes,
   formatDuration,
+  groupProcessSections,
   mergeAdjacentThinking,
   mergeThinkingContents,
   mergeToolRuns,
   normalizeTextBlocks,
   segmentizeProcessBlocks,
   thinkingSegmentDurationS,
+  type ProcessSection,
 } from "./transcript-utils";
 import { formatDurationSeconds } from "@/lib/format";
 import { copyTextAndImages } from "@/lib/image-utils";
@@ -35,9 +54,13 @@ import {
   normalizeAcpContentRaw,
   extractKaomojiStatus,
 } from "@/lib/text-utils";
-import { formatMergedSummary, isSubAgentTool } from "@/lib/tool-merge";
+import { formatMergedSummary, isSubAgentTool, primaryToolVerb } from "@/lib/tool-merge";
 import { useHelixStore } from "@/stores/helix-store";
-import { type ChatMessage, type ExecutionStep } from "@/stores/helix-types";
+import {
+  type ChatMessage,
+  type ExecutionStep,
+  type StreamingResponseBlock,
+} from "@/stores/helix-types";
 
 /** 思考体展开后最多显示的行数。超出部分在这个高度里滚动——完整推理仍在数据里
  *  （上翻可读、复制可拿全文），但一段几千字的 reasoning 不能把对话流整个顶下去。
@@ -108,11 +131,6 @@ export const ThinkingFold = React.memo(function ThinkingFold({
   const open = userOpen;
   const bodyRef = React.useRef<HTMLDivElement | null>(null);
 
-  // 思考不足 3 秒就不报具体秒数，标题直接说「思考了一会」：一两秒的思考显示成
-  // 「1.2s」像在比拼耗时，读者只会盯住那个数字，而它想表达的其实是"没过脑子"。
-  const briefThink =
-    !active && durationS != null && durationS > 0 && durationS < 3;
-
   // 流式思考（active）时 body 受 max-h 限高 + 滚轮，增量内容要把视图钉到底部，
   // 否则用户只能看到最开头的旧文本、看不到模型正在写的最新思考。
   // 但**只在视图本来就在底部时**跟：这个 body 自己有滚动条，用户上翻去读前面
@@ -144,7 +162,7 @@ export const ThinkingFold = React.memo(function ThinkingFold({
   }, []);
 
   return (
-    <div className="group/think my-1 rounded-md">
+    <div className="group/think rounded-md">
       {/* 用受控 div 替代原生 <details>：WebKit/Chromium 里 <details> 包裹
           overflow:auto 子元素时存在高度计算循环依赖，内部滚动条不出现、内容被
           直接裁断（"截断无滚轮"）。这里用普通 div + inline maxHeight 限高，
@@ -155,22 +173,20 @@ export const ThinkingFold = React.memo(function ThinkingFold({
       >
         <ThinkGlyph active={active} />
         {/* 状态标题只在 active（这段思考还在跑）时才有意义：结束的思考必须回到
-            「思考 / 思考了一会」，否则转录中间会挂着一排假的「思考中」。 */}
+            「思考」，否则转录中间会挂着一排假的「思考中」。 */}
         <span
           className={`select-none ${
             active
               ? "text-foreground/60 font-medium"
               : "text-foreground/40 font-normal"
           }`}
-          style={{ fontSize: fontSize + 2 }}
+          style={{ fontSize }}
         >
           {active && kaomojiStatus
             ? `思考中 ${kaomojiStatus}`
             : active
               ? "思考中"
-              : briefThink
-                ? "思考了一会"
-                : "思考"}
+              : "思考"}
         </span>
         {active && summary && (
           <span
@@ -184,7 +200,7 @@ export const ThinkingFold = React.memo(function ThinkingFold({
             的计时常驻 —— 「正在思考多久」是实时进度，藏起来就等于没有；定格后
             归入历史数字，默认不显示、指针移到这一行才出现（opacity 而非移除，
             位置留着免得悬停时抖动）。 */}
-        {durationS != null && durationS > 0 && !briefThink && (
+        {durationS != null && durationS > 0 && (
           <span
             className={`ml-auto tabular-nums shrink-0 transition-opacity ${
               active
@@ -287,6 +303,20 @@ function openSubAgentForStep(step: ExecutionStep): void {
 // 完成态工具流折叠：整轮 N 个工具调用收成一行「N 个操作 · 动词统计」。
 // 子代理执行（Agent / delegate_task…）不并入动词统计——每次子代理执行
 // 提升为常显的独立行，摘要行只统计普通工具。
+/** 工具类目 → 行级图标（lucide）；类目认不出来时用工匠扳手兜底。 */
+const VERB_ICONS: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
+  终端: SquareTerminal,
+  编辑: SquarePen,
+  查阅: Search,
+  浏览器: Globe,
+  子代理: Bot,
+  任务: ListTodo,
+  工作流: Workflow,
+  技能: Zap,
+  记忆: Brain,
+  视觉: Eye,
+};
+
 export const ToolStreamFold = React.memo(function ToolStreamFold({
   blocks,
   fontSize,
@@ -397,6 +427,8 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
     return <>{children}</>;
   }
   const summary = formatMergedSummary(names) || `${total} 个操作`;
+  // 行级图标取组内主要类目（出现最多的动词）；混合组里少数类目不单独换图标。
+  const LineIcon = VERB_ICONS[primaryToolVerb(names)] ?? Wrench;
   // 失败数缀在摘要句子尾巴上（「终端 · 1 命令，失败 1」），而不是右端一个孤立 ✕
   // 徽章：这一行已经把「跑了什么、成败如何」一次说完；右边只留变更行号与总耗时
   // ——那里是计量信息，不是叙述。
@@ -429,6 +461,7 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
     ) : null;
   const labelRow = (
     <summary className="group/tfold cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
+      <LineIcon size={fontSize + 2} className="shrink-0 text-foreground/40" />
       <span
         className="text-foreground/40 font-normal select-none truncate"
         style={{ fontSize }}
@@ -454,23 +487,230 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
   );
 });
 
+/**
+ * 过程分节列表（流式 / 完成态两条渲染路径共用同一渲染器，像素级一致）：
+ * 按「正文段落」分节——每个 text 段落是节标题（不缩进），其后的思考/工具行
+ * 归属这段落；首段正文之前（前言）无标题。全部过程行（含前言）左竖线
+ * 缩进；每段思考独立一行，不合并；每节的过程行再包一层「中间步骤」
+ * 折叠行（本节步骤运行中展开、本节最后一步做完自动收起，不等整轮结束）。节间行距交给 space-y-3 一把尺子。
+ */
+export const ProcessSectionList = React.memo(function ProcessSectionList({
+  sections,
+  fontSize,
+  isStreaming = false,
+  isRunning = false,
+  thinkingActiveNow = false,
+  lastThinkingBlock = null,
+  searchOpen = false,
+  searchQuery = "",
+  isSearchActive = false,
+}: {
+  sections: ProcessSection<StreamingResponseBlock>[];
+  fontSize: number;
+  isStreaming?: boolean;
+  /** 透传 ToolStreamFold / InlineToolGroup（完成态传 false）。 */
+  isRunning?: boolean;
+  thinkingActiveNow?: boolean;
+  /** 整条消息最后一个 thinking 块——「思考中」脉冲只给持有它的那一行。 */
+  lastThinkingBlock: StreamingResponseBlock | null;
+  searchOpen?: boolean;
+  searchQuery?: string;
+  isSearchActive?: boolean;
+}) {
+  if (sections.length === 0) return null;
+  return (
+    <div className="space-y-3">
+      {sections.map((sec, si) => {
+        // 本节的「运行中」：整轮在流式，且节内还有没做完的动作——
+        // 工具步骤未收尾（startedAt 有、finishedAt 无），或整条消息正在流的
+        // 思考块落在这个节里。判定只看**本节自己的步骤**：本节最后一步做完
+        // 就自动收起，不等整个任务结束；后面模型再想/再跑会进入新的节。
+        const secRunning =
+          isStreaming &&
+          sec.items.some((item) =>
+            item.blocks.some(
+              (b) =>
+                (b.type === "tool_group" &&
+                  (b.steps ?? []).some(
+                    (s) =>
+                      s.type === "tool_call" &&
+                      s.startedAt != null &&
+                      s.finishedAt == null,
+                  )) ||
+                (b.type === "thinking" &&
+                  thinkingActiveNow &&
+                  b === lastThinkingBlock),
+            ),
+          );
+        const body =
+          sec.items.length > 0 ? (
+            <div className="ml-1 pl-3 border-l-[3px] border-foreground/25 space-y-3">
+              {sec.items.map((item, ii) => {
+                // 思考段：独立一行（不合并），脉冲跟随「整条消息最新的
+                // 思考是不是这一段」（与流式视图同一口径）。
+                if (item.kind === "thinking") {
+                  const segContent = mergeThinkingContents(
+                    item.blocks.map((b) =>
+                      b.type === "thinking" ? String(b.content || "") : "",
+                    ),
+                  );
+                  if (!segContent.trim()) return null;
+                  const isLastThinking =
+                    lastThinkingBlock != null &&
+                    item.blocks.includes(lastThinkingBlock);
+                  return (
+                    <ThinkingFold
+                      key={ii}
+                      content={segContent}
+                      fontSize={fontSize}
+                      active={
+                        isStreaming && thinkingActiveNow && isLastThinking
+                      }
+                      streaming={isStreaming && isLastThinking}
+                      durationS={thinkingSegmentDurationS(item.blocks)}
+                    />
+                  );
+                }
+                const blocks = item.blocks;
+                const toolBlocks = blocks.filter((b) => b.type === "tool_group");
+                const otherBlocks = blocks.filter(
+                  (b) => b.type !== "tool_group" && b.type !== "thinking",
+                );
+                return (
+                  <div key={ii} className="space-y-3">
+                    {otherBlocks.map((b, i) => {
+                      if (b.type === "text") {
+                        return (
+                          <div key={i} style={{ fontSize }}>
+                            {searchOpen && searchQuery.trim() ? (
+                              <div
+                                className="whitespace-pre-wrap break-words"
+                                style={{ fontSize }}
+                              >
+                                <Highlighted
+                                  text={normalizeAcpContentRaw(b.content)}
+                                  query={searchQuery}
+                                  active={isSearchActive}
+                                />
+                              </div>
+                            ) : (
+                              <HelixMarkdown
+                                text={normalizeAcpContentRaw(b.content)}
+                              />
+                            )}
+                          </div>
+                        );
+                      }
+                      if (b.type === "file_change") {
+                        return <FileChangeSummary key={i} changes={b.changes} />;
+                      }
+                      return null;
+                    })}
+                    {toolBlocks.length > 0 && (
+                      <ToolStreamFold
+                        blocks={toolBlocks}
+                        fontSize={fontSize}
+                        isRunning={isRunning}
+                      >
+                        {toolBlocks
+                          .filter(
+                            (tb) =>
+                              !(tb.steps ?? []).every(
+                                (s) =>
+                                  s.type !== "tool_call" ||
+                                  isSubAgentTool(s.toolName),
+                              ),
+                          )
+                          .map((tb, tbi) => (
+                            <InlineToolGroup
+                              key={tbi}
+                              steps={tb.steps}
+                              isRunning={isRunning}
+                              fontSize={fontSize}
+                            />
+                          ))}
+                      </ToolStreamFold>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )
+          : null;
+        return (
+          <div key={si} className="space-y-3">
+            {sec.header && sec.header.type === "text" && (
+              <div style={{ fontSize }}>
+                {searchOpen && searchQuery.trim() ? (
+                  <div
+                    className="whitespace-pre-wrap break-words"
+                    style={{ fontSize }}
+                  >
+                    <Highlighted
+                      text={normalizeAcpContentRaw(sec.header.content)}
+                      query={searchQuery}
+                      active={isSearchActive}
+                    />
+                  </div>
+                ) : (
+                  <HelixMarkdown
+                    text={normalizeAcpContentRaw(sec.header.content)}
+                  />
+                )}
+              </div>
+            )}
+            {/* 每节的过程行（思考/工具）都包一层「中间步骤」折叠行：
+                本节步骤运行中展开、本节最后一步做完自动收起（不等整个任务），
+                中途用户可自由开合。有正文的节 = 正文 + 折叠行；无正文的节
+                只有折叠行。 */}
+            {sec.items.length > 0 && (
+              <ProcessFold
+                streaming={secRunning}
+                summary={
+                  <FoldTitle
+                    label="中间步骤"
+                    active={secRunning}
+                    fontSize={fontSize}
+                    delta={1}
+                    icon={<span className="leading-none">✦</span>}
+                  />
+                }
+              >
+                {body}
+              </ProcessFold>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
 export const FoldTitle = ({
   label,
   active,
   fontSize,
+  delta = 2,
+  icon,
 }: {
   label: string;
   active?: boolean;
   fontSize: number;
+  /** 相对正文的字号增量：消息级「已完成」= +2，节级「中间步骤」= +1。
+   *  思考/工具行为字号 0，三级从大到小。 */
+  delta?: number;
+  /** 可选前置图标（currentColor，颜色随 active 态自动走）。 */
+  icon?: React.ReactNode;
 }) => (
   <span
-    className={`select-none ${
+    className={`inline-flex items-center gap-1 select-none ${
       active
         ? "text-foreground/60 font-medium"
         : "text-foreground/40 font-normal"
     }`}
-    style={{ fontSize: fontSize + 2 }}
+    style={{ fontSize: fontSize + delta }}
   >
+    {icon}
     {label}
   </span>
 );
@@ -488,18 +728,23 @@ export const ProcessFold = ({
   streaming,
   summary,
   children,
+  autoExpand = true,
 }: {
   streaming: boolean;
   summary: React.ReactNode;
   children: React.ReactNode;
+  /** true（缺省）：流式开始展开、跑完自动收起（消息级「已完成」卡）；
+   *  false：默认折叠、不随流式边沿开合，用户点标题才展开（节级「中间步骤」）。 */
+  autoExpand?: boolean;
 }) => {
-  const [open, setOpen] = useState(streaming);
+  const [open, setOpen] = useState(autoExpand ? streaming : false);
   const wasStreaming = useRef(streaming);
   useEffect(() => {
+    if (!autoExpand) return;
     if (wasStreaming.current === streaming) return;
     wasStreaming.current = streaming;
     setOpen(streaming);
-  }, [streaming]);
+  }, [streaming, autoExpand]);
   return (
     <details
       // 行距交给最近的 space-y 容器统一（与消息间的 space-y-3 同值）；
@@ -742,6 +987,17 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                 const lastProcessBlock =
                   processBlocks[processBlocks.length - 1];
                 const thinkingActiveNow = lastProcessBlock?.type === "thinking";
+
+                // 分节：正文段落=节标题（groupProcessSections）。「思考中」
+                // 脉冲依据=整条消息最后一个 thinking 块（过程卡与尾段共用，防
+                // 尾段在思考时卡内旧思考冒充「思考中」）。
+                let lastThinkingBlock: StreamingResponseBlock | null = null;
+                for (const seg of allSegments) {
+                  if (seg.kind === "thinking")
+                    lastThinkingBlock = seg.blocks[0];
+                }
+                const processSections = groupProcessSections(processSegments);
+                const trailingSections = groupProcessSections(trailingSegments);
                 // 本轮总耗时：运行中由流式区顶部的「工作中 Ns」实时显示，完成后
                 // 这张卡不再常驻数字（一排历史轮次各挂一个耗时只是噪声），鼠标
                 // 移到卡上时才浮现。
@@ -782,121 +1038,17 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                               durationS={msg.thinkingTime}
                             />
                           )}
-                          <div className="space-y-3">
-                            {processSegments.map((seg, si) => {
-                              // 交替段渲染：思考段一张 ThinkingFold，工具段平铺
-                              // 工具卡，文本段渲染 markdown——与流式视图
-                              // （agent-flow-panel 的 processSegments.map）同一套
-                              // segmentizeProcessBlocks 语义，落盘后不重排，
-                              // 保住"思考→执行→总结"的行为链。
-                              if (seg.kind === "thinking") {
-                                const segContent = mergeThinkingContents(
-                                  seg.blocks.map((b) =>
-                                    b.type === "thinking"
-                                      ? String(b.content || "")
-                                      : "",
-                                  ),
-                                );
-                                if (!segContent.trim()) return null;
-                                const isLastSeg =
-                                  si === processSegments.length - 1;
-                                // 与流式区同一套：只有"整条消息的最后一块就在这一段里、
-                                // 且它是思考"才脉冲（尾段非空时，最新内容在卡片下方，
-                                // 卡内最后那段旧思考不得冒充「思考中」）。
-                                const isNewestSegment =
-                                  isLastSeg && trailingSegments.length === 0;
-                                return (
-                                  <ThinkingFold
-                                    key={si}
-                                    content={segContent}
-                                    fontSize={fontSize}
-                                    active={
-                                      isStreaming &&
-                                      thinkingActiveNow &&
-                                      isNewestSegment
-                                    }
-                                    streaming={isStreaming && isNewestSegment}
-                                    durationS={thinkingSegmentDurationS(
-                                      seg.blocks,
-                                    )}
-                                  />
-                                );
-                              }
-                              const toolBlocks = seg.blocks.filter(
-                                (b) => b.type === "tool_group",
-                              );
-                              const otherBlocks = seg.blocks.filter(
-                                (b) =>
-                                  b.type !== "tool_group" &&
-                                  b.type !== "thinking",
-                              );
-                              return (
-                                <div key={si} className="space-y-3">
-                                  {otherBlocks.map((b, i) => {
-                                    if (b.type === "text") {
-                                      return (
-                                        <div key={i} style={{ fontSize }}>
-                                          {searchOpen && searchQuery.trim() ? (
-                                            <div
-                                              className="whitespace-pre-wrap break-words"
-                                              style={{ fontSize }}
-                                            >
-                                              <Highlighted
-                                                text={normalizeAcpContentRaw(
-                                                  b.content,
-                                                )}
-                                                query={searchQuery}
-                                                active={isSearchActive}
-                                              />
-                                            </div>
-                                          ) : (
-                                            <HelixMarkdown
-                                              text={normalizeAcpContentRaw(
-                                                b.content,
-                                              )}
-                                            />
-                                          )}
-                                        </div>
-                                      );
-                                    }
-                                    if (b.type === "file_change") {
-                                      return (
-                                        <FileChangeSummary
-                                          key={i}
-                                          changes={b.changes}
-                                        />
-                                      );
-                                    }
-                                    return null;
-                                  })}
-                                  {toolBlocks.length > 0 && (
-                                    <ToolStreamFold
-                                      blocks={toolBlocks}
-                                      fontSize={fontSize}
-                                    >
-                                      {toolBlocks
-                                        .filter(
-                                          (tb) =>
-                                            !(tb.steps ?? []).every(
-                                              (s) =>
-                                                s.type !== "tool_call" ||
-                                                isSubAgentTool(s.toolName),
-                                            ),
-                                        )
-                                        .map((tb, tbi) => (
-                                          <InlineToolGroup
-                                            key={tbi}
-                                            steps={tb.steps}
-                                            isRunning={false}
-                                            fontSize={fontSize}
-                                          />
-                                        ))}
-                                    </ToolStreamFold>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
+                          <ProcessSectionList
+                            sections={processSections}
+                            fontSize={fontSize}
+                            isStreaming={isStreaming}
+                            isRunning={false}
+                            thinkingActiveNow={thinkingActiveNow}
+                            lastThinkingBlock={lastThinkingBlock}
+                            searchOpen={searchOpen}
+                            searchQuery={searchQuery}
+                            isSearchActive={isSearchActive}
+                          />
                         </div>
                       </ProcessFold>
                     )}
@@ -931,116 +1083,22 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                         })}
                       </div>
                     )}
-                    {/* 尾段：按时间序画在「总结」之后，不塞回过程卡。
-                        只有「最后一段文本并不位于末尾」时非空——例如模型先说话、
-                        再调用 ask_user_question 然后本轮停住等回答。塞回卡里会渲染成
-                        "工具在上、文字在下"，与真实顺序相反。 */}
-                    {trailingSegments.map((seg, si) => (
-                      <div key={`trail-${si}`} className="space-y-3">
-                        {seg.kind === "thinking"
-                          ? (() => {
-                              const c = mergeThinkingContents(
-                                seg.blocks.map((b) =>
-                                  b.type === "thinking"
-                                    ? String(b.content || "")
-                                    : "",
-                                ),
-                              );
-                              if (!c.trim()) return null;
-                              // 与流式区同一套：尾段区里只有"最新的那一段 + 此刻
-                              // 真在思考"才脉冲——它才是「思考中」的归属者。
-                              const isLastTrail =
-                                si === trailingSegments.length - 1;
-                              return (
-                                <ThinkingFold
-                                  content={c}
-                                  fontSize={fontSize}
-                                  active={
-                                    isStreaming &&
-                                    thinkingActiveNow &&
-                                    isLastTrail
-                                  }
-                                  streaming={isStreaming && isLastTrail}
-                                  durationS={thinkingSegmentDurationS(
-                                    seg.blocks,
-                                  )}
-                                />
-                              );
-                            })()
-                          : (() => {
-                              const toolBlocks = seg.blocks.filter(
-                                (b) => b.type === "tool_group",
-                              );
-                              const otherBlocks = seg.blocks.filter(
-                                (b) =>
-                                  b.type !== "tool_group" &&
-                                  b.type !== "thinking",
-                              );
-                              return (
-                                <>
-                                  {otherBlocks.map((b, i) => {
-                                    if (b.type === "text") {
-                                      return (
-                                        <div key={i} style={{ fontSize }}>
-                                          {searchOpen && searchQuery.trim() ? (
-                                            <div className="whitespace-pre-wrap break-words">
-                                              <Highlighted
-                                                text={normalizeAcpContentRaw(
-                                                  b.content,
-                                                )}
-                                                query={searchQuery}
-                                                active={isSearchActive}
-                                              />
-                                            </div>
-                                          ) : (
-                                            <HelixMarkdown
-                                              text={normalizeAcpContentRaw(
-                                                b.content,
-                                              )}
-                                            />
-                                          )}
-                                        </div>
-                                      );
-                                    }
-                                    if (b.type === "file_change") {
-                                      return (
-                                        <FileChangeSummary
-                                          key={i}
-                                          changes={b.changes}
-                                        />
-                                      );
-                                    }
-                                    return null;
-                                  })}
-                                  {toolBlocks.length > 0 && (
-                                    <ToolStreamFold
-                                      blocks={toolBlocks}
-                                      fontSize={fontSize}
-                                    >
-                                      {toolBlocks
-                                        .filter(
-                                          (tb) =>
-                                            !(tb.steps ?? []).every(
-                                              (s) =>
-                                                s.type !== "tool_call" ||
-                                                isSubAgentTool(s.toolName),
-                                            ),
-                                        )
-                                        .map((tb, tbi) => (
-                                          <InlineToolGroup
-                                            key={`trail-tb-${tbi}`}
-                                            steps={tb.steps}
-                                            isRunning={false}
-                                            fontSize={fontSize}
-                                          />
-                                        ))}
-                                    </ToolStreamFold>
-                                  )}
-                                </>
-                              );
-                            })()}
-                      </div>
-                    ))}
+                    {/* 尾段：与过程卡同一套分节——最后一段文本作节标题、
+                        其后的过程行左竖线缩进；仍按时间序画在「总结」之后。 */}
+                    {trailingSections.length > 0 && (
+                      <ProcessSectionList
+                        sections={trailingSections}
+                        fontSize={fontSize}
+                        isStreaming={isStreaming}
+                        isRunning={false}
+                        thinkingActiveNow={thinkingActiveNow}
+                        lastThinkingBlock={lastThinkingBlock}
+                        searchOpen={searchOpen}
+                        searchQuery={searchQuery}
+                        isSearchActive={isSearchActive}
+                      />
+                    )}
+
                     {answerBlocks.length > 0 && (
                       <div
                         className="helix-md helix-answer"

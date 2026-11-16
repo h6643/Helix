@@ -860,7 +860,7 @@ interface HelixState
   persistSessionNow: (sessionId: string) => Promise<void>;
 
   // UI
-  editorTheme: "vs-dark" | "light";
+  editorTheme: "system" | "vs-dark" | "light";
   fontFamily: string;
   fontSize: number;
   transcriptFontSize: number;
@@ -926,7 +926,7 @@ interface HelixState
 
   // Actions - UI
   // Panel toggles — see slices/panel-slice.ts
-  setEditorTheme: (theme: "vs-dark" | "light") => void;
+  setEditorTheme: (theme: "system" | "vs-dark" | "light") => void;
   setFontFamily: (font: string) => void;
   setFontSize: (size: number) => void;
   setTranscriptFontSize: (size: number) => void;
@@ -1594,7 +1594,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
   // UI
   // Panel state — in slices/panel-slice.ts
-  editorTheme: "light" as const,
+  editorTheme: "system" as const,
   fontFamily: DEFAULT_CODE_FONT,
   fontSize: 14 as const,
   transcriptFontSize: 16,
@@ -4798,9 +4798,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           get().reasoningEffort,
         availableModels: availableModels || [],
         providerModels: cleanedProviderModels,
+        // 旧版该设置是手动二值（vs-dark / light）；新版默认 "system"（跟随应用
+        // 全局主题）。旧存值一律降级为「跟随」，不让旧设置继续压过全局主题
+        // （编辑器背景要与「更改」面板同一侧）。
         editorTheme:
-          (editorTheme as "vs-dark" | "light" | null | undefined) ??
-          get().editorTheme,
+          editorTheme === "system" ? ("system" as const) : ("system" as const),
         gitAutoCommit: gitAutoCommit ?? get().gitAutoCommit,
         gitAutoPush: gitAutoPush ?? get().gitAutoPush,
         gitPushConfirm: gitPushConfirm ?? get().gitPushConfirm,

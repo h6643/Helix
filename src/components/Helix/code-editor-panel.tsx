@@ -147,6 +147,30 @@ function langFromName(name: string): string {
   return EXT_LANG[ext] || "text";
 }
 
+/** 应用全局主题（documentElement 的 .dark 类，由外观设置切换）。
+ *  MutationObserver 跟随变化，让编辑器背景能跟随全局主题（默认 "system" 态）。 */
+function useAppTheme(): "light" | "dark" {
+  const [mode, setMode] = useState<"light" | "dark">(() =>
+    typeof document !== "undefined" &&
+    document.documentElement.classList.contains("dark")
+      ? "dark"
+      : "light",
+  );
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setMode(
+        document.documentElement.classList.contains("dark") ? "dark" : "light",
+      );
+    });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+    return () => observer.disconnect();
+  }, []);
+  return mode;
+}
+
 export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
   const editorTabs = useHelixStore((s) => s.editorTabs);
   const activeId = useHelixStore((s) => s.activeEditorTabId);
@@ -312,7 +336,16 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
     return ext ? [highlight, revealLineField, ext] : [highlight, revealLineField];
   }, [active]);
 
-  const themeMode = editorTheme === "vs-dark" ? "dark" : "light";
+  const appTheme = useAppTheme();
+  // system（缺省）= 跟随应用全局主题；vs-dark / light = 用户手动覆盖。
+  const themeMode =
+    editorTheme === "vs-dark"
+      ? "dark"
+      : editorTheme === "light"
+        ? "light"
+        : appTheme === "dark"
+          ? "dark"
+          : "light";
 
   if (!active) {
     return (

@@ -53,7 +53,6 @@ import { FileChangeSummary } from "./file-change-summary";
 import { FileChangeSummaryCard } from "./file-change-summary-card";
 import { HelixMarkdown } from "./helix-markdown";
 import { HistoryStrip } from "./history-strip";
-import { InlineToolGroup } from "./inline-tool-group";
 import { ScheduledTaskConfirm } from "./scheduled-task-confirm";
 import {
   BUILTIN_SLASH_COMMANDS,
@@ -64,19 +63,18 @@ import {
 import {
   TranscriptMessage,
   ThinkingFold,
-  ToolStreamFold,
   FoldTitle,
   HighlightText,
   ProcessFold,
   ProcessWindow,
+  ProcessSectionList,
 } from "./transcript-message";
 import {
   mergeAdjacentThinking,
   segmentizeProcessBlocks,
   mergeToolRuns,
+  groupProcessSections,
   normalizeTextBlocks,
-  thinkingSegmentDurationS,
-  mergeThinkingContents,
   countOccurrences,
   normalizeForCompare,
   textSimilarityRatio,
@@ -163,7 +161,6 @@ import {
 } from "@/lib/text-utils";
 
 import { getToolDisplayLabel } from "@/lib/tool-display-utils";
-import { isSubAgentTool } from "@/lib/tool-merge";
 import { useGatewayStore } from "@/stores/gateway-store";
 import {
   useHelixStore,
@@ -11003,6 +11000,15 @@ function AgentFlowPanelImpl() {
                           processBlocks[processBlocks.length - 1];
                         const thinkingActiveNow =
                           lastProcessBlock?.type === "thinking";
+
+                        // 分节：与完成态（transcript-message）同一组函数。
+                        let lastThinkingBlock: StreamingResponseBlock | null = null;
+                        for (const seg of allSegments) {
+                          if (seg.kind === "thinking")
+                            lastThinkingBlock = seg.blocks[0];
+                        }
+                        const processSections = groupProcessSections(processSegments);
+                        const trailingSections = groupProcessSections(trailingSegments);
                         // 与完成态（transcript-message）同一结构：折叠卡、总结
                         // 段、尾段、思考行全部收进同一个 space-y-3 节奏容器，
                         // 行距只有一把尺子；流式与完成态像素级一致。
@@ -11033,145 +11039,17 @@ function AgentFlowPanelImpl() {
                                 active={streamingActive}
                                 dependency={displayResponseBlocks}
                               >
-                                <div className="space-y-3">
-                                {processSegments.map((seg, si) => {
-                                  // 交替段渲染：思考段一张 ThinkingFold，工具段
-                                  // 平铺工具卡，文本段渲染 markdown。
-                                  // 最后一段若正在思考则脉冲跟随。
-                                  if (seg.kind === "thinking") {
-                                    const segContent = mergeThinkingContents(
-                                      seg.blocks.map((b) =>
-                                        b.type === "thinking"
-                                          ? String(b.content || "")
-                                          : "",
-                                      ),
-                                    );
-                                    if (!segContent.trim()) return null;
-                                    const isLastSeg =
-                                      si === processSegments.length - 1;
-                                    // 只有"**整条消息的最后一块**就在这一段里、且它是
-                                    // 思考"时才脉冲。少了 `trailingSegments.length === 0`
-                                    // 这个条件时：「思考 → 正文 → 工具 → 又一段思考」这种
-                                    // 轮次里，卡片内最后那段**旧**思考会一直脉冲「思考中」，
-                                    // 而真正在思考的那一段（排在卡片下方的尾段区）反而显示
-                                    // 成「思考」——用户看到的就是「思考中 在上面、思考 在
-                                    // 下面」。脉冲必须跟着最新内容走。
-                                    const isNewestSegment =
-                                      isLastSeg &&
-                                      trailingSegments.length === 0;
-                                    return (
-                                      <ThinkingFold
-                                        key={si}
-                                        content={segContent}
-                                        fontSize={transcriptFontSize}
-                                        active={
-                                          streamingActive &&
-                                          thinkingActiveNow &&
-                                          isNewestSegment
-                                        }
-                                        streaming={
-                                          streamingActive && isNewestSegment
-                                        }
-                                        durationS={thinkingSegmentDurationS(
-                                          seg.blocks,
-                                        )}
-                                      />
-                                    );
-                                  }
-                                  return (
-                                    <div key={si} className="space-y-3">
-                                      {(() => {
-                                        // 整段工具收成一个折叠行（与完成态同款），避免
-                                        // 流式过程区里多条工具逐条平铺刷屏。展开才看各工具卡。
-                                        const toolBlocks = seg.blocks.filter(
-                                          (b) => b.type === "tool_group",
-                                        );
-                                        return (
-                                          <>
-                                            {seg.blocks
-                                              .filter(
-                                                (b) => b.type !== "tool_group",
-                                              )
-                                              .map((b, i) => {
-                                                if (b.type === "text") {
-                                                  return (
-                                                    <div
-                                                      key={i}
-                                                      style={{
-                                                        fontSize:
-                                                          transcriptFontSize,
-                                                      }}
-                                                    >
-                                                      {conversationSearchOpen &&
-                                                      conversationSearchQuery.trim() ? (
-                                                        <div className="whitespace-pre-wrap break-words">
-                                                          <HighlightText
-                                                            text={normalizeAcpContentRaw(
-                                                              b.content,
-                                                            )}
-                                                            query={
-                                                              conversationSearchQuery
-                                                            }
-                                                            active={false}
-                                                          />
-                                                        </div>
-                                                      ) : (
-                                                        <HelixMarkdown
-                                                          text={normalizeAcpContentRaw(
-                                                            b.content,
-                                                          )}
-                                                        />
-                                                      )}
-                                                    </div>
-                                                  );
-                                                }
-                                                if (b.type === "file_change") {
-                                                  return (
-                                                    <FileChangeSummary
-                                                      key={i}
-                                                      changes={b.changes}
-                                                    />
-                                                  );
-                                                }
-                                                return null;
-                                              })}
-                                            {toolBlocks.length > 0 && (
-                                              <ToolStreamFold
-                                                blocks={toolBlocks}
-                                                fontSize={transcriptFontSize}
-                                                isRunning={isRunning}
-                                              >
-                                                {toolBlocks
-                                                  .filter(
-                                                    (tb) =>
-                                                      !(tb.steps ?? []).every(
-                                                        (s) =>
-                                                          s.type !==
-                                                            "tool_call" ||
-                                                          isSubAgentTool(
-                                                            s.toolName,
-                                                          ),
-                                                      ),
-                                                  )
-                                                  .map((tb, tbi) => (
-                                                    <InlineToolGroup
-                                                      key={`tb-${tbi}`}
-                                                      steps={tb.steps}
-                                                      isRunning={isRunning}
-                                                      fontSize={
-                                                        transcriptFontSize
-                                                      }
-                                                    />
-                                                  ))}
-                                              </ToolStreamFold>
-                                            )}
-                                          </>
-                                        );
-                                      })()}
-                                    </div>
-                                  );
-                                })}
-                                </div>
+                                <ProcessSectionList
+                                  sections={processSections}
+                                  fontSize={transcriptFontSize}
+                                  isStreaming={streamingActive}
+                                  isRunning={isRunning}
+                                  thinkingActiveNow={thinkingActiveNow}
+                                  lastThinkingBlock={lastThinkingBlock}
+                                  searchOpen={conversationSearchOpen}
+                                  searchQuery={conversationSearchQuery}
+                                  isSearchActive={false}
+                                />
                               </ProcessWindow>
                             </ProcessFold>
                             {summarySegment && (
@@ -11215,137 +11093,21 @@ function AgentFlowPanelImpl() {
                                 })}
                               </div>
                             )}
-                              {/* 尾段：按时间序画在「总结」之后，不塞回过程卡。
-                                  只有「最后一段文本并不位于末尾」时非空——例如模型先
-                                  说话、再调用 ask_user_question 然后本轮停住等回答。
-                                  塞回卡里会渲染成"工具在上、文字在下"，与真实顺序相反。 */}
-                              {trailingSegments.map((seg, si) => (
-                                <div
-                                  key={`trail-${si}`}
-                                  className="space-y-3"
-                                >
-                                  {seg.kind === "thinking"
-                                    ? (() => {
-                                        const c = mergeThinkingContents(
-                                          seg.blocks.map((b) =>
-                                            b.type === "thinking"
-                                              ? String(b.content || "")
-                                              : "",
-                                          ),
-                                        );
-                                        if (!c.trim()) return null;
-                                        // 尾段区里的思考：只有当它是**整条消息最新的
-                                        // 那一段**（最后一段尾段）且此刻真的在思考时才
-                                        // 脉冲——它才是「思考中」的归属者（卡片内那段
-                                        // 旧思考的脉冲已在上面被排除）。
-                                        const isLastTrail =
-                                          si === trailingSegments.length - 1;
-                                        return (
-                                          <ThinkingFold
-                                            content={c}
-                                            fontSize={transcriptFontSize}
-                                            active={
-                                              streamingActive &&
-                                              thinkingActiveNow &&
-                                              isLastTrail
-                                            }
-                                            streaming={
-                                              streamingActive && isLastTrail
-                                            }
-                                            durationS={thinkingSegmentDurationS(
-                                              seg.blocks,
-                                            )}
-                                          />
-                                        );
-                                      })()
-                                    : (() => {
-                                        const toolBlocks = seg.blocks.filter(
-                                          (b) => b.type === "tool_group",
-                                        );
-                                        return (
-                                          <>
-                                            {seg.blocks
-                                              .filter(
-                                                (b) => b.type !== "tool_group",
-                                              )
-                                              .map((b, i) => {
-                                                if (b.type === "text") {
-                                                  return (
-                                                    <div
-                                                      key={i}
-                                                      style={{
-                                                        fontSize:
-                                                          transcriptFontSize,
-                                                      }}
-                                                    >
-                                                      {conversationSearchOpen &&
-                                                      conversationSearchQuery.trim() ? (
-                                                        <div className="whitespace-pre-wrap break-words">
-                                                          <HighlightText
-                                                            text={normalizeAcpContentRaw(
-                                                              b.content,
-                                                            )}
-                                                            query={
-                                                              conversationSearchQuery
-                                                            }
-                                                            active={false}
-                                                          />
-                                                        </div>
-                                                      ) : (
-                                                        <HelixMarkdown
-                                                          text={normalizeAcpContentRaw(
-                                                            b.content,
-                                                          )}
-                                                        />
-                                                      )}
-                                                    </div>
-                                                  );
-                                                }
-                                                if (b.type === "file_change") {
-                                                  return (
-                                                    <FileChangeSummary
-                                                      key={i}
-                                                      changes={b.changes}
-                                                    />
-                                                  );
-                                                }
-                                                return null;
-                                              })}
-                                            {toolBlocks.length > 0 && (
-                                              <ToolStreamFold
-                                                blocks={toolBlocks}
-                                                fontSize={transcriptFontSize}
-                                                isRunning={isRunning}
-                                              >
-                                                {toolBlocks
-                                                  .filter(
-                                                    (tb) =>
-                                                      !(tb.steps ?? []).every(
-                                                        (s) =>
-                                                          s.type !==
-                                                            "tool_call" ||
-                                                          isSubAgentTool(
-                                                            s.toolName,
-                                                          ),
-                                                      ),
-                                                  )
-                                                  .map((tb, tbi) => (
-                                                    <InlineToolGroup
-                                                      key={`trail-tb-${tbi}`}
-                                                      steps={tb.steps}
-                                                      isRunning={isRunning}
-                                                      fontSize={
-                                                        transcriptFontSize
-                                                      }
-                                                    />
-                                                  ))}
-                                              </ToolStreamFold>
-                                            )}
-                                          </>
-                                        );
-                                      })()}
-                                </div>
-                              ))}
+                              {/* 尾段：与过程卡同一套分节。 */}
+                              {trailingSections.length > 0 && (
+                                <ProcessSectionList
+                                  sections={trailingSections}
+                                  fontSize={transcriptFontSize}
+                                  isStreaming={streamingActive}
+                                  isRunning={isRunning}
+                                  thinkingActiveNow={thinkingActiveNow}
+                                  lastThinkingBlock={lastThinkingBlock}
+                                  searchOpen={conversationSearchOpen}
+                                  searchQuery={conversationSearchQuery}
+                                  isSearchActive={false}
+                                />
+                              )}
+
                               {showStreamThinking && (
                                 <ThinkingFold
                                   content={thinkingBody}

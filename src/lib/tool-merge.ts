@@ -33,7 +33,7 @@ const TOOL_STEP_RULES: Array<{ test: RegExp; verb: string; kind: string }> = [
   { test: /list_directory|list_files|list|dir/i, verb: "查阅", kind: "列表" },
   { test: /read|view/i, verb: "查阅", kind: "文件" },
   { test: /write|create|artifact/i, verb: "编辑", kind: "写入" },
-  { test: /edit|patch|modify|replace/i, verb: "编辑", kind: "编辑" },
+  { test: /edit|patch|modify|replace/i, verb: "编辑", kind: "文件" },
   { test: /bash|terminal|shell|run_|execute|command|cmd/i, verb: "终端", kind: "命令" },
 ];
 
@@ -82,6 +82,27 @@ function mergeToolGroups(
       ([kind, count]) => ({ kind, count }),
     ),
   }));
+}
+
+/** 一组工具名的主要动词（出现次数最多，平手取先出现）——过程行行级图标用。 */
+export function primaryToolVerb(toolNames: string[]): string {
+  const counts = new Map<string, number>();
+  const order: string[] = [];
+  for (const name of toolNames) {
+    const v = classifyTool(name).verb;
+    if (!counts.has(v)) order.push(v);
+    counts.set(v, (counts.get(v) ?? 0) + 1);
+  }
+  let best = "";
+  let bestN = -1;
+  for (const v of order) {
+    const n = counts.get(v) ?? 0;
+    if (n > bestN) {
+      best = v;
+      bestN = n;
+    }
+  }
+  return best;
 }
 
 // 单行摘要（图2 风格）：`查阅 · 3 搜索, 2 文件`；多组用 `; ` 连接。
